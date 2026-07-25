@@ -23,4 +23,11 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
+    // e2e/ belongs to Playwright; vitest owns src/ only.
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+  },
 }));
