@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useRecording } from "./useRecording";
 import { audioApi } from "../api";
 import { RecordingPhase } from "../types";
+import { resetRecordingStore } from "../stores/recordingStore";
 
 vi.mock("../api", () => ({
   audioApi: {
@@ -50,6 +51,9 @@ const dualResult = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // State now lives in a module-level zustand store, so it must be reset
+  // between tests or it leaks from one case into the next.
+  resetRecordingStore();
   // The hook checks recording status once on mount.
   api.getRecordingStatus.mockResolvedValue(false);
   api.getAudioLevel.mockResolvedValue(0);

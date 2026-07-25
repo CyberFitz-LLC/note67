@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { audioApi } from "../api";
 import { RecordingPhase } from "../types";
+import { useRecordingStore } from "../stores/recordingStore";
+import type { RecordingMode } from "../stores/recordingStore";
 
-export type RecordingMode = "idle" | "dual" | "mic-only" | "system-only";
+export type { RecordingMode };
 
 interface UseRecordingReturn {
   isRecording: boolean;
@@ -36,60 +38,69 @@ async function detectInputs(): Promise<{ micOk: boolean; systemOk: boolean }> {
   };
 }
 
+/**
+ * Owns recording: the actions plus the audio-level polling effect.
+ *
+ * State lives in `useRecordingStore` so components can read it without prop
+ * drilling. Call this hook in exactly **one** place (App) — it is the single
+ * writer, and mounting it twice would start the polling interval twice.
+ * Read-only consumers should subscribe to the store instead.
+ */
 export function useRecording(): UseRecordingReturn {
-  const [isRecording, setIsRecording] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
-  const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>(
-    RecordingPhase.Idle
-  );
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [audioPath, setAudioPath] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [recordingMode, setRecordingMode] = useState<RecordingMode>("idle");
+  const isRecording = useRecordingStore((s) => s.isRecording);
+  const isPaused = useRecordingStore((s) => s.isPaused);
+  const recordingPhase = useRecordingStore((s) => s.recordingPhase);
+  const audioLevel = useRecordingStore((s) => s.audioLevel);
+  const audioPath = useRecordingStore((s) => s.audioPath);
+  const error = useRecordingStore((s) => s.error);
+  const recordingMode = useRecordingStore((s) => s.recordingMode);
+  const patch = useRecordingStore((s) => s.patch);
+
   const levelIntervalRef = useRef<number | null>(null);
   const currentNoteIdRef = useRef<string | null>(null);
 
-  const startRecording = useCallback(async (noteId: string) => {
-    try {
-      setError(null);
-      currentNoteIdRef.current = noteId;
+  const startRecording = useCallback(
+    async (noteId: string) => {
+      try {
+        patch({ error: null });
+        currentNoteIdRef.current = noteId;
 
-      const { micOk, systemOk } = await detectInputs();
+        const { micOk, systemOk } = await detectInputs();
 
-      if (micOk && systemOk) {
-        console.log("Starting dual recording (mic + system audio)");
-        const result = await audioApi.startDualRecordingWithSegments(noteId);
-        setAudioPath(
-          result.playbackPath || result.systemPath || result.micPath
-        );
-        setRecordingMode("dual");
-      } else if (micOk) {
-        console.log("Starting mic-only recording");
-        const path = await audioApi.startRecording(noteId);
-        setAudioPath(path);
-        setRecordingMode("mic-only");
-      } else if (systemOk) {
-        console.log("Starting listen-only recording (system audio only)");
-        const result = await audioApi.startSystemOnlyRecordingWithSegments(
-          noteId
-        );
-        setAudioPath(result.systemPath);
-        setRecordingMode("system-only");
-      } else {
-        throw new Error(
-          "No audio input available. Grant microphone or system audio permission to record."
-        );
+        if (micOk && systemOk) {
+          console.log("Starting dual recording (mic + system audio)");
+          const result = await audioApi.startDualRecordingWithSegments(noteId);
+          patch({
+            audioPath: result.playbackPath || result.systemPath || result.micPath,
+            recordingMode: "dual",
+          });
+        } else if (micOk) {
+          console.log("Starting mic-only recording");
+          const path = await audioApi.startRecording(noteId);
+          patch({ audioPath: path, recordingMode: "mic-only" });
+        } else if (systemOk) {
+          console.log("Starting listen-only recording (system audio only)");
+          const result = await audioApi.startSystemOnlyRecordingWithSegments(
+            noteId
+          );
+          patch({ audioPath: result.systemPath, recordingMode: "system-only" });
+        } else {
+          throw new Error(
+            "No audio input available. Grant microphone or system audio permission to record."
+          );
+        }
+        patch({ isRecording: true });
+      } catch (e) {
+        patch({ error: e instanceof Error ? e.message : String(e) });
       }
-      setIsRecording(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+    },
+    [patch]
+  );
 
   const stopRecording = useCallback(
     async (noteId?: string): Promise<string | null> => {
       try {
-        setError(null);
+        patch({ error: null });
         const id = noteId || currentNoteIdRef.current;
 
         let path: string | null = null;
@@ -107,25 +118,27 @@ export function useRecording(): UseRecordingReturn {
           path = await audioApi.stopRecording();
         }
 
-        setAudioPath(path);
-        setIsRecording(false);
-        setIsPaused(false);
-        setRecordingPhase(RecordingPhase.Idle);
-        setRecordingMode("idle");
-        setAudioLevel(0);
+        patch({
+          audioPath: path,
+          isRecording: false,
+          isPaused: false,
+          recordingPhase: RecordingPhase.Idle,
+          recordingMode: "idle",
+          audioLevel: 0,
+        });
         currentNoteIdRef.current = null;
         return path;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        patch({ error: e instanceof Error ? e.message : String(e) });
         return null;
       }
     },
-    [recordingMode]
+    [recordingMode, patch]
   );
 
   const pauseRecording = useCallback(async () => {
     try {
-      setError(null);
+      patch({ error: null });
       if (recordingMode === "system-only") {
         console.log("Pausing listen-only recording");
         await audioApi.pauseSystemOnlyRecording();
@@ -133,81 +146,91 @@ export function useRecording(): UseRecordingReturn {
         console.log("Pausing dual recording");
         await audioApi.pauseDualRecording();
       }
-      setIsRecording(false);
-      setIsPaused(true);
-      setRecordingPhase(RecordingPhase.Paused);
-      setAudioLevel(0);
+      patch({
+        isRecording: false,
+        isPaused: true,
+        recordingPhase: RecordingPhase.Paused,
+        audioLevel: 0,
+      });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      patch({ error: e instanceof Error ? e.message : String(e) });
     }
-  }, [recordingMode]);
+  }, [recordingMode, patch]);
 
   const resumeRecording = useCallback(
     async (noteId: string) => {
       try {
-        setError(null);
+        patch({ error: null });
         if (recordingMode === "system-only") {
           console.log("Resuming listen-only recording");
           const result = await audioApi.resumeSystemOnlyRecording(noteId);
-          setAudioPath(result.systemPath);
+          patch({ audioPath: result.systemPath });
         } else {
           console.log("Resuming dual recording");
           const result = await audioApi.resumeDualRecording(noteId);
-          setAudioPath(
-            result.playbackPath || result.systemPath || result.micPath
-          );
-          setRecordingMode(result.systemPath !== null ? "dual" : "mic-only");
+          patch({
+            audioPath:
+              result.playbackPath || result.systemPath || result.micPath,
+            recordingMode: result.systemPath !== null ? "dual" : "mic-only",
+          });
         }
-        setIsRecording(true);
-        setIsPaused(false);
-        setRecordingPhase(RecordingPhase.Recording);
+        patch({
+          isRecording: true,
+          isPaused: false,
+          recordingPhase: RecordingPhase.Recording,
+        });
         currentNoteIdRef.current = noteId;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        patch({ error: e instanceof Error ? e.message : String(e) });
       }
     },
-    [recordingMode]
+    [recordingMode, patch]
   );
 
-  const continueRecording = useCallback(async (noteId: string) => {
-    try {
-      setError(null);
-      const { micOk, systemOk } = await detectInputs();
+  const continueRecording = useCallback(
+    async (noteId: string) => {
+      try {
+        patch({ error: null });
+        const { micOk, systemOk } = await detectInputs();
 
-      if (!micOk && systemOk) {
-        console.log("Continuing in listen-only mode (mic unavailable)");
-        const result = await audioApi.startSystemOnlyRecordingWithSegments(
-          noteId
-        );
-        setAudioPath(result.systemPath);
-        setRecordingMode("system-only");
-      } else if (micOk) {
-        console.log("Continuing recording on ended note");
-        const result = await audioApi.continueNoteRecording(noteId);
-        setAudioPath(
-          result.playbackPath || result.systemPath || result.micPath
-        );
-        setRecordingMode(result.systemPath !== null ? "dual" : "mic-only");
-      } else {
-        throw new Error(
-          "No audio input available. Grant microphone or system audio permission to record."
-        );
+        if (!micOk && systemOk) {
+          console.log("Continuing in listen-only mode (mic unavailable)");
+          const result = await audioApi.startSystemOnlyRecordingWithSegments(
+            noteId
+          );
+          patch({ audioPath: result.systemPath, recordingMode: "system-only" });
+        } else if (micOk) {
+          console.log("Continuing recording on ended note");
+          const result = await audioApi.continueNoteRecording(noteId);
+          patch({
+            audioPath:
+              result.playbackPath || result.systemPath || result.micPath,
+            recordingMode: result.systemPath !== null ? "dual" : "mic-only",
+          });
+        } else {
+          throw new Error(
+            "No audio input available. Grant microphone or system audio permission to record."
+          );
+        }
+        patch({
+          isRecording: true,
+          isPaused: false,
+          recordingPhase: RecordingPhase.Recording,
+        });
+        currentNoteIdRef.current = noteId;
+      } catch (e) {
+        patch({ error: e instanceof Error ? e.message : String(e) });
       }
-      setIsRecording(true);
-      setIsPaused(false);
-      setRecordingPhase(RecordingPhase.Recording);
-      currentNoteIdRef.current = noteId;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+    },
+    [patch]
+  );
 
   useEffect(() => {
     if (isRecording) {
       levelIntervalRef.current = window.setInterval(async () => {
         try {
           const level = await audioApi.getAudioLevel();
-          setAudioLevel(level);
+          useRecordingStore.getState().patch({ audioLevel: level });
         } catch {
           // Ignore errors during polling
         }
@@ -227,7 +250,12 @@ export function useRecording(): UseRecordingReturn {
   }, [isRecording]);
 
   useEffect(() => {
-    audioApi.getRecordingStatus().then(setIsRecording).catch(console.error);
+    audioApi
+      .getRecordingStatus()
+      .then((status) =>
+        useRecordingStore.getState().patch({ isRecording: status })
+      )
+      .catch(console.error);
   }, []);
 
   return {

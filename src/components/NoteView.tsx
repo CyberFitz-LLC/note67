@@ -11,26 +11,21 @@ import {
 } from "./index";
 import { exportApi, notesApi, transcriptionApi } from "../api";
 import { useSummaries, useUploadedAudio, useAIWriting } from "../hooks";
-import type { RecordingMode } from "../hooks/useRecording";
+import { useOllamaStore } from "../stores/ollamaStore";
+import { useWhisperStore } from "../stores/whisperStore";
+import { useRecordingStore } from "../stores/recordingStore";
 import type { Note, TranscriptSegment, AudioSegment } from "../types";
 
 export interface NoteViewProps {
   note: Note;
   transcript: TranscriptSegment[];
-  isRecording: boolean;
-  isPaused: boolean;
-  audioLevel: number;
-  recordingMode: RecordingMode;
   activeTab: "note" | "transcript" | "summary" | "tasks";
   editingTitle: boolean;
-  ollamaRunning: boolean;
-  hasOllamaModel: boolean;
   isRegenerating: boolean;
   isTranscribing: boolean;
   /** True while the post-stop auto-retranscribe pass is running. */
   isAutoRetranscribing: boolean;
   summariesRefreshKey: number;
-  loadedModel: string | null;
   onTabChange: (tab: "note" | "transcript" | "summary" | "tasks") => void;
   onEditTitle: () => void;
   onUpdateTitle: (title: string) => void;
@@ -62,19 +57,12 @@ export interface NoteViewProps {
 export function NoteView({
   note,
   transcript,
-  isRecording,
-  isPaused,
-  audioLevel,
-  recordingMode,
   activeTab,
   editingTitle,
-  ollamaRunning,
-  hasOllamaModel,
   isRegenerating,
   isTranscribing,
   isAutoRetranscribing,
   summariesRefreshKey,
-  loadedModel,
   onTabChange,
   onEditTitle,
   onUpdateTitle,
@@ -96,6 +84,25 @@ export function NoteView({
   onTasksChanged,
   focusTaskId,
 }: NoteViewProps) {
+  // Read straight from the stores rather than taking these as props — they are
+  // already global state, so threading them through App.tsx bought nothing.
+  //
+  // Recording state is global but this UI is per-note, so isRecording/isPaused
+  // are scoped to *this* note. Reading the raw flags would light up the
+  // recording UI on every note, not just the one being recorded.
+  const isThisNoteRecording =
+    useRecordingStore((s) => s.recordingNoteId) === note.id;
+  const isRecording =
+    useRecordingStore((s) => s.isRecording) && isThisNoteRecording;
+  const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
+  const audioLevel = useRecordingStore((s) => s.audioLevel);
+  const recordingMode = useRecordingStore((s) => s.recordingMode);
+
+  const ollamaStatus = useOllamaStore((s) => s.status);
+  const ollamaRunning = ollamaStatus?.running ?? false;
+  const hasOllamaModel = Boolean(ollamaStatus?.selected_model);
+  const loadedModel = useWhisperStore((s) => s.loadedModel);
+
   const [titleValue, setTitleValue] = useState(note.title);
   const [descValue, setDescValue] = useState(note.description || "");
   const [playingAudioPath, setPlayingAudioPath] = useState<string | null>(

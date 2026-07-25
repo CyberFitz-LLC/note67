@@ -38,6 +38,7 @@ import {
   useOnboarding,
 } from "./hooks";
 import { useThemeStore } from "./stores/themeStore";
+import { useRecordingStore } from "./stores/recordingStore";
 import type { Note, TranscriptSegment } from "./types";
 
 // Lazy-loaded: GraphView pulls in d3, which is only needed on the graph view.
@@ -55,11 +56,12 @@ function App() {
     endNote,
     deleteNote,
   } = useNotes();
+  // App is the single owner of useRecording (it runs the level-polling effect).
+  // audioLevel/recordingMode are read from the store by the components that
+  // need them, so App only destructures what it actually uses.
   const {
     isRecording,
     isPaused,
-    audioLevel,
-    recordingMode,
     startRecording,
     stopRecording,
     pauseRecording,
@@ -181,7 +183,10 @@ function App() {
   const [, setEditingDescription] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | null>(null);
-  const [recordingNoteId, setRecordingNoteId] = useState<string | null>(null);
+  // Which note is recording lives in the recording store so NoteView can scope
+  // its own recording UI without App threading it down.
+  const recordingNoteId = useRecordingStore((s) => s.recordingNoteId);
+  const setRecordingNoteId = useRecordingStore((s) => s.setRecordingNoteId);
   // True while the post-stop auto-retranscribe pass is running. Shown as a
   // banner above the transcript so the user knows work is happening between
   // "stop" and the final, higher-quality transcript appearing.
@@ -319,6 +324,7 @@ function App() {
     startLiveTranscription,
     profile.name,
     refreshSystemStatus,
+    setRecordingNoteId,
   ]);
 
   // Keyboard shortcut: Cmd/Ctrl + N for new note
@@ -1099,21 +1105,14 @@ function App() {
             key={selectedNote.id}
             note={selectedNote}
             transcript={currentTranscript}
-            isRecording={isRecording && recordingNoteId === selectedNote.id}
-            isPaused={isPaused && recordingNoteId === selectedNote.id}
-            audioLevel={audioLevel}
-            recordingMode={recordingMode}
             activeTab={activeTab}
             editingTitle={editingTitle}
-            ollamaRunning={ollamaRunning}
-            hasOllamaModel={!!ollamaModel}
             isRegenerating={isGeneratingSummaryTitle}
             isTranscribing={
               isLiveTranscribing && recordingNoteId === selectedNote.id
             }
             isAutoRetranscribing={retranscribingNoteId === selectedNote.id}
             summariesRefreshKey={summariesRefreshKey}
-            loadedModel={loadedModel}
             onTabChange={setActiveTab}
             onEditTitle={() => setEditingTitle(true)}
             onUpdateTitle={handleUpdateTitle}
