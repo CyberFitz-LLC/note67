@@ -39,6 +39,8 @@ import {
 } from "./hooks";
 import { useThemeStore } from "./stores/themeStore";
 import { useRecordingStore } from "./stores/recordingStore";
+import { useLiveTranscriptionStore } from "./stores/liveTranscriptionStore";
+import { useSummaryUiStore } from "./stores/summaryUiStore";
 import type { Note, TranscriptSegment } from "./types";
 
 // Lazy-loaded: GraphView pulls in d3, which is only needed on the graph view.
@@ -190,12 +192,15 @@ function App() {
   // True while the post-stop auto-retranscribe pass is running. Shown as a
   // banner above the transcript so the user knows work is happening between
   // "stop" and the final, higher-quality transcript appearing.
-  const [retranscribingNoteId, setRetranscribingNoteId] = useState<
-    string | null
-  >(null);
-  const [isGeneratingSummaryTitle, setIsGeneratingSummaryTitle] =
-    useState(false);
-  const [summariesRefreshKey, setSummariesRefreshKey] = useState(0);
+  // App only writes this; NoteView reads it from the store to scope its banner.
+  const setRetranscribingNoteId = useLiveTranscriptionStore(
+    (s) => s.setRetranscribingNoteId
+  );
+  const isGeneratingSummaryTitle = useSummaryUiStore((s) => s.isGeneratingTitle);
+  const setIsGeneratingSummaryTitle = useSummaryUiStore(
+    (s) => s.setGeneratingTitle
+  );
+  const bumpSummariesRefreshKey = useSummaryUiStore((s) => s.bumpRefreshKey);
   const [showAISidebar, setShowAISidebar] = useState(false);
 
   // Context menu state
@@ -633,7 +638,7 @@ function App() {
           // Generate overview summary first
           const summary = await aiApi.generateSummary(noteId, "overview");
           // Trigger summaries refresh in NoteView
-          setSummariesRefreshKey((k) => k + 1);
+          bumpSummariesRefreshKey();
           // Generate title from summary content
           await aiApi.generateTitleFromSummary(noteId, summary.content);
           // Refresh note list to show new title
@@ -675,7 +680,7 @@ function App() {
       // Generate overview summary first
       const summary = await aiApi.generateSummary(selectedNoteId, "overview");
       // Trigger summaries refresh in NoteView
-      setSummariesRefreshKey((k) => k + 1);
+      bumpSummariesRefreshKey();
       // Generate title from summary content
       await aiApi.generateTitleFromSummary(selectedNoteId, summary.content);
       // Refresh note list to show new title
@@ -1107,12 +1112,6 @@ function App() {
             transcript={currentTranscript}
             activeTab={activeTab}
             editingTitle={editingTitle}
-            isRegenerating={isGeneratingSummaryTitle}
-            isTranscribing={
-              isLiveTranscribing && recordingNoteId === selectedNote.id
-            }
-            isAutoRetranscribing={retranscribingNoteId === selectedNote.id}
-            summariesRefreshKey={summariesRefreshKey}
             onTabChange={setActiveTab}
             onEditTitle={() => setEditingTitle(true)}
             onUpdateTitle={handleUpdateTitle}

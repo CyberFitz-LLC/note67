@@ -14,6 +14,8 @@ import { useSummaries, useUploadedAudio, useAIWriting } from "../hooks";
 import { useOllamaStore } from "../stores/ollamaStore";
 import { useWhisperStore } from "../stores/whisperStore";
 import { useRecordingStore } from "../stores/recordingStore";
+import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
+import { useSummaryUiStore } from "../stores/summaryUiStore";
 import type { Note, TranscriptSegment, AudioSegment } from "../types";
 
 export interface NoteViewProps {
@@ -21,11 +23,6 @@ export interface NoteViewProps {
   transcript: TranscriptSegment[];
   activeTab: "note" | "transcript" | "summary" | "tasks";
   editingTitle: boolean;
-  isRegenerating: boolean;
-  isTranscribing: boolean;
-  /** True while the post-stop auto-retranscribe pass is running. */
-  isAutoRetranscribing: boolean;
-  summariesRefreshKey: number;
   onTabChange: (tab: "note" | "transcript" | "summary" | "tasks") => void;
   onEditTitle: () => void;
   onUpdateTitle: (title: string) => void;
@@ -59,10 +56,6 @@ export function NoteView({
   transcript,
   activeTab,
   editingTitle,
-  isRegenerating,
-  isTranscribing,
-  isAutoRetranscribing,
-  summariesRefreshKey,
   onTabChange,
   onEditTitle,
   onUpdateTitle,
@@ -97,6 +90,15 @@ export function NoteView({
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
   const audioLevel = useRecordingStore((s) => s.audioLevel);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
+
+  // Live transcription is scoped to the recording note, same as above.
+  const isTranscribing =
+    useLiveTranscriptionStore((s) => s.isLiveTranscribing) && isThisNoteRecording;
+  const isAutoRetranscribing =
+    useLiveTranscriptionStore((s) => s.retranscribingNoteId) === note.id;
+
+  const isRegenerating = useSummaryUiStore((s) => s.isGeneratingTitle);
+  const summariesRefreshKey = useSummaryUiStore((s) => s.refreshKey);
 
   const ollamaStatus = useOllamaStore((s) => s.status);
   const ollamaRunning = ollamaStatus?.running ?? false;

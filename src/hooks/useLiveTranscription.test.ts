@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useLiveTranscription } from "./useTranscription";
 import { transcriptionApi } from "../api";
 import { useWhisperStore } from "../stores/whisperStore";
+import { resetLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import type { EventBusModule } from "../test/eventBus";
 
 vi.mock("@tauri-apps/api/event", async () => {
@@ -52,6 +53,8 @@ const seg = (text: string, start = 0, end = 1) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   bus.reset();
+  // State is a module-level store now, so reset it or it leaks between cases.
+  resetLiveTranscriptionStore();
   api.isLiveTranscribing.mockResolvedValue(false);
   api.startLiveTranscription.mockResolvedValue(undefined);
   api.stopLiveTranscription.mockResolvedValue({

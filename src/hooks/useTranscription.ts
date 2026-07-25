@@ -3,6 +3,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { transcriptionApi } from "../api";
 import type { DualTranscriptionResult } from "../api/transcription";
 import { useWhisperStore } from "../stores/whisperStore";
+import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import type {
   ModelInfo,
   ModelSize,
@@ -185,10 +186,26 @@ interface UseLiveTranscriptionReturn {
   stopLiveTranscription: (noteId: string) => Promise<TranscriptionResult | null>;
 }
 
+/**
+ * Owns live transcription: the `transcription-update` subscription plus the
+ * start/stop actions.
+ *
+ * State lives in `useLiveTranscriptionStore` so components can read it without
+ * prop drilling. Call this hook in exactly **one** place (App) — it is the
+ * single writer, and mounting it twice would handle every event twice.
+ * Read-only consumers should subscribe to the store instead.
+ */
 export function useLiveTranscription(): UseLiveTranscriptionReturn {
-  const [isLiveTranscribing, setIsLiveTranscribing] = useState(false);
-  const [liveSegments, setLiveSegments] = useState<TranscriptSegment[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const isLiveTranscribing = useLiveTranscriptionStore(
+    (s) => s.isLiveTranscribing
+  );
+  const liveSegments = useLiveTranscriptionStore((s) => s.liveSegments);
+  const error = useLiveTranscriptionStore((s) => s.error);
+  const setIsLiveTranscribing = useLiveTranscriptionStore(
+    (s) => s.setLiveTranscribing
+  );
+  const setLiveSegments = useLiveTranscriptionStore((s) => s.setLiveSegments);
+  const setError = useLiveTranscriptionStore((s) => s.setError);
   const currentNoteIdRef = useRef<string | null>(null);
   const speakerNameRef = useRef<string>("Me");
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -262,7 +279,9 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
         unlisten();
       }
     };
-  }, []);
+    // The store setters are stable zustand actions, so listing them here does
+    // not cause the subscription to be torn down and re-created.
+  }, [setIsLiveTranscribing, setLiveSegments]);
 
   const startLiveTranscription = useCallback(async (noteId: string, speakerName?: string, initialSegments?: TranscriptSegment[]) => {
     try {
@@ -279,7 +298,7 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
       setError(e instanceof Error ? e.message : String(e));
       currentNoteIdRef.current = null;
     }
-  }, []);
+  }, [setError, setIsLiveTranscribing, setLiveSegments]);
 
   const stopLiveTranscription = useCallback(async (noteId: string): Promise<TranscriptionResult | null> => {
     try {
@@ -292,12 +311,12 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
       setError(e instanceof Error ? e.message : String(e));
       return null;
     }
-  }, []);
+  }, [setError, setIsLiveTranscribing]);
 
   // Check initial status
   useEffect(() => {
     transcriptionApi.isLiveTranscribing().then(setIsLiveTranscribing).catch(console.error);
-  }, []);
+  }, [setIsLiveTranscribing]);
 
   return {
     isLiveTranscribing,
