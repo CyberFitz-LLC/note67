@@ -118,12 +118,15 @@ fn main() {
             continue;
         }
         let s16 = resample(&chunk, spec.sample_rate, 16000);
+        let t0 = std::time::Instant::now();
         let out = transcribe(&ctx, &s16);
+        let ms = t0.elapsed().as_millis();
         println!(
-            "  chunk {:>3} (t={:>5.1}s, rms={:.4}) -> {:?}",
+            "  chunk {:>3} (t={:>5.1}s, rms={:.4}) inference={:>5}ms -> {:?}",
             i,
             (i * step) as f32 / spec.sample_rate as f32,
             rms(&chunk),
+            ms,
             out
         );
         tested += 1;
@@ -133,6 +136,28 @@ fn main() {
     }
     if tested == 0 {
         println!("  (no chunk cleared the gate)");
+    }
+
+    // --- Does inference cost scale with audio length, or is it fixed per call?
+    // Decides whether shorter chunks actually buy lower latency.
+    println!("\n=== COST vs CHUNK LENGTH (from t=75s, normalized) ===");
+    let base = (spec.sample_rate as usize) * 75;
+    for secs in [3usize, 6, 12, 24] {
+        let n = (spec.sample_rate as usize) * secs;
+        if base + n > mono.len() {
+            continue;
+        }
+        let mut chunk = mono[base..base + n].to_vec();
+        normalize_peak(&mut chunk, TARGET_PEAK, MAX_GAIN);
+        let s16 = resample(&chunk, spec.sample_rate, 16000);
+        let t0 = std::time::Instant::now();
+        let out = transcribe(&ctx, &s16);
+        println!(
+            "  {:>2}s audio -> inference {:>5}ms  ({} segment(s))",
+            secs,
+            t0.elapsed().as_millis(),
+            out.len()
+        );
     }
 
     // --- The post-stop path: one long span, unnormalized ---
