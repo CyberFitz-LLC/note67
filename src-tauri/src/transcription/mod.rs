@@ -20,6 +20,29 @@ pub use transcriber::{TranscriptionResult, TranscriptionSegment, Transcriber};
 ///   over 19s) — far below any real speaking rate, so almost always a stuck
 ///   hallucination over silence/echo.
 pub fn should_skip_segment(text: &str, start_time: f64, end_time: f64) -> bool {
+    should_skip_segment_inner(text, start_time, end_time, true)
+}
+
+/// Variant for callers that have already established the audio contains voice.
+///
+/// The whole-segment word list below ("hello", "thanks", "you", …) catches
+/// Whisper hallucinating over silence. That is the right call for a whole file,
+/// where such a word is almost never a real segment on its own — but wrong for
+/// live 3-second chunks, which routinely contain exactly one short utterance,
+/// so the entire segment *is* the word. The live path gates on RMS before
+/// transcribing, so silence never gets that far and the list only removes real
+/// speech. Structural checks (markers, punctuation-only, stuck hallucinations)
+/// still apply.
+pub fn should_skip_live_segment(text: &str, start_time: f64, end_time: f64) -> bool {
+    should_skip_segment_inner(text, start_time, end_time, false)
+}
+
+fn should_skip_segment_inner(
+    text: &str,
+    start_time: f64,
+    end_time: f64,
+    drop_silence_fillers: bool,
+) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return true;
@@ -62,23 +85,25 @@ pub fn should_skip_segment(text: &str, start_time: f64, end_time: f64) -> bool {
     }
 
     // Whole-segment silence hallucinations
-    if matches!(
-        normalized.as_str(),
-        "thank you"
-            | "thank you very much"
-            | "thank you so much"
-            | "thank you all"
-            | "thank you for watching"
-            | "thanks for watching"
-            | "thanks"
-            | "you"
-            | "bye"
-            | "bye bye"
-            | "hello"
-            | "professor"
-            | "please subscribe"
-            | "subscribe"
-    ) {
+    if drop_silence_fillers
+        && matches!(
+            normalized.as_str(),
+            "thank you"
+                | "thank you very much"
+                | "thank you so much"
+                | "thank you all"
+                | "thank you for watching"
+                | "thanks for watching"
+                | "thanks"
+                | "you"
+                | "bye"
+                | "bye bye"
+                | "hello"
+                | "professor"
+                | "please subscribe"
+                | "subscribe"
+        )
+    {
         return true;
     }
 
@@ -180,7 +205,7 @@ pub enum TranscriptionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_echo_of_system, should_skip_segment};
+    use super::{is_echo_of_system, should_skip_live_segment, should_skip_segment};
 
     #[test]
     fn skips_artifacts_and_silence_hallucinations() {
@@ -214,6 +239,43 @@ mod tests {
         }
         // Short one-word segments are fine; only the long ones are dropped.
         assert!(!should_skip_segment("Okay", 5.0, 5.6));
+    }
+
+    #[test]
+    fn live_keeps_short_utterances_the_file_filter_drops() {
+        // The live regression: a 3s chunk usually holds one short utterance, so
+        // the whole segment IS the word. Whisper returned exactly these for the
+        // reported recording ("hello", "Hello?", "Hallo?") and every one was
+        // discarded, so the mic never appeared live while system audio did.
+        for word in ["hello", "Hello.", "Hello?", "thanks", "you", "bye"] {
+            assert!(
+                should_skip_segment(word, 0.0, 1.0),
+                "whole-file filter should still drop {word:?} as a silence hallucination"
+            );
+            assert!(
+                !should_skip_live_segment(word, 0.0, 1.0),
+                "live filter must keep {word:?} — the RMS gate already proved there was voice"
+            );
+        }
+    }
+
+    #[test]
+    fn live_filter_still_drops_structural_non_speech() {
+        // Relaxing the word list must not let markers or punctuation through.
+        for junk in ["", "   ", "...", "[BLANK_AUDIO]", "[music]", "-", "3"] {
+            assert!(
+                should_skip_live_segment(junk, 0.0, 1.0),
+                "live filter should still drop {junk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_filter_still_drops_stuck_hallucinations() {
+        // A couple of words stretched over a long span is a stuck decode, not
+        // speech, however loud the chunk was.
+        assert!(should_skip_live_segment("Professor", 47.0, 66.0));
+        assert!(should_skip_live_segment("Okay now", 10.0, 20.0));
     }
 
     #[test]

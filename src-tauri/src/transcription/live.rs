@@ -10,8 +10,8 @@ use crate::audio::{take_system_audio_samples, RecordingPhase, RecordingState};
 use crate::db::models::NewTranscriptSegment;
 use crate::db::Database;
 use crate::transcription::{
-    is_echo_of_system, should_skip_segment, TranscriptionError, TranscriptionResult,
-    TranscriptionSegment,
+    is_echo_of_system, should_skip_live_segment, should_skip_segment, TranscriptionError,
+    TranscriptionResult, TranscriptionSegment,
 };
 use tauri::Manager;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
@@ -348,7 +348,7 @@ pub async fn start_live_transcription(
                 let after_blank: Vec<_> = transcription
                     .segments
                     .into_iter()
-                    .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
+                    .filter(|s| !should_skip_live_segment(&s.text, s.start_time, s.end_time))
                     .collect();
                 let blank_dropped = heard - after_blank.len();
 
