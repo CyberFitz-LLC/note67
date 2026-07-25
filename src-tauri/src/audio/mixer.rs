@@ -105,6 +105,18 @@ fn mix_int_samples<R1: std::io::Read, R2: std::io::Read, W: std::io::Write + std
         .map(|s| s as f32 / scale_b)
         .collect();
 
+    // An empty read is how an unfinalized WAV presents: the header still says
+    // zero samples, so this mixes in silence and the playback track comes out
+    // blank with no error anywhere. Say so rather than writing quiet nonsense.
+    if samples_a.is_empty() || samples_b.is_empty() {
+        eprintln!(
+            "Mixing a source that read as empty (a={} samples, b={} samples) — \
+             the file may not have been finalized before it was read",
+            samples_a.len(),
+            samples_b.len()
+        );
+    }
+
     // Handle different channel counts
     let samples_a = normalize_channels_f32(&samples_a, spec_a.channels, spec_a.channels);
     let samples_b = normalize_channels_f32(&samples_b, spec_b.channels, spec_a.channels);
@@ -295,5 +307,79 @@ mod tests {
         let stereo = vec![100, 200, 300, 400];
         let mono = normalize_channels(&stereo, 2, 1);
         assert_eq!(mono, vec![150, 350]);
+    }
+
+    /// Write a WAV of `frames` frames, every sample set to `amplitude`.
+    fn write_wav(path: &std::path::Path, channels: u16, frames: usize, amplitude: i16) {
+        let spec = WavSpec {
+            channels,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).expect("create wav");
+        for i in 0..frames {
+            for _ in 0..channels {
+                // Alternate sign so the content has energy rather than DC.
+                let s = if i % 2 == 0 { amplitude } else { -amplitude };
+                w.write_sample(s).expect("write sample");
+            }
+        }
+        w.finalize().expect("finalize");
+    }
+
+    fn rms_of(path: &std::path::Path) -> f64 {
+        let mut r = WavReader::open(path).expect("open output");
+        let samples: Vec<i32> = r.samples::<i32>().map(|s| s.expect("read sample")).collect();
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / samples.len() as f64).sqrt()
+    }
+
+    /// A real session produced a completely silent playback file even though its
+    /// mic input had audio, because the system-audio side was silent. Mixing
+    /// with a silent partner must preserve the other side, not blank both.
+    #[test]
+    fn mixing_audio_with_a_silent_partner_keeps_the_audio() {
+        let dir = std::env::temp_dir().join("note67_mixer_silent_partner");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mic = dir.join("mic.wav");
+        let sys = dir.join("sys.wav");
+        let out = dir.join("out.wav");
+
+        // Matches the observed session: mono mic with content, silent stereo system.
+        write_wav(&mic, 1, 48_000, 2_600);
+        write_wav(&sys, 2, 48_000, 0);
+
+        mix_wav_files(&mic, &sys, &out).expect("mix should succeed");
+
+        let rms = rms_of(&out);
+        assert!(
+            rms > 100.0,
+            "playback went silent when one side was silent (rms {rms})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mixing_two_mono_sources_averages_them() {
+        let dir = std::env::temp_dir().join("note67_mixer_two_mono");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        let out = dir.join("out.wav");
+
+        write_wav(&a, 1, 4_800, 8_000);
+        write_wav(&b, 1, 4_800, 8_000);
+
+        mix_wav_files(&a, &b, &out).expect("mix should succeed");
+
+        // Same signal on both sides, averaged, so the level is preserved.
+        let rms = rms_of(&out);
+        assert!(rms > 7_000.0 && rms < 9_000.0, "unexpected mixed level {rms}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

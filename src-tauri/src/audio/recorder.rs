@@ -55,6 +55,11 @@ pub struct RecordingState {
     pub current_note_id: std::sync::Mutex<Option<String>>,
     /// Current segment ID in database (for updating duration)
     pub current_segment_db_id: AtomicI64,
+    /// Set once the recording thread has dropped the stream and finalized the
+    /// WAV. Anything that reads the file after stopping must wait for this:
+    /// the thread owns the writer, and hound only writes the header (and hence
+    /// the sample count) on finalize.
+    pub file_finalized: AtomicBool,
 }
 
 impl RecordingState {
@@ -73,6 +78,8 @@ impl RecordingState {
             segment_start_time: std::sync::Mutex::new(None),
             current_note_id: std::sync::Mutex::new(None),
             current_segment_db_id: AtomicI64::new(0),
+            // Nothing has been recorded yet, so there is nothing to wait for.
+            file_finalized: AtomicBool::new(true),
         }
     }
 
@@ -157,6 +164,7 @@ pub fn start_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Resu
 
     state.is_recording.store(true, Ordering::SeqCst);
     state.set_phase(RecordingPhase::Recording);
+    state.file_finalized.store(false, Ordering::SeqCst);
 
     let state_clone = state.clone();
 
@@ -185,6 +193,10 @@ pub fn pause_recording(state: &RecordingState) -> Result<i64, AudioError> {
     state.audio_level.store(0, Ordering::SeqCst);
     state.set_phase(RecordingPhase::Paused);
 
+    // A paused segment's WAV is a finished file that later gets merged and
+    // retranscribed, so wait for it to close here too.
+    await_file_finalized(state, std::time::Duration::from_secs(5));
+
     Ok(duration_ms)
 }
 
@@ -203,11 +215,35 @@ pub fn resume_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Res
     start_recording(state, output_path)
 }
 
+/// Block until the recording thread has finalized the WAV, or `timeout` passes.
+///
+/// The thread owns the writer and only finalizes after it observes
+/// `is_recording == false`. Callers that immediately read the file — the mixer
+/// that builds the playback track — otherwise see a WAV whose header still says
+/// zero samples, and silently mix in nothing. Returns whether it finalized.
+fn await_file_finalized(state: &RecordingState, timeout: std::time::Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !state.file_finalized.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "Timed out waiting for the recording file to finalize; playback audio may be incomplete"
+            );
+            return false;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    true
+}
+
 /// Stop recording completely - resets all state
 pub fn stop_recording(state: &RecordingState) -> Result<Option<PathBuf>, AudioError> {
     state.is_recording.store(false, Ordering::SeqCst);
     state.audio_level.store(0, Ordering::SeqCst);
     state.set_phase(RecordingPhase::Idle);
+
+    // The caller is about to read this file (to merge the playback track), so
+    // it must not be handed a path to a WAV that has not been closed yet.
+    await_file_finalized(state, std::time::Duration::from_secs(5));
 
     // Reset segment tracking
     state.reset_for_new_session();
@@ -304,9 +340,11 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
 
     stream.play()?;
 
-    // Keep thread alive while recording
+    // Keep thread alive while recording. Polled rather than signalled; the
+    // interval is the floor on how long a stop takes, since the caller waits
+    // for the finalize below.
     while state.is_recording.load(Ordering::SeqCst) {
-        thread::sleep(std::time::Duration::from_millis(100));
+        thread::sleep(std::time::Duration::from_millis(20));
     }
 
     // Finalize the WAV file
@@ -316,6 +354,7 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
     {
         let _ = w.finalize();
     }
+    state.file_finalized.store(true, Ordering::SeqCst);
 
     Ok(())
 }
@@ -347,5 +386,55 @@ fn process_audio(
             let sample_i16 = (sample * i16::MAX as f32) as i16;
             let _ = w.write_sample(sample_i16);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_state_does_not_wait_for_a_finalize_that_will_never_come() {
+        // Nothing was recorded, so there is no thread to finalize anything.
+        // Waiting here would stall every stop on a note that never recorded.
+        let state = RecordingState::new();
+        let started = Instant::now();
+        assert!(await_file_finalized(&state, std::time::Duration::from_secs(5)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "should have returned immediately"
+        );
+    }
+
+    #[test]
+    fn waits_until_the_recording_thread_signals() {
+        let state = Arc::new(RecordingState::new());
+        state.file_finalized.store(false, Ordering::SeqCst);
+
+        let signaller = state.clone();
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(60));
+            signaller.file_finalized.store(true, Ordering::SeqCst);
+        });
+
+        let started = Instant::now();
+        assert!(await_file_finalized(&state, std::time::Duration::from_secs(5)));
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(50),
+            "returned before the writer signalled"
+        );
+    }
+
+    #[test]
+    fn gives_up_rather_than_hanging_when_no_signal_arrives() {
+        let state = RecordingState::new();
+        state.file_finalized.store(false, Ordering::SeqCst);
+
+        let started = Instant::now();
+        assert!(!await_file_finalized(
+            &state,
+            std::time::Duration::from_millis(80)
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }
