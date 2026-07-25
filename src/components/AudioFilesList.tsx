@@ -230,7 +230,12 @@ export function AudioFilesList({
   compact = false,
 }: AudioFilesListProps) {
   // Check if we have a main recording (legacy format - no segments)
-  const hasMainRecording = mainAudioPath && segments.length === 0;
+  // The combined track is worth offering whenever it exists, not only for
+  // legacy single-file notes. Once a note has segments, playing one of them was
+  // previously a one-way trip — there was no row to get back to the whole
+  // recording.
+  const hasMainRecording = Boolean(mainAudioPath);
+  const isCombinedTrack = hasMainRecording && segments.length > 0;
 
   // Delete confirmation state
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteConfirmState>({
@@ -270,19 +275,26 @@ export function AudioFilesList({
     onPlayAudio?.(filePath);
   };
 
+  // What each segment actually resolved to when played. The mixed path is only
+  // known after the round-trip below, and the play button's active state is
+  // decided by comparing against the path the player is on — so without this the
+  // button never lights up for a segment.
+  const [resolvedPaths, setResolvedPaths] = useState<Record<number, string>>({});
+
   // Play one recording segment. Resolves to a mic+system mix rather than the
   // raw mic file — playing mic-only loses the other side of the conversation,
   // and on a quiet microphone sounds like nothing at all.
   const handlePlaySegment = async (segment: AudioSegment) => {
+    let path = segment.mic_path ?? segment.system_path ?? "";
     try {
-      const path = await audioApi.getSegmentPlaybackPath(segment.id);
-      onPlayAudio?.(path);
+      path = await audioApi.getSegmentPlaybackPath(segment.id);
     } catch (err) {
-      console.error("Failed to resolve segment playback path:", err);
       // Fall back to whichever raw file exists so the button still does something.
-      const raw = segment.mic_path ?? segment.system_path;
-      if (raw) onPlayAudio?.(raw);
+      console.error("Failed to resolve segment playback path:", err);
     }
+    if (!path) return;
+    setResolvedPaths((prev) => ({ ...prev, [segment.id]: path }));
+    onPlayAudio?.(path);
   };
 
   const handleDownload = async (filePath: string, suggestedName: string) => {
@@ -338,6 +350,13 @@ export function AudioFilesList({
     return item.data.file_path;
   };
 
+  // Styling for a row in the list. The playing row gets an accent outline —
+  // the play button alone is easy to miss when several rows look identical.
+  const rowStyle = (active: boolean) => ({
+    backgroundColor: "var(--color-sidebar)",
+    boxShadow: active ? "inset 0 0 0 1.5px var(--color-accent)" : undefined,
+  });
+
   const totalItems = items.length + (hasMainRecording ? 1 : 0);
   if (totalItems === 0) return null;
 
@@ -359,13 +378,13 @@ export function AudioFilesList({
         {hasMainRecording && (
           <li
             className="flex items-center gap-2 p-2 rounded-lg"
-            style={{ backgroundColor: "var(--color-sidebar)" }}
+            style={rowStyle(activeAudioPath === mainAudioPath)}
           >
             <span
               className="w-5 h-5 flex items-center justify-center text-xs font-medium rounded"
               style={{ backgroundColor: "var(--color-border)", color: "var(--color-text-secondary)" }}
             >
-              1
+              {isCombinedTrack ? "∑" : "1"}
             </span>
             <PlayButton
               isActive={activeAudioPath === mainAudioPath}
@@ -377,7 +396,7 @@ export function AudioFilesList({
                 className="text-sm font-medium truncate"
                 style={{ color: "var(--color-text)" }}
               >
-                Main Recording
+                {isCombinedTrack ? "Full recording" : "Main Recording"}
               </p>
               <div
                 className="flex items-center gap-2 mt-0.5 text-xs"
@@ -387,7 +406,9 @@ export function AudioFilesList({
                   className="px-1.5 py-0.5 rounded"
                   style={{ backgroundColor: "var(--color-accent-light)", color: "var(--color-accent)" }}
                 >
-                  Recorded
+                  {isCombinedTrack
+                    ? `All ${segments.length} recordings`
+                    : "Recorded"}
                 </span>
               </div>
             </div>
@@ -398,9 +419,17 @@ export function AudioFilesList({
         )}
         {items.map((item, index) => {
           const path = getItemPath(item);
-          const isActive = activeAudioPath === path;
-          // Adjust position if main recording exists (it takes position 1)
-          const displayPosition = hasMainRecording ? index + 2 : index + 1;
+          const playedPath =
+            item.type === "segment" ? resolvedPaths[item.data.id] : undefined;
+          const isActive = activeAudioPath === (playedPath ?? path);
+          // The combined track is marked "∑" rather than numbered, so the
+          // individual recordings still read as 1..N under it. A legacy main
+          // recording really is item 1, so numbering shifts there.
+          const displayPosition = isCombinedTrack
+            ? index + 1
+            : hasMainRecording
+              ? index + 2
+              : index + 1;
           const canMoveUp = index > 0;
           const canMoveDown = index < items.length - 1;
 
@@ -410,7 +439,7 @@ export function AudioFilesList({
               <li
                 key={`seg-${segment.id}`}
                 className="flex items-center gap-2 p-2 rounded-lg"
-                style={{ backgroundColor: "var(--color-sidebar)" }}
+                style={rowStyle(isActive)}
               >
                 <span
                   className="w-5 h-5 flex items-center justify-center text-xs font-medium rounded"
@@ -468,7 +497,7 @@ export function AudioFilesList({
             <li
               key={`upload-${upload.id}`}
               className="flex items-center gap-2 p-2 rounded-lg"
-              style={{ backgroundColor: "var(--color-sidebar)" }}
+              style={rowStyle(isActive)}
             >
               <span
                 className="w-5 h-5 flex items-center justify-center text-xs font-medium rounded"
