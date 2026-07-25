@@ -18,6 +18,21 @@ use crate::db::schema::run_migrations;
 const ACTION_ITEM_COLS: &str =
     "id, note_id, stable_id, text, description, parent_id, assignee, due_date, done, sort_order, created_at, updated_at";
 
+/// Row -> AudioSegment. Shared so the by-note and by-id queries cannot drift.
+fn map_audio_segment(row: &rusqlite::Row) -> rusqlite::Result<AudioSegment> {
+    Ok(AudioSegment {
+        id: row.get(0)?,
+        note_id: row.get(1)?,
+        segment_index: row.get(2)?,
+        mic_path: row.get(3)?,
+        system_path: row.get(4)?,
+        start_offset_ms: row.get(5)?,
+        duration_ms: row.get(6)?,
+        display_order: row.get(7)?,
+        created_at: row.get::<_, String>(8)?.parse().unwrap_or_else(|_| Utc::now()),
+    })
+}
+
 pub struct Database {
     pub conn: Mutex<Connection>,
 }
@@ -554,6 +569,20 @@ impl Database {
     }
 
     /// Get all audio segments for a note, ordered by display_order
+    /// Fetch a single audio segment by id.
+    pub fn get_audio_segment(&self, segment_id: i64) -> anyhow::Result<Option<AudioSegment>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, note_id, segment_index, mic_path, system_path, start_offset_ms, duration_ms, display_order, created_at
+             FROM audio_segments
+             WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query_map([segment_id], map_audio_segment)?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn get_audio_segments(&self, note_id: &str) -> anyhow::Result<Vec<AudioSegment>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -565,19 +594,7 @@ impl Database {
         )?;
 
         let segments = stmt
-            .query_map([note_id], |row| {
-                Ok(AudioSegment {
-                    id: row.get(0)?,
-                    note_id: row.get(1)?,
-                    segment_index: row.get(2)?,
-                    mic_path: row.get(3)?,
-                    system_path: row.get(4)?,
-                    start_offset_ms: row.get(5)?,
-                    duration_ms: row.get(6)?,
-                    display_order: row.get(7)?,
-                    created_at: row.get::<_, String>(8)?.parse().unwrap_or_else(|_| Utc::now()),
-                })
-            })?
+            .query_map([note_id], map_audio_segment)?
             .filter_map(|r| r.ok())
             .collect();
 

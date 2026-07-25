@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { UploadedAudio, AudioSegment, AudioItem } from "../types";
 import { uploadApi } from "../api/upload";
+import { audioApi } from "../api/audio";
 import { save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 
@@ -269,6 +270,21 @@ export function AudioFilesList({
     onPlayAudio?.(filePath);
   };
 
+  // Play one recording segment. Resolves to a mic+system mix rather than the
+  // raw mic file — playing mic-only loses the other side of the conversation,
+  // and on a quiet microphone sounds like nothing at all.
+  const handlePlaySegment = async (segment: AudioSegment) => {
+    try {
+      const path = await audioApi.getSegmentPlaybackPath(segment.id);
+      onPlayAudio?.(path);
+    } catch (err) {
+      console.error("Failed to resolve segment playback path:", err);
+      // Fall back to whichever raw file exists so the button still does something.
+      const raw = segment.mic_path ?? segment.system_path;
+      if (raw) onPlayAudio?.(raw);
+    }
+  };
+
   const handleDownload = async (filePath: string, suggestedName: string) => {
     try {
       // Get file extension from the original path
@@ -411,7 +427,11 @@ export function AudioFilesList({
                 <PlayButton
                   isActive={isActive}
                   isPlaying={isPlaying}
-                  onPlay={() => handlePlay(path)}
+                  onPlay={() =>
+                    item.type === "segment"
+                      ? handlePlaySegment(item.data)
+                      : handlePlay(path)
+                  }
                 />
                 <div className="flex-1 min-w-0">
                   <p

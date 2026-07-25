@@ -20,6 +20,11 @@ export const audioApi = {
     return invoke("stop_recording");
   },
 
+  /** Playback path for one recording segment, mixed (mic + system) on demand. */
+  getSegmentPlaybackPath: (segmentId: number): Promise<string> => {
+    return invoke("get_segment_playback_path", { segmentId });
+  },
+
   getRecordingStatus: (): Promise<boolean> => {
     return invoke("get_recording_status");
   },

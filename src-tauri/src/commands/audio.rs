@@ -419,6 +419,82 @@ fn build_note_playback(app: &AppHandle, db: &Database, note_id: &str) -> Option<
     }
 }
 
+/// Path to a single recording segment's audio, mixed for playback.
+///
+/// The list of recordings plays each segment on its own. Handing back the raw
+/// mic file made a quiet microphone sound like nothing at all, and it dropped
+/// the other side of the conversation entirely — a segment should play back the
+/// same way it appears in the full track.
+///
+/// Built on demand and cached beside the source files: only segments the user
+/// actually plays cost anything, and the mix is reused afterwards. Falls back to
+/// whichever raw file exists if the mix cannot be built, since playing something
+/// beats playing nothing.
+#[tauri::command]
+pub fn get_segment_playback_path(
+    app: AppHandle,
+    db: State<Database>,
+    segment_id: i64,
+) -> Result<String, String> {
+    let segment = db
+        .get_audio_segment(segment_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Segment not found")?;
+
+    let mic = segment.mic_path.as_ref().map(PathBuf::from);
+    let system = segment.system_path.as_ref().map(PathBuf::from);
+
+    // Listen-only segments have no mic side; there is nothing to mix.
+    let Some(mic) = mic.filter(|p| p.exists()) else {
+        return system
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .ok_or_else(|| "Segment has no readable audio".to_string());
+    };
+
+    let raw_fallback = mic.to_string_lossy().to_string();
+
+    let Some(system) = system.filter(|p| p.exists()) else {
+        // Mic only — the raw file already is the mix.
+        return Ok(raw_fallback);
+    };
+
+    let recordings_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("recordings"),
+        Err(_) => return Ok(raw_fallback),
+    };
+    let mixed = recordings_dir.join(format!(
+        "{}_seg{}_mix.wav",
+        segment.note_id, segment.segment_index
+    ));
+
+    // Reuse an existing mix unless a source has changed since (retranscription
+    // and continued recordings can rewrite a segment's audio).
+    let is_fresh = |mixed: &PathBuf| -> bool {
+        let mixed_time = std::fs::metadata(mixed).and_then(|m| m.modified()).ok();
+        let newest_source = [&mic, &system]
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+            .max();
+        match (mixed_time, newest_source) {
+            (Some(m), Some(s)) => m >= s,
+            _ => false,
+        }
+    };
+
+    if mixed.exists() && is_fresh(&mixed) {
+        return Ok(mixed.to_string_lossy().to_string());
+    }
+
+    match build_playback_track(&[(mic, Some(system))], &mixed) {
+        Ok(()) => Ok(mixed.to_string_lossy().to_string()),
+        Err(e) => {
+            eprintln!("Failed to build segment playback mix: {}", e);
+            Ok(raw_fallback)
+        }
+    }
+}
+
 /// Check if dual recording is currently active
 #[tauri::command]
 pub fn is_dual_recording(state: State<AudioState>) -> bool {
