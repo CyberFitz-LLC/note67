@@ -305,12 +305,27 @@ pub async fn start_live_transcription(
             if let Some(transcription) = &system_result
                 && !transcription.segments.is_empty()
             {
+                // Note the asymmetry with the mic path below, which uses the
+                // lenient filter: system audio has no voice-activity gate ahead
+                // of it, so the silence-hallucination list is still earning its
+                // place here.
+                let heard = transcription.segments.len();
                 let valid: Vec<_> = transcription
                     .segments
                     .iter()
                     .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
                     .cloned()
                     .collect();
+
+                if heard != valid.len() {
+                    println!(
+                        "[live] system: whisper returned {heard} segment(s); dropped {} as blank/artifact; kept {}",
+                        heard - valid.len(),
+                        valid.len()
+                    );
+                } else {
+                    println!("[live] system: kept all {heard} segment(s)");
+                }
 
                 // Add new segments to rolling history
                 {
