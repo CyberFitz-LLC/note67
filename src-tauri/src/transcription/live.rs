@@ -28,6 +28,36 @@ fn has_voice_activity(samples: &[f32], threshold: f32) -> bool {
     rms > threshold
 }
 
+/// Peak the mic chunk aims for after normalization.
+const MIC_TARGET_PEAK: f32 = 0.3;
+/// Ceiling on the normalization gain. This is the safety property: it stops
+/// near-silence being amplified up to speech level, so the voice-activity gate
+/// downstream still separates the two.
+///
+/// Chosen from a real quiet-mic recording: speech windows needed only 2.9–5.1x
+/// to reach the target, so the cap never binds on speech, while the noise floor
+/// would have needed 25–46x and is clamped here. That leaves speech landing at
+/// RMS 0.026–0.033 and noise at most 0.012, with the 0.02 gate between them.
+const MIC_MAX_GAIN: f32 = 8.0;
+
+/// Scale `samples` up toward `target_peak`, never by more than `max_gain`.
+///
+/// Whisper (and the RMS gate) expect roughly line-level audio. Some mics sit
+/// tens of dB below full scale, which made both behave as if nothing was said.
+/// Only ever amplifies — already-loud audio is left alone.
+fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak <= f32::EPSILON {
+        return;
+    }
+    let gain = (target_peak / peak).clamp(1.0, max_gain);
+    if gain > 1.0 {
+        for s in samples.iter_mut() {
+            *s *= gain;
+        }
+    }
+}
+
 /// Live transcription state
 pub struct LiveTranscriptionState {
     pub is_running: AtomicBool,
@@ -151,7 +181,7 @@ pub async fn start_live_transcription(
                     mic_consumed_secs = (mic_samples.len() as f64 / ch as f64) / rate as f64;
 
                     // Convert mic to mono first if needed
-                    let mono_mic: Vec<f32> = if ch > 1 {
+                    let mut mono_mic: Vec<f32> = if ch > 1 {
                         mic_samples
                             .chunks(ch)
                             .map(|chunk| chunk.iter().sum::<f32>() / ch as f32)
@@ -160,8 +190,23 @@ pub async fn start_live_transcription(
                         mic_samples
                     };
 
-                    // Only process if there's voice activity (RMS > 0.02)
-                    // This filters out silence and low background noise
+                    // Lift the chunk toward a usable level BEFORE the gate.
+                    //
+                    // The gate used to run on raw samples against a fixed RMS,
+                    // which assumed a hot mic. A quiet one (measured here ~30dB
+                    // low: loudest 3s window RMS 0.009 against a 0.02 threshold)
+                    // never passed, so the mic was silently never transcribed
+                    // while system audio — which has no gate — always was.
+                    //
+                    // Normalizing first makes the threshold independent of the
+                    // mic's input gain, and the gain cap is what preserves the
+                    // silence/speech distinction: near-silence cannot be
+                    // amplified far enough to clear the gate.
+                    normalize_peak(&mut mono_mic, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+
+                    // Only process if there's voice activity (RMS > 0.02 of the
+                    // normalized signal). Also gives Whisper audio at a level it
+                    // can actually work with.
                     if has_voice_activity(&mono_mic, 0.02) {
                         // Resample mic to 16kHz for Whisper
                         let mic_16k = if rate != 16000 {
@@ -525,4 +570,103 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_voice_activity, normalize_peak, MIC_MAX_GAIN, MIC_TARGET_PEAK};
+
+    /// Build a chunk with an explicit peak and RMS.
+    ///
+    /// Speech has a high crest factor — the real quiet-mic recording measured
+    /// peak 0.081 against RMS 0.009, a ratio of ~9:1 — so a plain sine (ratio
+    /// 1.41:1) is not a usable stand-in for these thresholds.
+    fn chunk(peak: f32, rms: f32, len: usize) -> Vec<f32> {
+        let duty = (rms / peak).powi(2);
+        let loud = (((len as f32) * duty).round() as usize).clamp(1, len);
+        let mut v = vec![0.0f32; len];
+        for (i, s) in v.iter_mut().enumerate().take(loud) {
+            *s = if i % 2 == 0 { peak } else { -peak };
+        }
+        v
+    }
+
+    #[test]
+    fn chunk_helper_hits_the_requested_peak_and_rms() {
+        let c = chunk(0.08, 0.009, 48_000);
+        let peak = c.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        let rms = (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt();
+        assert!((peak - 0.08).abs() < 1e-6, "peak was {peak}");
+        assert!((rms - 0.009).abs() < 5e-4, "rms was {rms}");
+    }
+
+    #[test]
+    fn normalize_lifts_quiet_audio_toward_the_target() {
+        let mut s = chunk(0.08, 0.009, 48_000);
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        let peak = s.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.25, "expected lift toward target, got peak {peak}");
+    }
+
+    #[test]
+    fn normalize_never_attenuates_loud_audio() {
+        let mut s = chunk(0.9, 0.2, 1000);
+        let before = s.clone();
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        assert_eq!(s, before, "already-loud audio must be left alone");
+    }
+
+    #[test]
+    fn normalize_respects_the_gain_cap() {
+        let mut s = chunk(0.006, 0.001, 48_000);
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        let peak = s.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak <= 0.006 * MIC_MAX_GAIN + 1e-6, "gain exceeded the cap");
+    }
+
+    #[test]
+    fn normalize_handles_all_zero_input() {
+        let mut s = vec![0.0f32; 100];
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        assert!(s.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn quiet_speech_passes_the_gate_after_normalization() {
+        // The reported bug, using the measured levels: a quiet mic's speech
+        // (peak 0.081, RMS 0.009) failed the 0.02 gate outright, so the mic was
+        // never transcribed while system audio — which has no gate — always was.
+        let mut s = chunk(0.081, 0.00896, 48_000);
+        assert!(
+            !has_voice_activity(&s, 0.02),
+            "precondition: raw quiet speech fails the gate"
+        );
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        assert!(
+            has_voice_activity(&s, 0.02),
+            "quiet speech must pass the gate once normalized"
+        );
+    }
+
+    #[test]
+    fn background_noise_still_fails_the_gate_after_normalization() {
+        // The other half: the gain cap must keep the noise floor from the same
+        // recording (worst case peak 0.0118, RMS 0.00148) below the gate.
+        let mut s = chunk(0.0118, 0.00148, 48_000);
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        assert!(
+            !has_voice_activity(&s, 0.02),
+            "near-silence must not be amplified into apparent speech"
+        );
+    }
+
+    #[test]
+    fn loud_mic_is_unaffected_by_normalization() {
+        // A normal-level mic already clears the gate and must not be touched.
+        let mut s = chunk(0.5, 0.06, 48_000);
+        assert!(has_voice_activity(&s, 0.02));
+        let before = s.clone();
+        normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+        assert_eq!(s, before);
+    }
 }
