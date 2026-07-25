@@ -2,12 +2,36 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, writeFile } from "@tauri-apps/plugin-fs";
-import pdfMake from "pdfmake/build/pdfmake";
-import pdfFonts from "pdfmake/build/vfs_fonts";
 import type { Content, TDocumentDefinitions } from "pdfmake/interfaces";
 
-// pdfmake's vfs_fonts module exports the font map directly (no `.vfs` wrapper).
-pdfMake.vfs = pdfFonts;
+// pdfmake and its bundled fonts are ~1MB and only needed when exporting a PDF,
+// so they're loaded on demand rather than at startup. Memoized: the fonts are
+// registered once, on the first export.
+type PdfMakeModule = typeof import("pdfmake/build/pdfmake");
+type VfsFonts = { [file: string]: string };
+
+/** Both modules are CJS, so the value may arrive on `.default` or hoisted onto
+ *  the namespace depending on interop. Accept either. */
+function interop<T>(mod: T | { default: T }): T {
+  return (mod as { default?: T }).default ?? (mod as T);
+}
+
+let pdfMakePromise: Promise<PdfMakeModule> | null = null;
+
+function loadPdfMake(): Promise<PdfMakeModule> {
+  if (!pdfMakePromise) {
+    pdfMakePromise = Promise.all([
+      import("pdfmake/build/pdfmake"),
+      import("pdfmake/build/vfs_fonts"),
+    ]).then(([pdfMakeModule, pdfFontsModule]) => {
+      const pdfMake = interop<PdfMakeModule>(pdfMakeModule);
+      // pdfmake's vfs_fonts module exports the font map directly (no `.vfs` wrapper).
+      pdfMake.vfs = interop<VfsFonts>(pdfFontsModule);
+      return pdfMake;
+    });
+  }
+  return pdfMakePromise;
+}
 
 export interface ExportData {
   markdown: string;
@@ -238,6 +262,7 @@ export const exportApi = {
     markdown: string,
     defaultFilename: string
   ): Promise<string | null> => {
+    const pdfMake = await loadPdfMake();
     const docDefinition = createPdfDocument(markdown);
 
     return new Promise((resolve) => {

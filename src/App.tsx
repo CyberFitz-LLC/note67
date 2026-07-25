@@ -1,4 +1,12 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import {
+  useState,
+  useMemo,
+  useEffect,
+  useCallback,
+  useRef,
+  lazy,
+  Suspense,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -16,7 +24,6 @@ import {
   SearchModal,
   BacklinksPanel,
   UnlinkedMentionsPanel,
-  GraphView,
   OnboardingWizard,
   TasksView,
   ActionsTab,
@@ -40,6 +47,11 @@ import {
 } from "./hooks";
 import { useThemeStore } from "./stores/themeStore";
 import type { Note, TranscriptSegment, AudioSegment } from "./types";
+
+// Lazy-loaded: GraphView pulls in d3, which is only needed on the graph view.
+const GraphView = lazy(() =>
+  import("./components/graph").then((m) => ({ default: m.GraphView }))
+);
 
 function App() {
   const {
@@ -1049,13 +1061,24 @@ function App() {
         style={{ backgroundColor: "var(--color-bg)" }}
       >
         {currentView === "graph" && (
-          <GraphView
-            onSelectNote={(noteId) => {
-              setSelectedNoteId(noteId);
-              setCurrentView("notes");
-              setActiveTab("note");
-            }}
-          />
+          <Suspense
+            fallback={
+              <div
+                className="flex-1 flex items-center justify-center text-sm"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Loading graph…
+              </div>
+            }
+          >
+            <GraphView
+              onSelectNote={(noteId) => {
+                setSelectedNoteId(noteId);
+                setCurrentView("notes");
+                setActiveTab("note");
+              }}
+            />
+          </Suspense>
         )}
         {currentView === "tasks" && (
           <TasksView

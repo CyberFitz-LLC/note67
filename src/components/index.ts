@@ -16,7 +16,9 @@ export { LinkAutocomplete } from "./LinkAutocomplete";
 export { BacklinksPanel } from "./BacklinksPanel";
 export { UnlinkedMentionsPanel } from "./UnlinkedMentionsPanel";
 export { SearchModal } from "./SearchModal";
-export { GraphView } from "./graph";
+// GraphView is intentionally not re-exported here: it pulls in d3, and a static
+// edge from this barrel would drag d3 into the main chunk. App.tsx lazy-loads it
+// directly from "./components/graph".
 export { OnboardingWizard } from "./onboarding";
 export { TasksView } from "./TasksView";
 export { ActionsTab } from "./ActionsTab";
