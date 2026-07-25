@@ -9,7 +9,7 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub use mixer::mix_wav_files;
+pub use mixer::build_playback_track;
 pub use recorder::{
     pause_recording, resume_recording, start_recording, stop_recording, RecordingPhase,
     RecordingState,

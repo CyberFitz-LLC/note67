@@ -35,46 +35,100 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     resampled
 }
 
-/// Mix two WAV files into a single output file.
-///
-/// Both input files should have the same sample rate and channel count.
-/// If they differ, the function will use the first file's format and resample
-/// or remix the second file as needed.
-///
-/// The mixing is done by averaging samples from both sources to prevent clipping.
-pub fn mix_wav_files(
-    file_a: &Path,
-    file_b: &Path,
-    output: &Path,
-) -> Result<(), AudioError> {
-    // Open both input files
-    let mut reader_a = WavReader::open(file_a)?;
-    let mut reader_b = WavReader::open(file_b)?;
+/// Read a WAV into normalized f32 samples (interleaved), whatever its format.
+fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, WavSpec), AudioError> {
+    let mut reader = WavReader::open(path)?;
+    let spec = reader.spec();
 
-    let spec_a = reader_a.spec();
-    let spec_b = reader_b.spec();
-
-    // Use file A's spec for output, but ensure we handle format differences
-    let output_spec = WavSpec {
-        channels: spec_a.channels,
-        sample_rate: spec_a.sample_rate,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
+    let samples: Vec<f32> = match spec.sample_format {
+        SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),
+        SampleFormat::Int => {
+            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f32 / scale)
+                .collect()
+        }
     };
 
-    let mut writer = WavWriter::create(output, output_spec)?;
+    Ok((samples, spec))
+}
 
-    // Read samples based on the format
-    match (spec_a.sample_format, spec_b.sample_format) {
-        (SampleFormat::Int, SampleFormat::Int) => {
-            mix_int_samples(&mut reader_a, &mut reader_b, &mut writer, spec_a, spec_b)?;
+/// Build one playback track for a whole note: mix each recording segment's mic
+/// and system audio, then concatenate the segments in order.
+///
+/// A note can hold several segments (pause/resume, or continuing a finished
+/// recording). Playback used to be rebuilt from only the segment that had just
+/// stopped, so everything recorded earlier silently vanished from the audio the
+/// user could play back — the transcript kept it, the audio did not.
+///
+/// `segments` is `(mic, optional system)` in playback order. A segment whose mic
+/// file is missing is skipped rather than aborting the whole track; losing one
+/// segment beats losing all of them.
+pub fn build_playback_track(
+    segments: &[(std::path::PathBuf, Option<std::path::PathBuf>)],
+    output: &Path,
+) -> Result<(), AudioError> {
+    let first_mic = segments
+        .iter()
+        .map(|(mic, _)| mic)
+        .find(|mic| mic.exists())
+        .ok_or_else(|| {
+            AudioError::IoError(std::io::Error::other("no readable audio segments"))
+        })?;
+
+    // Everything is converted to the first segment's format so the concatenated
+    // file has one consistent spec.
+    let (_, first_spec) = read_wav_as_f32(first_mic)?;
+    let target_channels = first_spec.channels;
+    let target_rate = first_spec.sample_rate;
+
+    let mut writer = WavWriter::create(
+        output,
+        WavSpec {
+            channels: target_channels,
+            sample_rate: target_rate,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        },
+    )?;
+
+    let to_target = |samples: &[f32], spec: WavSpec| -> Vec<f32> {
+        let remixed = normalize_channels_f32(samples, spec.channels, target_channels);
+        resample(&remixed, spec.sample_rate, target_rate)
+    };
+
+    for (mic_path, system_path) in segments {
+        if !mic_path.exists() {
+            eprintln!("Playback: skipping missing segment {}", mic_path.display());
+            continue;
         }
-        (SampleFormat::Float, SampleFormat::Float) => {
-            mix_float_samples(&mut reader_a, &mut reader_b, &mut writer, spec_a, spec_b)?;
-        }
-        _ => {
-            // Mixed formats - convert to float, mix, convert back
-            mix_mixed_samples(&mut reader_a, &mut reader_b, &mut writer, spec_a, spec_b)?;
+
+        let (mic_raw, mic_spec) = read_wav_as_f32(mic_path)?;
+        let mic = to_target(&mic_raw, mic_spec);
+
+        let system = match system_path {
+            Some(p) if p.exists() => {
+                let (raw, spec) = read_wav_as_f32(p)?;
+                to_target(&raw, spec)
+            }
+            _ => Vec::new(),
+        };
+
+        let len = mic.len().max(system.len());
+        for i in 0..len {
+            let a = mic.get(i).copied().unwrap_or(0.0);
+            let mixed = if system.is_empty() {
+                // Nothing to mix against — halving here would quietly drop a
+                // mic-only segment 6dB below the rest of the track.
+                a
+            } else {
+                (a + system.get(i).copied().unwrap_or(0.0)) / 2.0
+            };
+            let sample =
+                (mixed * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            writer.write_sample(sample)?;
         }
     }
 
@@ -82,185 +136,13 @@ pub fn mix_wav_files(
     Ok(())
 }
 
-fn mix_int_samples<R1: std::io::Read, R2: std::io::Read, W: std::io::Write + std::io::Seek>(
-    reader_a: &mut WavReader<R1>,
-    reader_b: &mut WavReader<R2>,
-    writer: &mut WavWriter<W>,
-    spec_a: WavSpec,
-    spec_b: WavSpec,
-) -> Result<(), AudioError> {
-    // Calculate scale factor based on bit depth
-    let scale_a = (1 << (spec_a.bits_per_sample - 1)) as f32;
-    let scale_b = (1 << (spec_b.bits_per_sample - 1)) as f32;
-
-    // Convert to float for processing (normalized to -1.0 to 1.0)
-    let samples_a: Vec<f32> = reader_a
-        .samples::<i32>()
-        .filter_map(|s| s.ok())
-        .map(|s| s as f32 / scale_a)
-        .collect();
-    let samples_b: Vec<f32> = reader_b
-        .samples::<i32>()
-        .filter_map(|s| s.ok())
-        .map(|s| s as f32 / scale_b)
-        .collect();
-
-    // An empty read is how an unfinalized WAV presents: the header still says
-    // zero samples, so this mixes in silence and the playback track comes out
-    // blank with no error anywhere. Say so rather than writing quiet nonsense.
-    if samples_a.is_empty() || samples_b.is_empty() {
-        eprintln!(
-            "Mixing a source that read as empty (a={} samples, b={} samples) — \
-             the file may not have been finalized before it was read",
-            samples_a.len(),
-            samples_b.len()
-        );
-    }
-
-    // Handle different channel counts
-    let samples_a = normalize_channels_f32(&samples_a, spec_a.channels, spec_a.channels);
-    let samples_b = normalize_channels_f32(&samples_b, spec_b.channels, spec_a.channels);
-
-    // Resample if needed to match sample rates
-    let samples_b = resample(&samples_b, spec_b.sample_rate, spec_a.sample_rate);
-
-    let max_len = samples_a.len().max(samples_b.len());
-
-    for i in 0..max_len {
-        let a = samples_a.get(i).copied().unwrap_or(0.0);
-        let b = samples_b.get(i).copied().unwrap_or(0.0);
-
-        // Mix by averaging to prevent clipping
-        let mixed = (a + b) / 2.0;
-
-        // Convert to i16
-        let sample = (mixed * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        writer.write_sample(sample)?;
-    }
-
-    Ok(())
-}
-
-fn mix_float_samples<R1: std::io::Read, R2: std::io::Read, W: std::io::Write + std::io::Seek>(
-    reader_a: &mut WavReader<R1>,
-    reader_b: &mut WavReader<R2>,
-    writer: &mut WavWriter<W>,
-    spec_a: WavSpec,
-    spec_b: WavSpec,
-) -> Result<(), AudioError> {
-    let samples_a: Vec<f32> = reader_a.samples::<f32>().filter_map(|s| s.ok()).collect();
-    let samples_b: Vec<f32> = reader_b.samples::<f32>().filter_map(|s| s.ok()).collect();
-
-    // Handle different channel counts
-    let samples_a = normalize_channels_f32(&samples_a, spec_a.channels, spec_a.channels);
-    let samples_b = normalize_channels_f32(&samples_b, spec_b.channels, spec_a.channels);
-
-    // Resample if needed to match sample rates
-    let samples_b = resample(&samples_b, spec_b.sample_rate, spec_a.sample_rate);
-
-    let max_len = samples_a.len().max(samples_b.len());
-
-    for i in 0..max_len {
-        let a = samples_a.get(i).copied().unwrap_or(0.0);
-        let b = samples_b.get(i).copied().unwrap_or(0.0);
-
-        // Mix by averaging
-        let mixed = (a + b) / 2.0;
-
-        // Convert to i16
-        let sample = (mixed * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        writer.write_sample(sample)?;
-    }
-
-    Ok(())
-}
-
-fn mix_mixed_samples<R1: std::io::Read, R2: std::io::Read, W: std::io::Write + std::io::Seek>(
-    reader_a: &mut WavReader<R1>,
-    reader_b: &mut WavReader<R2>,
-    writer: &mut WavWriter<W>,
-    spec_a: WavSpec,
-    spec_b: WavSpec,
-) -> Result<(), AudioError> {
-    // Calculate scale factors based on bit depth
-    let scale_a = (1 << (spec_a.bits_per_sample - 1)) as f32;
-    let scale_b = (1 << (spec_b.bits_per_sample - 1)) as f32;
-
-    // Convert both to float for mixing
-    let samples_a: Vec<f32> = if spec_a.sample_format == SampleFormat::Float {
-        reader_a.samples::<f32>().filter_map(|s| s.ok()).collect()
-    } else {
-        reader_a
-            .samples::<i32>()
-            .filter_map(|s| s.ok())
-            .map(|s| s as f32 / scale_a)
-            .collect()
-    };
-
-    let samples_b: Vec<f32> = if spec_b.sample_format == SampleFormat::Float {
-        reader_b.samples::<f32>().filter_map(|s| s.ok()).collect()
-    } else {
-        reader_b
-            .samples::<i32>()
-            .filter_map(|s| s.ok())
-            .map(|s| s as f32 / scale_b)
-            .collect()
-    };
-
-    // Handle different channel counts
-    let samples_a = normalize_channels_f32(&samples_a, spec_a.channels, spec_a.channels);
-    let samples_b = normalize_channels_f32(&samples_b, spec_b.channels, spec_a.channels);
-
-    // Resample if needed to match sample rates
-    let samples_b = resample(&samples_b, spec_b.sample_rate, spec_a.sample_rate);
-
-    let max_len = samples_a.len().max(samples_b.len());
-
-    for i in 0..max_len {
-        let a = samples_a.get(i).copied().unwrap_or(0.0);
-        let b = samples_b.get(i).copied().unwrap_or(0.0);
-
-        let mixed = (a + b) / 2.0;
-        let sample = (mixed * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        writer.write_sample(sample)?;
-    }
-
-    Ok(())
-}
-
-/// Normalize channel count - convert between mono/stereo as needed (i32 version)
-#[allow(dead_code)]
-fn normalize_channels(samples: &[i32], from_channels: u16, to_channels: u16) -> Vec<i32> {
-    if from_channels == to_channels {
-        return samples.to_vec();
-    }
-
-    match (from_channels, to_channels) {
-        (1, 2) => {
-            // Mono to stereo - duplicate each sample
-            samples.iter().flat_map(|&s| [s, s]).collect()
-        }
-        (2, 1) => {
-            // Stereo to mono - average pairs
-            samples
-                .chunks(2)
-                .map(|chunk| {
-                    if chunk.len() == 2 {
-                        ((chunk[0] as i64 + chunk[1] as i64) / 2) as i32
-                    } else {
-                        chunk[0]
-                    }
-                })
-                .collect()
-        }
-        _ => {
-            // For other channel counts, just take what we have
-            samples.to_vec()
-        }
-    }
-}
-
-/// Normalize channel count - convert between mono/stereo as needed (f32 version)
+/// Mix two WAV files into a single output file.
+///
+/// Both input files should have the same sample rate and channel count.
+/// If they differ, the function will use the first file's format and resample
+/// or remix the second file as needed.
+///
+/// The mixing is done by averaging samples from both sources to prevent clipping.
 fn normalize_channels_f32(samples: &[f32], from_channels: u16, to_channels: u16) -> Vec<f32> {
     if from_channels == to_channels {
         return samples.to_vec();
@@ -295,20 +177,6 @@ fn normalize_channels_f32(samples: &[f32], from_channels: u16, to_channels: u16)
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_normalize_channels_mono_to_stereo() {
-        let mono = vec![100, 200, 300];
-        let stereo = normalize_channels(&mono, 1, 2);
-        assert_eq!(stereo, vec![100, 100, 200, 200, 300, 300]);
-    }
-
-    #[test]
-    fn test_normalize_channels_stereo_to_mono() {
-        let stereo = vec![100, 200, 300, 400];
-        let mono = normalize_channels(&stereo, 2, 1);
-        assert_eq!(mono, vec![150, 350]);
-    }
-
     /// Write a WAV of `frames` frames, every sample set to `amplitude`.
     fn write_wav(path: &std::path::Path, channels: u16, frames: usize, amplitude: i16) {
         let spec = WavSpec {
@@ -341,45 +209,92 @@ mod tests {
     /// mic input had audio, because the system-audio side was silent. Mixing
     /// with a silent partner must preserve the other side, not blank both.
     #[test]
-    fn mixing_audio_with_a_silent_partner_keeps_the_audio() {
-        let dir = std::env::temp_dir().join("note67_mixer_silent_partner");
+    fn playback_track_keeps_audio_when_system_is_silent() {
+        // The original report: a session's playback was pure silence because the
+        // system side had none. Mixing against a silent partner must halve the
+        // level, not erase it.
+        let dir = std::env::temp_dir().join("note67_playback_silent_partner");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let mic = dir.join("mic.wav");
         let sys = dir.join("sys.wav");
-        let out = dir.join("out.wav");
+        let out = dir.join("playback.wav");
 
-        // Matches the observed session: mono mic with content, silent stereo system.
-        write_wav(&mic, 1, 48_000, 2_600);
+        write_wav(&mic, 1, 48_000, 8_000);
         write_wav(&sys, 2, 48_000, 0);
 
-        mix_wav_files(&mic, &sys, &out).expect("mix should succeed");
+        build_playback_track(&[(mic, Some(sys))], &out).expect("build playback");
 
         let rms = rms_of(&out);
-        assert!(
-            rms > 100.0,
-            "playback went silent when one side was silent (rms {rms})"
-        );
+        assert!(rms > 1_000.0, "playback went silent when one side was (rms {rms})");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn mixing_two_mono_sources_averages_them() {
-        let dir = std::env::temp_dir().join("note67_mixer_two_mono");
+    fn playback_track_concatenates_every_segment() {
+        // The regression: playback was rebuilt from only the segment that had
+        // just stopped, so continuing a recording silently dropped the audio of
+        // everything before it.
+        let dir = std::env::temp_dir().join("note67_playback_concat");
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let a = dir.join("a.wav");
-        let b = dir.join("b.wav");
-        let out = dir.join("out.wav");
+        let (m0, s0) = (dir.join("m0.wav"), dir.join("s0.wav"));
+        let (m1, s1) = (dir.join("m1.wav"), dir.join("s1.wav"));
+        let out = dir.join("playback.wav");
 
-        write_wav(&a, 1, 4_800, 8_000);
-        write_wav(&b, 1, 4_800, 8_000);
+        write_wav(&m0, 1, 48_000, 4_000); // 1s
+        write_wav(&s0, 1, 48_000, 4_000);
+        write_wav(&m1, 1, 24_000, 4_000); // 0.5s
+        write_wav(&s1, 1, 24_000, 4_000);
 
-        mix_wav_files(&a, &b, &out).expect("mix should succeed");
+        build_playback_track(
+            &[(m0, Some(s0)), (m1, Some(s1))],
+            &out,
+        )
+        .expect("build playback");
 
-        // Same signal on both sides, averaged, so the level is preserved.
-        let rms = rms_of(&out);
-        assert!(rms > 7_000.0 && rms < 9_000.0, "unexpected mixed level {rms}");
+        let mut r = WavReader::open(&out).expect("open output");
+        // 1s + 0.5s at the first segment's 48kHz.
+        assert_eq!(r.duration(), 72_000, "segments were not concatenated");
+        assert!(rms_of(&out) > 100.0, "playback should carry audio");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn playback_track_keeps_a_mic_only_segment_at_full_level() {
+        // No system audio to mix against: halving would drop that stretch 6dB
+        // below the rest of the track.
+        let dir = std::env::temp_dir().join("note67_playback_mic_only");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let mic = dir.join("m.wav");
+        let out = dir.join("playback.wav");
+        write_wav(&mic, 1, 48_000, 8_000);
+
+        build_playback_track(&[(mic, None)], &out).expect("build playback");
+
+        let rms = rms_of(&out);
+        assert!(rms > 7_000.0, "mic-only segment was attenuated (rms {rms})");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_track_skips_a_missing_segment_rather_than_failing() {
+        let dir = std::env::temp_dir().join("note67_playback_missing");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let good = dir.join("good.wav");
+        let out = dir.join("playback.wav");
+        write_wav(&good, 1, 48_000, 4_000);
+
+        build_playback_track(
+            &[(good, None), (dir.join("gone.wav"), None)],
+            &out,
+        )
+        .expect("a missing segment must not abort the whole track");
+
+        assert!(rms_of(&out) > 100.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

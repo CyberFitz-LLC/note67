@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::audio::{
-    self, is_system_audio_available, mix_wav_files, RecordingPhase, RecordingState,
+    self, build_playback_track, is_system_audio_available, RecordingPhase, RecordingState,
     SystemAudioCapture,
 };
 use crate::db::Database;
@@ -285,6 +285,7 @@ pub fn start_dual_recording(
 pub fn stop_dual_recording(
     app: AppHandle,
     state: State<AudioState>,
+    db: State<Database>,
     note_id: String,
 ) -> Result<DualRecordingResult, String> {
     // Stop mic recording
@@ -309,29 +310,10 @@ pub fn stop_dual_recording(
         *sys_path = None;
     }
 
-    // Merge files if we have both
-    let playback_path = if let Some(ref sys_path) = system_path {
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-
-        let recordings_dir = app_data_dir.join("recordings");
-        let playback_filename = format!("{}.wav", note_id);
-        let playback_file = recordings_dir.join(&playback_filename);
-
-        // Merge the two files
-        match mix_wav_files(&mic_path, sys_path, &playback_file) {
-            Ok(()) => Some(playback_file.to_string_lossy().to_string()),
-            Err(e) => {
-                eprintln!("Failed to merge audio files: {}", e);
-                // Fall back to mic path as playback
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Same whole-note rebuild as the segment-aware stop below. Routing both
+    // through one builder is deliberate: this path used to merge only the file
+    // it had just closed, which is exactly how playback lost earlier segments.
+    let playback_path = build_note_playback(&app, &db, &note_id);
 
     Ok(DualRecordingResult {
         mic_path: Some(mic_path.to_string_lossy().to_string()),
@@ -379,34 +361,62 @@ pub fn stop_dual_recording_with_segments(
         let _ = db.update_segment_duration(segment_id, duration_ms);
     }
 
-    // Merge files if we have both
-    let playback_path = if let Some(ref sys_path) = system_path {
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("Failed to get app data dir: {}", e))?;
-
-        let recordings_dir = app_data_dir.join("recordings");
-        let playback_filename = format!("{}.wav", note_id);
-        let playback_file = recordings_dir.join(&playback_filename);
-
-        // Merge the two files
-        match mix_wav_files(&mic_path, sys_path, &playback_file) {
-            Ok(()) => Some(playback_file.to_string_lossy().to_string()),
-            Err(e) => {
-                eprintln!("Failed to merge audio files: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Rebuild playback from every segment in the note, not just the one that
+    // just stopped — otherwise continuing a recording throws away the audio of
+    // everything before it.
+    let playback_path = build_note_playback(&app, &db, &note_id);
 
     Ok(DualRecordingResult {
         mic_path: Some(mic_path.to_string_lossy().to_string()),
         system_path: system_path.map(|p| p.to_string_lossy().to_string()),
         playback_path,
     })
+}
+
+/// Rebuild `{note_id}.wav` from all of the note's recording segments, in order.
+///
+/// Returns `None` (having logged) if it cannot be built — playback is a
+/// convenience, and the per-segment files are still on disk either way, so a
+/// failure here must not fail the stop that produced them.
+fn build_note_playback(app: &AppHandle, db: &Database, note_id: &str) -> Option<String> {
+    let recordings_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("recordings"),
+        Err(e) => {
+            eprintln!("Playback: no app data dir: {}", e);
+            return None;
+        }
+    };
+
+    let segments = match db.get_audio_segments(note_id) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Playback: could not read audio segments: {}", e);
+            return None;
+        }
+    };
+
+    // get_audio_segments already returns display order; keep it.
+    let inputs: Vec<(PathBuf, Option<PathBuf>)> = segments
+        .iter()
+        .filter_map(|seg| {
+            seg.mic_path
+                .as_ref()
+                .map(|mic| (PathBuf::from(mic), seg.system_path.as_ref().map(PathBuf::from)))
+        })
+        .collect();
+
+    if inputs.is_empty() {
+        return None;
+    }
+
+    let playback_file = recordings_dir.join(format!("{}.wav", note_id));
+    match build_playback_track(&inputs, &playback_file) {
+        Ok(()) => Some(playback_file.to_string_lossy().to_string()),
+        Err(e) => {
+            eprintln!("Playback: failed to build track from {} segment(s): {}", inputs.len(), e);
+            None
+        }
+    }
 }
 
 /// Check if dual recording is currently active
