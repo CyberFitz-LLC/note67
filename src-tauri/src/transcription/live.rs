@@ -240,28 +240,28 @@ pub async fn start_live_transcription(
             // Process system results FIRST and update rolling history for echo detection
             let mut current_system_segments: Vec<TranscriptionSegment> = Vec::new();
 
-            if let Some(transcription) = &system_result {
-                if !transcription.segments.is_empty() {
-                    let valid: Vec<_> = transcription
-                        .segments
-                        .iter()
-                        .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
-                        .cloned()
-                        .collect();
+            if let Some(transcription) = &system_result
+                && !transcription.segments.is_empty()
+            {
+                let valid: Vec<_> = transcription
+                    .segments
+                    .iter()
+                    .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
+                    .cloned()
+                    .collect();
 
-                    // Add new segments to rolling history
-                    {
-                        let mut history = live_state_clone.recent_system_segments.lock().await;
-                        for seg in &valid {
-                            history.push((seg.start_time, seg.end_time, seg.text.clone()));
-                        }
-                        // Keep only last 30 seconds of system segments (based on end_time)
-                        let current_time = *live_state_clone.system_time_offset.lock().await;
-                        let cutoff = current_time - 30.0;
-                        history.retain(|(_, end, _)| *end > cutoff);
+                // Add new segments to rolling history
+                {
+                    let mut history = live_state_clone.recent_system_segments.lock().await;
+                    for seg in &valid {
+                        history.push((seg.start_time, seg.end_time, seg.text.clone()));
                     }
-                    current_system_segments = valid;
+                    // Keep only last 30 seconds of system segments (based on end_time)
+                    let current_time = *live_state_clone.system_time_offset.lock().await;
+                    let cutoff = current_time - 30.0;
+                    history.retain(|(_, end, _)| *end > cutoff);
                 }
+                current_system_segments = valid;
             }
 
             // Get current rolling history for echo check
@@ -269,42 +269,42 @@ pub async fn start_live_transcription(
                 live_state_clone.recent_system_segments.lock().await.clone();
 
             // Process mic results with echo filtering
-            if let Some(transcription) = mic_result {
-                if !transcription.segments.is_empty() {
-                    // Filter out blank segments AND echo duplicates
-                    let valid_segments: Vec<_> = transcription
-                        .segments
-                        .into_iter()
-                        .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
-                        .filter(|s| !is_echo_of_system(&s.text, s.start_time, s.end_time, &system_segments_for_echo_check))
-                        .collect();
+            if let Some(transcription) = mic_result
+                && !transcription.segments.is_empty()
+            {
+                // Filter out blank segments AND echo duplicates
+                let valid_segments: Vec<_> = transcription
+                    .segments
+                    .into_iter()
+                    .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
+                    .filter(|s| !is_echo_of_system(&s.text, s.start_time, s.end_time, &system_segments_for_echo_check))
+                    .collect();
 
-                    if !valid_segments.is_empty() {
-                        for segment in &valid_segments {
-                            db_segments.push((
-                                note_id_clone.clone(),
-                                segment.start_time,
-                                segment.end_time,
-                                segment.text.clone(),
-                                Some("You".to_string()),
-                                Some("live".to_string()),
-                                None,
-                            ));
-                        }
-
-                        live_state_clone
-                            .segments
-                            .lock()
-                            .await
-                            .extend(valid_segments.clone());
-
-                        all_events.push(TranscriptionUpdateEvent {
-                            note_id: note_id_clone.clone(),
-                            segments: valid_segments,
-                            is_final: false,
-                            audio_source: AudioSource::Mic,
-                        });
+                if !valid_segments.is_empty() {
+                    for segment in &valid_segments {
+                        db_segments.push((
+                            note_id_clone.clone(),
+                            segment.start_time,
+                            segment.end_time,
+                            segment.text.clone(),
+                            Some("You".to_string()),
+                            Some("live".to_string()),
+                            None,
+                        ));
                     }
+
+                    live_state_clone
+                        .segments
+                        .lock()
+                        .await
+                        .extend(valid_segments.clone());
+
+                    all_events.push(TranscriptionUpdateEvent {
+                        note_id: note_id_clone.clone(),
+                        segments: valid_segments,
+                        is_final: false,
+                        audio_source: AudioSource::Mic,
+                    });
                 }
             }
 

@@ -23,7 +23,7 @@ fn split_into_chunks(text: &str, max_size: usize) -> Vec<String> {
     let mut current_chunk = String::new();
 
     // Split by sentences (rough approximation)
-    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+    for sentence in text.split_inclusive(['.', '!', '?']) {
         if current_chunk.len() + sentence.len() > max_size && !current_chunk.is_empty() {
             chunks.push(current_chunk.trim().to_string());
             current_chunk = String::new();
@@ -847,10 +847,8 @@ pub async fn generate_title(
         // Check if title is valid
         if title != "Meeting Notes" && is_valid_title(&title) {
             break;
-        } else {
-            if attempt == max_retries {
-                title = "Meeting Notes".to_string();
-            }
+        } else if attempt == max_retries {
+            title = "Meeting Notes".to_string();
         }
     }
 
@@ -875,10 +873,10 @@ pub async fn generate_title(
         .map_err(|e| e.to_string())?;
 
         // Update incoming links if title changed
-        if let Some(old) = old_title {
-            if old != title {
-                update_incoming_links_internal(&conn, &note_id, &old, &title)?;
-            }
+        if let Some(old) = old_title
+            && old != title
+        {
+            update_incoming_links_internal(&conn, &note_id, &old, &title)?;
         }
     }
 
@@ -908,7 +906,7 @@ fn is_valid_title(title: &str) -> bool {
         }
 
         // Check for 2-char pattern repeated (e.g., "abab")
-        if chars.len() >= 4 && chars.len() % 2 == 0 {
+        if chars.len() >= 4 && chars.len().is_multiple_of(2) {
             let pattern = &chars[0..2];
             let mut is_repeating = true;
             for i in (0..chars.len()).step_by(2) {
@@ -1183,10 +1181,8 @@ pub async fn generate_title_from_summary(
         // Check if title is valid
         if title != "Meeting Notes" && is_valid_title(&title) {
             break;
-        } else {
-            if attempt == max_retries {
-                title = "Meeting Notes".to_string();
-            }
+        } else if attempt == max_retries {
+            title = "Meeting Notes".to_string();
         }
     }
 
@@ -1211,10 +1207,10 @@ pub async fn generate_title_from_summary(
         .map_err(|e| e.to_string())?;
 
         // Update incoming links if title changed
-        if let Some(old) = old_title {
-            if old != title {
-                update_incoming_links_internal(&conn, &note_id, &old, &title)?;
-            }
+        if let Some(old) = old_title
+            && old != title
+        {
+            update_incoming_links_internal(&conn, &note_id, &old, &title)?;
         }
     }
 

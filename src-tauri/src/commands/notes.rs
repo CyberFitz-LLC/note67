@@ -204,10 +204,10 @@ pub fn update_note(
     }
 
     // Update incoming links if title changed
-    if let (Some(old), Some(new)) = (old_title, update.title.as_ref()) {
-        if &old != new {
-            update_incoming_links_internal(&conn, &id, &old, new)?;
-        }
+    if let (Some(old), Some(new)) = (old_title, update.title.as_ref())
+        && &old != new
+    {
+        update_incoming_links_internal(&conn, &id, &old, new)?;
     }
 
     // Emit events for real-time updates
@@ -305,12 +305,11 @@ pub fn delete_note(
         .map_err(|e| e.to_string())?;
 
     // Delete the audio file if it exists
-    if let Some(path) = audio_path {
-        if !path.is_empty() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("Failed to delete audio file {}: {}", path, e);
-            }
-        }
+    if let Some(path) = audio_path
+        && !path.is_empty()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
+        eprintln!("Failed to delete audio file {}: {}", path, e);
     }
 
     // Emit event for real-time updates
@@ -382,17 +381,17 @@ pub fn delete_note_audio_segments(db: State<Database>, note_id: String) -> Resul
     // Delete audio files
     for segment in segments {
         // Delete mic file if present
-        if let Some(ref mic_path) = segment.mic_path {
-            if let Err(e) = std::fs::remove_file(mic_path) {
-                eprintln!("Failed to delete mic segment file {}: {}", mic_path, e);
-            }
+        if let Some(ref mic_path) = segment.mic_path
+            && let Err(e) = std::fs::remove_file(mic_path)
+        {
+            eprintln!("Failed to delete mic segment file {}: {}", mic_path, e);
         }
 
         // Delete system audio file if present
-        if let Some(ref sys_path) = segment.system_path {
-            if let Err(e) = std::fs::remove_file(sys_path) {
-                eprintln!("Failed to delete system segment file {}: {}", sys_path, e);
-            }
+        if let Some(ref sys_path) = segment.system_path
+            && let Err(e) = std::fs::remove_file(sys_path)
+        {
+            eprintln!("Failed to delete system segment file {}: {}", sys_path, e);
         }
     }
 

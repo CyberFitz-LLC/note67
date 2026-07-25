@@ -229,13 +229,13 @@ impl OllamaClient {
                         if line.is_empty() {
                             continue;
                         }
-                        if let Ok(gen_response) = serde_json::from_str::<GenerateResponse>(line) {
-                            if !gen_response.response.is_empty() {
-                                eprintln!("[ollama] Parsed token: {:?}", &gen_response.response);
-                                full_response.push_str(&gen_response.response);
-                                // Send chunk to channel
-                                let _ = tx.send(gen_response.response).await;
-                            }
+                        if let Ok(gen_response) = serde_json::from_str::<GenerateResponse>(line)
+                            && !gen_response.response.is_empty()
+                        {
+                            eprintln!("[ollama] Parsed token: {:?}", &gen_response.response);
+                            full_response.push_str(&gen_response.response);
+                            // Send chunk to channel
+                            let _ = tx.send(gen_response.response).await;
                         }
                     }
                 }

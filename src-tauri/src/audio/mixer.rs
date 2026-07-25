@@ -282,7 +282,6 @@ fn normalize_channels_f32(samples: &[f32], from_channels: u16, to_channels: u16)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn test_normalize_channels_mono_to_stereo() {

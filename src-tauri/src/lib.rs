@@ -108,13 +108,13 @@ fn greet(name: &str) -> String {
 fn cleanup_temp_files(app: &tauri::AppHandle) {
     if let Ok(app_data) = app.path().app_data_dir() {
         let recordings_dir = app_data.join("recordings");
-        if recordings_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&recordings_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "tmp").unwrap_or(false) {
-                        let _ = std::fs::remove_file(&path);
-                    }
+        if recordings_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&recordings_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "tmp").unwrap_or(false) {
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }

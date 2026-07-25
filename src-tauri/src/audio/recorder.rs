@@ -88,10 +88,10 @@ impl RecordingState {
 
     /// Get the elapsed time since segment start in milliseconds
     pub fn get_segment_elapsed_ms(&self) -> i64 {
-        if let Ok(start_time) = self.segment_start_time.lock() {
-            if let Some(start) = *start_time {
-                return start.elapsed().as_millis() as i64;
-            }
+        if let Ok(start_time) = self.segment_start_time.lock()
+            && let Some(start) = *start_time
+        {
+            return start.elapsed().as_millis() as i64;
         }
         0
     }
@@ -311,10 +311,10 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
 
     // Finalize the WAV file
     drop(stream);
-    if let Ok(mut guard) = writer.lock() {
-        if let Some(w) = guard.take() {
-            let _ = w.finalize();
-        }
+    if let Ok(mut guard) = writer.lock()
+        && let Some(w) = guard.take()
+    {
+        let _ = w.finalize();
     }
 
     Ok(())
@@ -340,12 +340,12 @@ fn process_audio(
     }
 
     // Write to WAV file
-    if let Ok(mut guard) = writer.lock() {
-        if let Some(ref mut w) = *guard {
-            for &sample in data {
-                let sample_i16 = (sample * i16::MAX as f32) as i16;
-                let _ = w.write_sample(sample_i16);
-            }
+    if let Ok(mut guard) = writer.lock()
+        && let Some(ref mut w) = *guard
+    {
+        for &sample in data {
+            let sample_i16 = (sample * i16::MAX as f32) as i16;
+            let _ = w.write_sample(sample_i16);
         }
     }
 }

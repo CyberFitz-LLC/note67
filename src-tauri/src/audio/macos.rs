@@ -162,24 +162,22 @@ fn process_audio_buffer(sample_buffer: CMSampleBufferRef) {
         let right_channel = &samples[samples_per_channel..];
 
         // Write audio data to WAV file (interleaved stereo)
-        if let Ok(mut guard) = get_audio_writer().lock() {
-            if let Some(ref mut state) = *guard {
-                if state.is_active {
-                    if let Some(ref mut writer) = state.writer {
-                        // Interleave left and right channels
-                        for i in 0..samples_per_channel {
-                            let left = left_channel.get(i).copied().unwrap_or(0.0);
-                            let right = right_channel.get(i).copied().unwrap_or(0.0);
+        if let Ok(mut guard) = get_audio_writer().lock()
+            && let Some(ref mut state) = *guard
+            && state.is_active
+            && let Some(ref mut writer) = state.writer
+        {
+            // Interleave left and right channels
+            for i in 0..samples_per_channel {
+                let left = left_channel.get(i).copied().unwrap_or(0.0);
+                let right = right_channel.get(i).copied().unwrap_or(0.0);
 
-                            // Convert f32 (-1.0 to 1.0) to i16
-                            let left_i16 = (left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                            let right_i16 = (right.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                // Convert f32 (-1.0 to 1.0) to i16
+                let left_i16 = (left.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                let right_i16 = (right.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
 
-                            let _ = writer.write_sample(left_i16);
-                            let _ = writer.write_sample(right_i16);
-                        }
-                    }
-                }
+                let _ = writer.write_sample(left_i16);
+                let _ = writer.write_sample(right_i16);
             }
         }
 
@@ -331,7 +329,7 @@ impl MacOSSystemAudioCapture {
                     let error_desc: *mut objc2_foundation::NSString = msg_send![error, localizedDescription];
                     let error_msg = if !error_desc.is_null() {
                         let desc_ref = &*error_desc;
-                        format!("SCShareableContent error: {}", desc_ref.to_string())
+                        format!("SCShareableContent error: {}", desc_ref)
                     } else {
                         "Failed to get shareable content (unknown error)".to_string()
                     };

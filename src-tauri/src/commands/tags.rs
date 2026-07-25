@@ -252,10 +252,8 @@ pub fn get_all_note_tags(db: State<Database>) -> Result<std::collections::HashMa
         })
         .map_err(|e| e.to_string())?;
 
-    for row in rows {
-        if let Ok((note_id, tag)) = row {
-            result.entry(note_id).or_default().push(tag);
-        }
+    for (note_id, tag) in rows.flatten() {
+        result.entry(note_id).or_default().push(tag);
     }
 
     Ok(result)

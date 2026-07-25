@@ -251,12 +251,12 @@ pub fn get_audio_duration_ms(path: &Path) -> Result<i64, AudioError> {
         }
 
         // Fallback: use time base if available
-        if let Some(time_base) = track.codec_params.time_base {
-            if let Some(n_frames) = track.codec_params.n_frames {
-                let duration_secs =
-                    (n_frames as f64 * time_base.numer as f64) / time_base.denom as f64;
-                return Ok((duration_secs * 1000.0) as i64);
-            }
+        if let Some(time_base) = track.codec_params.time_base
+            && let Some(n_frames) = track.codec_params.n_frames
+        {
+            let duration_secs =
+                (n_frames as f64 * time_base.numer as f64) / time_base.denom as f64;
+            return Ok((duration_secs * 1000.0) as i64);
         }
     }
 
