@@ -69,6 +69,54 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Atomically replace a note's transcript with `segments`.
+    ///
+    /// The delete and the inserts share one transaction, so an interruption
+    /// leaves the previous transcript intact. Retranscription used to delete
+    /// first and insert as it went, which meant closing the app mid-pass (or any
+    /// error after the delete) destroyed a perfectly good transcript with no way
+    /// back — the audio survives, but the text was gone.
+    pub fn replace_transcript_segments(
+        &self,
+        note_id: &str,
+        segments: &[NewTranscriptSegment],
+    ) -> anyhow::Result<usize> {
+        let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let now = Utc::now().to_rfc3339();
+
+        let tx = conn.transaction()?;
+        let mut count = 0;
+
+        tx.execute(
+            "DELETE FROM transcript_segments WHERE note_id = ?1",
+            [note_id],
+        )?;
+
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO transcript_segments (note_id, start_time, end_time, text, speaker, source_type, source_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+
+            for segment in segments {
+                stmt.execute(params![
+                    segment.note_id,
+                    segment.start_time,
+                    segment.end_time,
+                    segment.text,
+                    segment.speaker,
+                    segment.source_type,
+                    segment.source_id,
+                    &now
+                ])?;
+                count += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// Add multiple transcript segments in a single transaction (batch insert)
     pub fn add_transcript_segments_batch(
         &self,
@@ -140,16 +188,6 @@ impl Database {
             .collect();
 
         Ok(segments)
-    }
-
-    /// Delete all transcript segments for a note
-    pub fn delete_transcript_segments(&self, note_id: &str) -> anyhow::Result<()> {
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
-        conn.execute(
-            "DELETE FROM transcript_segments WHERE note_id = ?1",
-            [note_id],
-        )?;
-        Ok(())
     }
 
     /// Delete transcript segments by source (e.g., when deleting an uploaded audio)

@@ -661,12 +661,10 @@ pub async fn retranscribe_note(
     let mut failed_items: Vec<String> = Vec::new();
     let mut total_segments_created = 0;
 
-    // Delete ALL existing transcripts for this note first
-    // This handles both new format (with source_type) and legacy format (source_type=null)
-    if let Err(e) = db.delete_transcript_segments(&note_id) {
-        state.is_transcribing.store(false, Ordering::SeqCst);
-        return Err(format!("Failed to delete existing transcripts: {}", e));
-    }
+    // Build the new transcript in memory and swap it in atomically at the end.
+    // Deleting up front meant an interruption — closing the app mid-pass, or any
+    // error after the delete — left the note with no transcript at all.
+    let mut rebuilt: Vec<NewTranscriptSegment> = Vec::new();
 
     // Emit initial progress
     let _ = app.emit("retranscribe-progress", serde_json::json!({
@@ -743,17 +741,12 @@ pub async fn retranscribe_note(
 
                             let (start_time, end_time) =
                                 clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                            match db.add_transcript_segment(
-                                &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                            rebuilt.push(
+                                NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
                                     .with_speaker(Some("Others".to_string()))
                                     .with_source("segment", segment.id),
-                            ) {
-                                Ok(_) => total_segments_created += 1,
-                                Err(e) => eprintln!(
-                                    "Failed to persist system transcript segment for note {}: {}",
-                                    note_id, e
-                                ),
-                            }
+                            );
+                            total_segments_created += 1;
                         }
                     }
                 }
@@ -792,17 +785,12 @@ pub async fn retranscribe_note(
 
                         let (start_time, end_time) =
                             clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                        match db.add_transcript_segment(
-                            &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                        rebuilt.push(
+                            NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
                                 .with_speaker(Some("You".to_string()))
                                 .with_source("segment", segment.id),
-                        ) {
-                            Ok(_) => total_segments_created += 1,
-                            Err(e) => eprintln!(
-                                "Failed to persist mic transcript segment for note {}: {}",
-                                note_id, e
-                            ),
-                        }
+                        );
+                        total_segments_created += 1;
                     }
                     if echo_filtered > 0 {
                         println!("[retranscribe_note] Filtered {} echo segments from mic", echo_filtered);
@@ -839,12 +827,9 @@ pub async fn retranscribe_note(
         // Update status to processing
         let _ = db.update_uploaded_audio_status(upload.id, "processing");
 
-        // Delete existing transcripts for this upload
-        if let Err(e) = db.delete_transcript_segments_by_source("upload", upload.id) {
-            let _ = db.update_uploaded_audio_status(upload.id, "failed");
-            failed_items.push(format!("{}: {}", item_name, e));
-            continue;
-        }
+        // No per-upload delete here: the whole transcript is replaced in one
+        // transaction at the end, so deleting now would undo the atomicity and
+        // leave a gap if this pass never finishes.
 
         // Transcribe
         let file_path = PathBuf::from(&upload.file_path);
@@ -857,17 +842,12 @@ pub async fn retranscribe_note(
                     if !should_skip_segment(&seg.text, seg.start_time, seg.end_time) {
                         let (start_time, end_time) =
                             clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                        match db.add_transcript_segment(
-                            &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                        rebuilt.push(
+                            NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
                                 .with_speaker(Some(upload.speaker_label.clone()))
                                 .with_source("upload", upload.id),
-                        ) {
-                            Ok(_) => total_segments_created += 1,
-                            Err(e) => eprintln!(
-                                "Failed to persist uploaded transcript segment for note {}: {}",
-                                note_id, e
-                            ),
-                        }
+                        );
+                        total_segments_created += 1;
                     }
                 }
                 let _ = db.update_uploaded_audio_status(upload.id, "completed");
@@ -883,6 +863,29 @@ pub async fn retranscribe_note(
         }
 
         completed_items += 1;
+    }
+
+    // Swap the rebuilt transcript in, in a single transaction. Up to this point
+    // the note still holds its previous transcript, so anything that went wrong
+    // above — including the app being closed — costs nothing.
+    //
+    // If every item failed there is nothing trustworthy to write, so keep what
+    // was already there rather than replacing a real transcript with silence.
+    if total_items > 0 && failed_items.len() == total_items {
+        state.is_transcribing.store(false, Ordering::SeqCst);
+        return Err(format!(
+            "Retranscription failed for all {} item(s); the existing transcript was left untouched: {}",
+            total_items,
+            failed_items.join("; ")
+        ));
+    }
+
+    if let Err(e) = db.replace_transcript_segments(&note_id, &rebuilt) {
+        state.is_transcribing.store(false, Ordering::SeqCst);
+        return Err(format!(
+            "Failed to save the rebuilt transcript (the existing one was kept): {}",
+            e
+        ));
     }
 
     state.is_transcribing.store(false, Ordering::SeqCst);
