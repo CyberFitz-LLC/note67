@@ -8,7 +8,19 @@
 
 A private, local meeting notes assistant. Capture audio, transcribe locally with Whisper, and generate AI-powered summaries — all on your device.
 
-## What's New (v0.1.24)
+## What's New (v0.1.25)
+
+- Fixed your own voice missing from the transcript — quiet microphones are now boosted before transcription instead of being treated as silence
+- Fixed short replies like "hello" or "thanks" being dropped from the live transcript
+- Fixed speech being discarded when you talk at the same time as the meeting audio
+- Whisper's stage directions (`*Slow's voice*`, `*sighs*`) no longer show up as transcript lines
+- Live transcription now appears below earlier recordings instead of jumping to the top, and stays in view as it arrives
+- Fixed silent playback audio when continuing a recording
+- Retranscription no longer loses your existing transcript if it's interrupted
+- Recommended transcription model is now Turbo Q8 — same quality and speed, half the download
+- Faster startup and a smaller app bundle
+
+### v0.1.24
 
 - Tasks — turn a meeting's action items into a real to-do list, or add standalone tasks; each task has a due date, description, and subtasks
 - Central Tasks page — open tasks from every meeting in one place, grouped by date (Overdue / Today / Tomorrow / Future) with quick filters
@@ -143,9 +155,9 @@ Note67 can distinguish between your voice and other meeting participants:
 When using speakers instead of headphones, your microphone picks up audio from your speakers, causing duplicate transcriptions. Note67 handles this with a multi-layer approach:
 
 **How it works:**
-1. **Voice Activity Detection (VAD)** - Mic audio is only transcribed if RMS energy exceeds threshold, filtering silence and ambient noise
+1. **Level normalization + Voice Activity Detection (VAD)** - Quiet microphones are boosted to a usable level first, then transcribed only if their energy clears a threshold. Normalizing before the check is what keeps a quiet speaker from being mistaken for silence
 2. **Echo Deduplication** - Mic transcripts are compared against a 30-second rolling history of system audio segments
-3. **Text Similarity Matching** - If mic text shares 3+ words with overlapping system audio, it's filtered as echo
+3. **Text Similarity Matching** - A mic segment is treated as echo only when it repeats words from an overlapping system segment. Overlapping in time is not enough on its own — two people talking at once is normal in a meeting, so that speech is kept
 
 **For best results:**
 - Headphones are still recommended for optimal quality
@@ -155,7 +167,7 @@ When using speakers instead of headphones, your microphone picks up audio from y
 
 | Layer | Technology |
 |-------|------------|
-| Frontend | React 18 + TypeScript + Tailwind CSS v4 |
+| Frontend | React 19 + TypeScript + Tailwind CSS v4 |
 | Backend | Rust (Tauri v2) |
 | State | Zustand |
 | Database | SQLite (rusqlite) |
