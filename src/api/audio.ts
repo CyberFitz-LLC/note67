@@ -20,6 +20,16 @@ export const audioApi = {
     return invoke("stop_recording");
   },
 
+  /** Whether a note's combined track is missing audio from some of its segments. */
+  playbackNeedsRebuild: (noteId: string): Promise<boolean> => {
+    return invoke("playback_needs_rebuild", { noteId });
+  },
+
+  /** Rebuild a note's combined track from its segments. Returns the path. */
+  rebuildNotePlayback: (noteId: string): Promise<string> => {
+    return invoke("rebuild_note_playback", { noteId });
+  },
+
   /** Playback path for one recording segment, mixed (mic + system) on demand. */
   getSegmentPlaybackPath: (segmentId: number): Promise<string> => {
     return invoke("get_segment_playback_path", { segmentId });

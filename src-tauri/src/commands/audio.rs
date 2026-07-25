@@ -419,6 +419,75 @@ fn build_note_playback(app: &AppHandle, db: &Database, note_id: &str) -> Option<
     }
 }
 
+/// Duration of a WAV in seconds, from its header alone.
+fn wav_duration_secs(path: &PathBuf) -> Option<f64> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let rate = reader.spec().sample_rate;
+    if rate == 0 {
+        return None;
+    }
+    Some(reader.duration() as f64 / rate as f64)
+}
+
+/// Whether a note's combined playback track is missing audio.
+///
+/// Playback is only rewritten when a recording stops, so notes recorded before
+/// playback learned to span every segment still hold a file containing just the
+/// last one. Compares the track against the segments it should cover rather
+/// than tracking a schema version — the files are the truth, and this stays
+/// correct if a segment is ever removed or re-recorded.
+#[tauri::command]
+pub fn playback_needs_rebuild(
+    app: AppHandle,
+    db: State<Database>,
+    note_id: String,
+) -> Result<bool, String> {
+    let segments = db.get_audio_segments(&note_id).map_err(|e| e.to_string())?;
+
+    // A single segment cannot be truncated, and with none there is nothing to
+    // rebuild from.
+    if segments.len() < 2 {
+        return Ok(false);
+    }
+
+    let expected: f64 = segments
+        .iter()
+        .filter_map(|seg| seg.mic_path.as_ref().or(seg.system_path.as_ref()))
+        .map(PathBuf::from)
+        .filter_map(|p| wav_duration_secs(&p))
+        .sum();
+
+    // Source files gone — nothing to rebuild from, so do not offer it.
+    if expected <= 0.0 {
+        return Ok(false);
+    }
+
+    let recordings_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("recordings");
+    let current = wav_duration_secs(&recordings_dir.join(format!("{}.wav", note_id)))
+        .unwrap_or(0.0);
+
+    // Tolerance for resampling and rounding across segment boundaries.
+    Ok(current < expected * 0.95)
+}
+
+/// Rebuild a note's combined playback track from its segments.
+///
+/// Only regenerates the derived {note_id}.wav; transcripts, notes and the
+/// per-segment audio are untouched, so it is safe to run repeatedly.
+#[tauri::command]
+pub fn rebuild_note_playback(
+    app: AppHandle,
+    db: State<Database>,
+    note_id: String,
+) -> Result<String, String> {
+    build_note_playback(&app, &db, &note_id)
+        .ok_or_else(|| "Could not rebuild playback from this note's recordings".to_string())
+}
+
 /// Path to a single recording segment's audio, mixed for playback.
 ///
 /// The list of recordings plays each segment on its own. Handing back the raw

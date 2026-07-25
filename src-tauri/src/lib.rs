@@ -367,6 +367,8 @@ pub fn run() {
             commands::start_dual_recording,
             commands::stop_dual_recording,
             commands::get_segment_playback_path,
+            commands::playback_needs_rebuild,
+            commands::rebuild_note_playback,
             commands::stop_dual_recording_with_segments,
             commands::is_dual_recording,
             // Pause/Resume/Continue recording commands

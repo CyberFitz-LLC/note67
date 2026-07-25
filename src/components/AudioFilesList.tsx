@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { UploadedAudio, AudioSegment, AudioItem } from "../types";
 import { uploadApi } from "../api/upload";
 import { audioApi } from "../api/audio";
@@ -350,6 +350,51 @@ export function AudioFilesList({
     return item.data.file_path;
   };
 
+  // Notes recorded before playback learned to span every segment still hold a
+  // track containing only the last one. Offer a rebuild on exactly those,
+  // rather than a permanent button that is a no-op almost everywhere.
+  const noteId = segments[0]?.note_id;
+  const [needsRebuild, setNeedsRebuild] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  // No setState in the effect body — this codebase keeps those in the async
+  // continuation only. Staleness is handled by deriving `showRebuild` below.
+  useEffect(() => {
+    if (!noteId || segments.length < 2) return;
+    let cancelled = false;
+    audioApi
+      .playbackNeedsRebuild(noteId)
+      .then((needs) => {
+        if (!cancelled) setNeedsRebuild(needs);
+      })
+      .catch((err) => {
+        console.error("Failed to check playback track:", err);
+        if (!cancelled) setNeedsRebuild(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [noteId, segments.length]);
+
+  // Derived rather than stored, so a note dropping below two segments cannot
+  // leave a stale button behind.
+  const showRebuild = needsRebuild && segments.length >= 2;
+
+  const handleRebuild = async () => {
+    if (!noteId || rebuilding) return;
+    setRebuilding(true);
+    try {
+      const path = await audioApi.rebuildNotePlayback(noteId);
+      setNeedsRebuild(false);
+      // Play the repaired track so the result is immediately audible.
+      onPlayAudio?.(path);
+    } catch (err) {
+      console.error("Failed to rebuild playback:", err);
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
   // Styling for a row in the list. The playing row gets an accent outline —
   // the play button alone is easy to miss when several rows look identical.
   const rowStyle = (active: boolean) => ({
@@ -412,7 +457,21 @@ export function AudioFilesList({
                 </span>
               </div>
             </div>
-            <div className="flex gap-1.5 shrink-0">
+            <div className="flex gap-1.5 shrink-0 items-center">
+              {showRebuild && (
+                <button
+                  onClick={handleRebuild}
+                  disabled={rebuilding}
+                  className="px-2 py-0.5 text-xs rounded transition-colors disabled:opacity-50"
+                  style={{
+                    border: "1px solid var(--color-accent)",
+                    color: "var(--color-accent)",
+                  }}
+                  title="This track is missing audio from earlier recordings. Rebuild it from them."
+                >
+                  {rebuilding ? "Rebuilding…" : "Rebuild"}
+                </button>
+              )}
               <DownloadButton onDownload={() => handleDownload(mainAudioPath!, "main-recording")} />
             </div>
           </li>
