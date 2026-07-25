@@ -368,8 +368,6 @@ pub fn run() {
             commands::stop_dual_recording,
             commands::stop_dual_recording_with_segments,
             commands::is_dual_recording,
-            commands::is_aec_enabled,
-            commands::set_aec_enabled,
             // Pause/Resume/Continue recording commands
             commands::get_recording_phase,
             commands::pause_recording_cmd,

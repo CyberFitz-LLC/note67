@@ -65,17 +65,6 @@ export const audioApi = {
     return invoke("is_dual_recording");
   },
 
-  // AEC (Acoustic Echo Cancellation) settings
-  /** Check if AEC is enabled */
-  isAecEnabled: (): Promise<boolean> => {
-    return invoke("is_aec_enabled");
-  },
-
-  /** Enable or disable AEC (disable when using headphones for better performance) */
-  setAecEnabled: (enabled: boolean): Promise<void> => {
-    return invoke("set_aec_enabled", { enabled });
-  },
-
   // ========== Pause/Resume/Continue Recording ==========
 
   /** Get the current recording phase (0=Idle, 1=Recording, 2=Paused) */

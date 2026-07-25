@@ -1,4 +1,3 @@
-pub mod aec;
 pub mod converter;
 pub mod mixer;
 pub mod recorder;

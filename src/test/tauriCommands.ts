@@ -55,7 +55,6 @@ export const defaultCommands: CommandMap = {
   get_autostart_enabled: false,
   set_autostart_enabled: null,
   is_meeting_detection_enabled: false,
-  is_aec_enabled: true,
 
   // Ollama (running + model selected)
   get_ollama_status: {
