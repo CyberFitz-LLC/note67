@@ -11,6 +11,8 @@ pub use transcriber::{TranscriptionResult, TranscriptionSegment, Transcriber};
 /// Catches the junk Whisper emits when fed near-silence or low-level noise:
 /// - explicit non-speech markers (`[blank_audio]`, `[music]`, ...)
 /// - segments with no alphanumeric content (`.`, `-`, `...`, `--`, `♪`)
+/// - whole-segment asterisk narration (`*Slow's voice*`, `*sighs*`) — the same
+///   artifact as the bracketed markers in a different convention
 /// - bare numbers (`3`, `3.`) — common stray outputs on silence
 /// - well-known silence hallucinations that make up the ENTIRE segment
 ///   ("thank you", "thanks for watching", "you", "hello", "professor", ...).
@@ -65,6 +67,23 @@ fn should_skip_segment_inner(
 
     // Punctuation/symbol-only segments (".", "-", "...", "--", etc.)
     if !trimmed.chars().any(|c| c.is_alphanumeric()) {
+        return true;
+    }
+
+    // Whisper sometimes narrates instead of transcribing, emitting a stage
+    // direction wrapped in asterisks: "*Slow's voice*", "*sighs*",
+    // "*music playing*". Same class of artifact as the [bracketed] markers
+    // above, just a different convention.
+    //
+    // Only when the WHOLE segment is one annotation. "*sighs* okay then" still
+    // contains real speech, and "*a* word *b*" is not a single annotation — so
+    // an interior asterisk disqualifies it.
+    let unstarred = trimmed.trim_matches('*');
+    if trimmed.starts_with('*')
+        && trimmed.ends_with('*')
+        && !unstarred.is_empty()
+        && !unstarred.contains('*')
+    {
         return true;
     }
 
@@ -239,6 +258,38 @@ mod tests {
         }
         // Short one-word segments are fine; only the long ones are dropped.
         assert!(!should_skip_segment("Okay", 5.0, 5.6));
+    }
+
+    #[test]
+    fn skips_asterisk_wrapped_narration() {
+        // Whisper narrating the audio instead of transcribing it.
+        for junk in [
+            "*Slow's voice*",
+            "*slow's voice*",
+            "  *Slow's voice*  ",
+            "*sighs*",
+            "*music playing*",
+            "**Slow's voice**",
+        ] {
+            assert!(should_skip_segment(junk, 0.0, 2.0), "expected to skip: {junk:?}");
+            // Structural, so it applies to the live path too.
+            assert!(
+                should_skip_live_segment(junk, 0.0, 2.0),
+                "expected live to skip: {junk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_speech_that_merely_contains_an_annotation() {
+        // Dropping the whole segment here would throw away real words.
+        for real in [
+            "*sighs* okay then, let's start",
+            "we marked it with *stars* in the doc",
+            "*a* word *b*",
+        ] {
+            assert!(!should_skip_segment(real, 0.0, 3.0), "expected to keep: {real:?}");
+        }
     }
 
     #[test]
