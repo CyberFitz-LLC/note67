@@ -28,7 +28,10 @@ const INITIAL_PERMS: PermState = {
   loaded: false,
 };
 
-const RECOMMENDED_WHISPER = "large-turbo";
+// Quantized turbo: same transcription quality and speed as the full turbo
+// model, at roughly half the download and memory. First-run download size is
+// the main thing standing between a new user and their first recording.
+const RECOMMENDED_WHISPER = "large-turbo-q8";
 
 // Query permission status. Module-level (no React state) so both the mount
 // effect and the manual refresh can share it without setting state directly

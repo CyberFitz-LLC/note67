@@ -32,8 +32,8 @@ export function WhisperTab() {
     medium: "Slower, high accuracy",
     "medium-q8": "High accuracy, smaller download",
     large: "Best accuracy, slowest",
-    "large-turbo": "Fast + accurate (recommended)",
-    "large-turbo-q8": "Fast + accurate, smaller download",
+    "large-turbo": "Fast + accurate, full size",
+    "large-turbo-q8": "Fast + accurate, half the size (recommended)",
   };
 
   return (
@@ -107,7 +107,7 @@ export function WhisperTab() {
               isDownloading={isDownloading && downloadingModel === model.size}
               downloadProgress={downloadProgress}
               sizeLabel={sizeLabels[model.size]}
-              isRecommended={model.size === "large-turbo"}
+              isRecommended={model.size === "large-turbo-q8"}
               onDownload={() => downloadModel(model.size)}
               onDelete={() => deleteModel(model.size)}
               onLoad={() => loadModel(model.size)}
