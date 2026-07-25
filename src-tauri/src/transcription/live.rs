@@ -19,13 +19,16 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext};
 /// Simple voice activity detection based on RMS energy
 /// Returns true if audio has enough energy to likely contain speech
 fn has_voice_activity(samples: &[f32], threshold: f32) -> bool {
+    rms(samples) > threshold
+}
+
+/// RMS energy of a chunk. 0.0 for an empty chunk.
+fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
-        return false;
+        return 0.0;
     }
-    // Calculate RMS energy
     let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-    let rms = (sum_sq / samples.len() as f32).sqrt();
-    rms > threshold
+    (sum_sq / samples.len() as f32).sqrt()
 }
 
 /// Peak the mic chunk aims for after normalization.
@@ -202,11 +205,18 @@ pub async fn start_live_transcription(
                     // mic's input gain, and the gain cap is what preserves the
                     // silence/speech distinction: near-silence cannot be
                     // amplified far enough to clear the gate.
+                    let raw_rms = rms(&mono_mic);
                     normalize_peak(&mut mono_mic, MIC_TARGET_PEAK, MIC_MAX_GAIN);
+                    let norm_rms = rms(&mono_mic);
 
                     // Only process if there's voice activity (RMS > 0.02 of the
                     // normalized signal). Also gives Whisper audio at a level it
                     // can actually work with.
+                    if !has_voice_activity(&mono_mic, 0.02) {
+                        println!(
+                            "[live] mic chunk below the voice gate: rms {raw_rms:.5} -> {norm_rms:.5} after gain (need > 0.02)"
+                        );
+                    }
                     if has_voice_activity(&mono_mic, 0.02) {
                         // Resample mic to 16kHz for Whisper
                         let mic_16k = if rate != 16000 {
@@ -219,6 +229,12 @@ pub async fn start_live_transcription(
                     }
                 }
             }
+
+            // Whether mic audio cleared the voice gate this pass, so the logs
+            // below can distinguish "nothing got through" from "nothing heard".
+            let mic_had_audio = audio_sources
+                .iter()
+                .any(|(_, _, _, src)| *src == AudioSource::Mic);
 
             // Extract mic audio data if available
             let mic_data = if let Some((samples, _, _, _)) = audio_sources
@@ -315,27 +331,40 @@ pub async fn start_live_transcription(
                 live_state_clone.recent_system_segments.lock().await.clone();
 
             // Process mic results with echo filtering
+            if mic_had_audio && mic_result.as_ref().is_none_or(|t| t.segments.is_empty()) {
+                // Audio passed the gate but Whisper found no words in it. Worth
+                // saying: it separates "the mic never got through" from "the
+                // model heard nothing", which need different fixes.
+                println!("[live] mic: audio passed the gate but whisper returned no segments");
+            }
             if let Some(transcription) = mic_result
                 && !transcription.segments.is_empty()
             {
-                // Filter out blank segments AND echo duplicates
+                // Filter out blank segments AND echo duplicates. Kept as two
+                // separate passes so the log can name which one dropped what —
+                // "my voice is missing" has several possible causes and they
+                // need telling apart.
                 let heard = transcription.segments.len();
-                let valid_segments: Vec<_> = transcription
+                let after_blank: Vec<_> = transcription
                     .segments
                     .into_iter()
                     .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
+                    .collect();
+                let blank_dropped = heard - after_blank.len();
+
+                let valid_segments: Vec<_> = after_blank
+                    .into_iter()
                     .filter(|s| !is_echo_of_system(&s.text, s.start_time, s.end_time, &system_segments_for_echo_check))
                     .collect();
+                let echo_dropped = heard - blank_dropped - valid_segments.len();
 
-                // Dropping mic audio is silent and looks like a broken mic, so
-                // say when it happens — this is how "my voice isn't in the
-                // transcript" gets diagnosed without a debugger.
-                let dropped = heard - valid_segments.len();
-                if dropped > 0 {
+                if blank_dropped > 0 || echo_dropped > 0 {
                     println!(
-                        "[live] dropped {}/{} mic segment(s) as blank or echo of system audio",
-                        dropped, heard
+                        "[live] mic: whisper returned {heard} segment(s); dropped {blank_dropped} as blank/artifact, {echo_dropped} as echo; kept {}",
+                        valid_segments.len()
                     );
+                } else {
+                    println!("[live] mic: kept all {heard} segment(s)");
                 }
 
                 if !valid_segments.is_empty() {
