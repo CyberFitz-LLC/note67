@@ -123,16 +123,20 @@ pub fn is_echo_of_system(
             continue;
         }
 
-        // Time-overlap suppression: most of the mic segment lies inside a system
-        // speaking window -> treat as echo regardless of the (often garbled) text.
-        if overlap / mic_dur >= 0.5 {
-            return true;
-        }
-
-        // Word-match fallback for partial-overlap echoes.
         let sys_lower = sys_text.to_lowercase();
         let sys_words: Vec<&str> = sys_lower.split_whitespace().take(5).collect();
         let matches = mic_words.iter().filter(|w| sys_words.contains(w)).count();
+
+        // Heavy time overlap lowers the bar for what counts as echo, but text
+        // evidence is still required. Overlap alone used to be enough, which
+        // silently dropped the user's speech whenever they talked while system
+        // audio was playing — normal in a meeting, not a sign of echo. Echo
+        // repeats the other party's words, so that is what we look for.
+        if overlap / mic_dur >= 0.5 && matches >= 2 {
+            return true;
+        }
+
+        // Partial-overlap echo needs stronger text agreement.
         if matches >= 3 || (matches >= 2 && mic_words.len() <= 3) {
             return true;
         }
@@ -213,10 +217,38 @@ mod tests {
     }
 
     #[test]
-    fn echo_suppressed_by_time_overlap_even_when_garbled() {
+    fn echo_suppressed_when_overlap_and_words_agree() {
         let system = vec![(21.02, 26.12, "give people the on-ramp into the economy".to_string())];
-        // Mic segment garbled but sitting inside the system speaking window
+        // Mic re-hears the system audio: heavy overlap AND repeated words.
         assert!(is_echo_of_system(
+            "give people the on-ramp",
+            22.94,
+            26.44,
+            &system,
+        ));
+    }
+
+    #[test]
+    fn simultaneous_speech_over_system_audio_is_kept() {
+        // The regression this rule used to cause: talking while desktop audio
+        // plays is normal in a meeting, and the mic segment must survive even
+        // though it sits entirely inside the system speaking window.
+        let system = vec![(21.02, 26.12, "give people the on-ramp into the economy".to_string())];
+        assert!(!is_echo_of_system(
+            "sorry can I jump in here for a second",
+            22.94,
+            26.44,
+            &system,
+        ));
+    }
+
+    #[test]
+    fn garbled_overlap_without_shared_words_is_kept() {
+        // Accepted trade-off: badly garbled echo with no word agreement is now
+        // kept rather than dropped. Losing real speech is worse than an
+        // occasional junk line.
+        let system = vec![(21.02, 26.12, "give people the on-ramp into the economy".to_string())];
+        assert!(!is_echo_of_system(
             "pubs little green tomatoes plumbing businesses",
             22.94,
             26.44,
@@ -225,9 +257,22 @@ mod tests {
     }
 
     #[test]
+    fn partial_overlap_echo_still_needs_strong_word_agreement() {
+        let system = vec![(21.0, 26.0, "give people the on-ramp into the economy".to_string())];
+        // Only ~1.2s of a 5s mic segment overlaps, so the heavy-overlap rule
+        // does not apply; three shared words still mark it as echo.
+        assert!(is_echo_of_system("give people the fastest route", 24.8, 29.8, &system));
+    }
+
+    #[test]
     fn non_overlapping_mic_speech_is_kept() {
         let system = vec![(21.0, 26.0, "give people the on-ramp into the economy".to_string())];
         // Real interjection well after the system segment -> not echo
         assert!(!is_echo_of_system("that's a great point", 40.0, 43.0, &system));
+    }
+
+    #[test]
+    fn no_system_audio_means_nothing_is_echo() {
+        assert!(!is_echo_of_system("anything at all", 1.0, 4.0, &[]));
     }
 }

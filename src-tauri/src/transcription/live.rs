@@ -274,12 +274,24 @@ pub async fn start_live_transcription(
                 && !transcription.segments.is_empty()
             {
                 // Filter out blank segments AND echo duplicates
+                let heard = transcription.segments.len();
                 let valid_segments: Vec<_> = transcription
                     .segments
                     .into_iter()
                     .filter(|s| !should_skip_segment(&s.text, s.start_time, s.end_time))
                     .filter(|s| !is_echo_of_system(&s.text, s.start_time, s.end_time, &system_segments_for_echo_check))
                     .collect();
+
+                // Dropping mic audio is silent and looks like a broken mic, so
+                // say when it happens — this is how "my voice isn't in the
+                // transcript" gets diagnosed without a debugger.
+                let dropped = heard - valid_segments.len();
+                if dropped > 0 {
+                    println!(
+                        "[live] dropped {}/{} mic segment(s) as blank or echo of system audio",
+                        dropped, heard
+                    );
+                }
 
                 if !valid_segments.is_empty() {
                     for segment in &valid_segments {
