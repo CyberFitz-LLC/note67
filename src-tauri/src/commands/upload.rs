@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::audio::converter::{convert_to_wav, get_audio_duration_ms, is_supported_format};
 use crate::commands::transcription::TranscriptionState;
-use crate::db::models::UploadedAudio;
+use crate::db::models::{NewTranscriptSegment, UploadedAudio};
 use crate::db::Database;
 
 /// Upload and convert an audio file for a note
@@ -197,13 +197,14 @@ pub async fn transcribe_uploaded_audio(
         }
 
         db.add_transcript_segment(
-            &info.note_id,
-            segment.start_time,
-            segment.end_time,
-            &segment.text,
-            Some(&info.speaker_label),
-            Some("upload"),
-            Some(upload_id),
+            &NewTranscriptSegment::new(
+                &info.note_id,
+                segment.start_time,
+                segment.end_time,
+                &segment.text,
+            )
+            .with_speaker(Some(info.speaker_label.clone()))
+            .with_source("upload", upload_id),
         )
         .map_err(|e| e.to_string())?;
         saved_count += 1;

@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::interval;
 
 use crate::audio::{take_system_audio_samples, RecordingPhase, RecordingState};
+use crate::db::models::NewTranscriptSegment;
 use crate::db::Database;
 use crate::transcription::{
     is_echo_of_system, should_skip_segment, TranscriptionError, TranscriptionResult,
@@ -234,7 +235,7 @@ pub async fn start_live_transcription(
             let (mic_result, system_result) = tokio::join!(mic_future, system_future);
 
             // Collect all segments for batch DB insert
-            let mut db_segments: Vec<(String, f64, f64, String, Option<String>, Option<String>, Option<i64>)> = Vec::new();
+            let mut db_segments: Vec<NewTranscriptSegment> = Vec::new();
             let mut all_events: Vec<TranscriptionUpdateEvent> = Vec::new();
 
             // Process system results FIRST and update rolling history for echo detection
@@ -282,15 +283,16 @@ pub async fn start_live_transcription(
 
                 if !valid_segments.is_empty() {
                     for segment in &valid_segments {
-                        db_segments.push((
-                            note_id_clone.clone(),
-                            segment.start_time,
-                            segment.end_time,
-                            segment.text.clone(),
-                            Some("You".to_string()),
-                            Some("live".to_string()),
-                            None,
-                        ));
+                        db_segments.push(
+                            NewTranscriptSegment::new(
+                                note_id_clone.clone(),
+                                segment.start_time,
+                                segment.end_time,
+                                segment.text.clone(),
+                            )
+                            .with_speaker(Some("You".to_string()))
+                            .with_source_type("live"),
+                        );
                     }
 
                     live_state_clone
@@ -311,15 +313,16 @@ pub async fn start_live_transcription(
             // Now add system results to state and events (using already-filtered current_system_segments)
             if !current_system_segments.is_empty() {
                 for segment in &current_system_segments {
-                    db_segments.push((
-                        note_id_clone.clone(),
-                        segment.start_time,
-                        segment.end_time,
-                        segment.text.clone(),
-                        Some("Others".to_string()),
-                        Some("live".to_string()),
-                        None,
-                    ));
+                    db_segments.push(
+                        NewTranscriptSegment::new(
+                            note_id_clone.clone(),
+                            segment.start_time,
+                            segment.end_time,
+                            segment.text.clone(),
+                        )
+                        .with_speaker(Some("Others".to_string()))
+                        .with_source_type("live"),
+                    );
                 }
 
                 live_state_clone

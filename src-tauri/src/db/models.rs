@@ -27,6 +27,58 @@ pub struct TranscriptSegment {
     pub created_at: DateTime<Utc>,
 }
 
+/// A transcript segment to be inserted. Named fields rather than a positional
+/// tuple: `start_time`/`end_time` are both `f64` and `speaker`/`source_type` are
+/// both `Option<String>`, so a tuple makes transposing either pair a silent bug.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewTranscriptSegment {
+    pub note_id: String,
+    pub start_time: f64, // seconds from audio file start
+    pub end_time: f64,
+    pub text: String,
+    pub speaker: Option<String>,
+    pub source_type: Option<String>, // 'upload', 'segment', 'live', or null
+    pub source_id: Option<i64>,      // ID of the source audio
+}
+
+impl NewTranscriptSegment {
+    /// Convenience constructor for the common case of a live/legacy segment
+    /// with no source record.
+    pub fn new(
+        note_id: impl Into<String>,
+        start_time: f64,
+        end_time: f64,
+        text: impl Into<String>,
+    ) -> Self {
+        Self {
+            note_id: note_id.into(),
+            start_time,
+            end_time,
+            text: text.into(),
+            speaker: None,
+            source_type: None,
+            source_id: None,
+        }
+    }
+
+    pub fn with_speaker(mut self, speaker: Option<String>) -> Self {
+        self.speaker = speaker;
+        self
+    }
+
+    pub fn with_source(mut self, source_type: &str, source_id: i64) -> Self {
+        self.source_type = Some(source_type.to_string());
+        self.source_id = Some(source_id);
+        self
+    }
+
+    /// For sources with no backing record (e.g. live transcription).
+    pub fn with_source_type(mut self, source_type: &str) -> Self {
+        self.source_type = Some(source_type.to_string());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Summary {
     pub id: i64,
@@ -108,16 +160,6 @@ pub struct UpdateNote {
     pub title: Option<String>,
     pub description: Option<String>,
     pub participants: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct NewTranscriptSegment {
-    pub note_id: String,
-    pub start_time: f64,
-    pub end_time: f64,
-    pub text: String,
-    pub speaker: Option<String>,
 }
 
 /// Audio segment for multi-session recordings (pause/resume/continue)

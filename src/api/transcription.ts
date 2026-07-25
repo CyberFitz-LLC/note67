@@ -80,12 +80,18 @@ export const transcriptionApi = {
     text: string,
     speaker?: string
   ): Promise<number> => {
+    // The command takes a single NewTranscriptSegment struct, whose fields are
+    // snake_case on the wire (matching TranscriptSegment).
     return invoke("add_transcript_segment", {
-      noteId,
-      startTime,
-      endTime,
-      text,
-      speaker,
+      segment: {
+        note_id: noteId,
+        start_time: startTime,
+        end_time: endTime,
+        text,
+        speaker: speaker ?? null,
+        source_type: null,
+        source_id: null,
+      },
     });
   },
 

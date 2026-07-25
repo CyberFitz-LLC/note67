@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use whisper_rs::{WhisperContext, WhisperContextParameters};
 
 use crate::commands::audio::AudioState;
+use crate::db::models::NewTranscriptSegment;
 use crate::db::Database;
 use crate::transcription::{
     is_echo_of_system, live, should_skip_segment, LiveTranscriptionState, ModelInfo, ModelManager,
@@ -265,8 +266,16 @@ pub async fn transcribe_audio(
     // Save segments to database (skip blank/noise segments)
     for segment in &result.segments {
         if !should_skip_segment(&segment.text, segment.start_time, segment.end_time) {
-            db.add_transcript_segment(&note_id, segment.start_time, segment.end_time, &segment.text, speaker.as_deref(), None, None)
-                .map_err(|e| e.to_string())?;
+            db.add_transcript_segment(
+                &NewTranscriptSegment::new(
+                    &note_id,
+                    segment.start_time,
+                    segment.end_time,
+                    &segment.text,
+                )
+                .with_speaker(speaker.clone()),
+            )
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -342,13 +351,13 @@ pub async fn transcribe_dual_audio(
     for segment in &mic_result.segments {
         if !should_skip_segment(&segment.text, segment.start_time, segment.end_time) {
             db.add_transcript_segment(
-                &note_id,
-                segment.start_time,
-                segment.end_time,
-                &segment.text,
-                Some("You"),
-                None,
-                None,
+                &NewTranscriptSegment::new(
+                    &note_id,
+                    segment.start_time,
+                    segment.end_time,
+                    &segment.text,
+                )
+                .with_speaker(Some("You".to_string())),
             )
             .map_err(|e| e.to_string())?;
             total_segments += 1;
@@ -366,13 +375,13 @@ pub async fn transcribe_dual_audio(
                 for segment in &result.segments {
                     if !should_skip_segment(&segment.text, segment.start_time, segment.end_time) {
                         db.add_transcript_segment(
-                            &note_id,
-                            segment.start_time,
-                            segment.end_time,
-                            &segment.text,
-                            Some("Others"),
-                            None,
-                            None,
+                            &NewTranscriptSegment::new(
+                                &note_id,
+                                segment.start_time,
+                                segment.end_time,
+                                &segment.text,
+                            )
+                            .with_speaker(Some("Others".to_string())),
                         )
                         .map_err(|e| e.to_string())?;
                         total_segments += 1;
@@ -414,17 +423,10 @@ pub fn get_transcript(
 /// Add a transcript segment directly (for seeding/testing)
 #[tauri::command]
 pub fn add_transcript_segment(
-    note_id: String,
-    start_time: f64,
-    end_time: f64,
-    text: String,
-    speaker: Option<String>,
-    source_type: Option<String>,
-    source_id: Option<i64>,
+    segment: NewTranscriptSegment,
     db: State<Database>,
 ) -> Result<i64, String> {
-    db.add_transcript_segment(&note_id, start_time, end_time, &text, speaker.as_deref(), source_type.as_deref(), source_id)
-        .map_err(|e| e.to_string())
+    db.add_transcript_segment(&segment).map_err(|e| e.to_string())
 }
 
 /// Start live transcription during recording
@@ -542,13 +544,14 @@ pub async fn retranscribe_audio_segment(
                         system_segments_for_echo.push((seg.start_time, seg.end_time, seg.text.clone()));
 
                         db.add_transcript_segment(
-                            &segment.note_id,
-                            seg.start_time,
-                            seg.end_time,
-                            &seg.text,
-                            Some("Others"),
-                            Some("segment"),
-                            Some(segment_id),
+                            &NewTranscriptSegment::new(
+                                &segment.note_id,
+                                seg.start_time,
+                                seg.end_time,
+                                &seg.text,
+                            )
+                            .with_speaker(Some("Others".to_string()))
+                            .with_source("segment", segment_id),
                         )
                         .map_err(|e| e.to_string())?;
                         total_segments += 1;
@@ -591,13 +594,14 @@ pub async fn retranscribe_audio_segment(
             }
 
             db.add_transcript_segment(
-                &segment.note_id,
-                seg.start_time,
-                seg.end_time,
-                &seg.text,
-                Some("You"),
-                Some("segment"),
-                Some(segment_id),
+                &NewTranscriptSegment::new(
+                    &segment.note_id,
+                    seg.start_time,
+                    seg.end_time,
+                    &seg.text,
+                )
+                .with_speaker(Some("You".to_string()))
+                .with_source("segment", segment_id),
             )
             .map_err(|e| e.to_string())?;
             total_segments += 1;
@@ -739,16 +743,16 @@ pub async fn retranscribe_note(
 
                             let (start_time, end_time) =
                                 clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                            if let Ok(_) = db.add_transcript_segment(
-                                &note_id,
-                                start_time,
-                                end_time,
-                                &seg.text,
-                                Some("Others"),
-                                Some("segment"),
-                                Some(segment.id),
+                            match db.add_transcript_segment(
+                                &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                                    .with_speaker(Some("Others".to_string()))
+                                    .with_source("segment", segment.id),
                             ) {
-                                total_segments_created += 1;
+                                Ok(_) => total_segments_created += 1,
+                                Err(e) => eprintln!(
+                                    "Failed to persist system transcript segment for note {}: {}",
+                                    note_id, e
+                                ),
                             }
                         }
                     }
@@ -788,16 +792,16 @@ pub async fn retranscribe_note(
 
                         let (start_time, end_time) =
                             clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                        if let Ok(_) = db.add_transcript_segment(
-                            &note_id,
-                            start_time,
-                            end_time,
-                            &seg.text,
-                            Some("You"),
-                            Some("segment"),
-                            Some(segment.id),
+                        match db.add_transcript_segment(
+                            &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                                .with_speaker(Some("You".to_string()))
+                                .with_source("segment", segment.id),
                         ) {
-                            total_segments_created += 1;
+                            Ok(_) => total_segments_created += 1,
+                            Err(e) => eprintln!(
+                                "Failed to persist mic transcript segment for note {}: {}",
+                                note_id, e
+                            ),
                         }
                     }
                     if echo_filtered > 0 {
@@ -853,16 +857,16 @@ pub async fn retranscribe_note(
                     if !should_skip_segment(&seg.text, seg.start_time, seg.end_time) {
                         let (start_time, end_time) =
                             clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
-                        if let Ok(_) = db.add_transcript_segment(
-                            &note_id,
-                            start_time,
-                            end_time,
-                            &seg.text,
-                            Some(&upload.speaker_label),
-                            Some("upload"),
-                            Some(upload.id),
+                        match db.add_transcript_segment(
+                            &NewTranscriptSegment::new(&note_id, start_time, end_time, &seg.text)
+                                .with_speaker(Some(upload.speaker_label.clone()))
+                                .with_source("upload", upload.id),
                         ) {
-                            total_segments_created += 1;
+                            Ok(_) => total_segments_created += 1,
+                            Err(e) => eprintln!(
+                                "Failed to persist uploaded transcript segment for note {}: {}",
+                                note_id, e
+                            ),
                         }
                     }
                 }

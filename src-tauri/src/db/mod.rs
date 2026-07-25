@@ -9,8 +9,8 @@ use rusqlite::{params, Connection};
 use tauri::{AppHandle, Manager};
 
 use crate::db::models::{
-    ActionItem, ActionItemWithNote, AudioSegment, Summary, SummaryType, TranscriptSegment,
-    UploadedAudio,
+    ActionItem, ActionItemWithNote, AudioSegment, NewTranscriptSegment, Summary, SummaryType,
+    TranscriptSegment, UploadedAudio,
 };
 use crate::db::schema::run_migrations;
 
@@ -47,33 +47,32 @@ impl Database {
     /// Add a transcript segment to the database
     /// source_type: 'upload' (from uploaded_audio), 'segment' (from audio_segments), 'live' (from live transcription)
     /// source_id: the id of the source record (uploaded_audio.id or audio_segments.id)
-    pub fn add_transcript_segment(
-        &self,
-        note_id: &str,
-        start_time: f64,
-        end_time: f64,
-        text: &str,
-        speaker: Option<&str>,
-        source_type: Option<&str>,
-        source_id: Option<i64>,
-    ) -> anyhow::Result<i64> {
+    pub fn add_transcript_segment(&self, segment: &NewTranscriptSegment) -> anyhow::Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         let now = Utc::now();
 
         conn.execute(
             "INSERT INTO transcript_segments (note_id, start_time, end_time, text, speaker, source_type, source_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![note_id, start_time, end_time, text, speaker, source_type, source_id, now.to_rfc3339()],
+            params![
+                segment.note_id,
+                segment.start_time,
+                segment.end_time,
+                segment.text,
+                segment.speaker,
+                segment.source_type,
+                segment.source_id,
+                now.to_rfc3339()
+            ],
         )?;
 
         Ok(conn.last_insert_rowid())
     }
 
     /// Add multiple transcript segments in a single transaction (batch insert)
-    /// Tuple: (note_id, start, end, text, speaker, source_type, source_id)
     pub fn add_transcript_segments_batch(
         &self,
-        segments: &[(String, f64, f64, String, Option<String>, Option<String>, Option<i64>)],
+        segments: &[NewTranscriptSegment],
     ) -> anyhow::Result<usize> {
         let mut conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         let now = Utc::now().to_rfc3339();
@@ -87,8 +86,17 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
 
-            for (note_id, start_time, end_time, text, speaker, source_type, source_id) in segments {
-                stmt.execute(params![note_id, start_time, end_time, text, speaker.as_deref(), source_type.as_deref(), source_id, &now])?;
+            for segment in segments {
+                stmt.execute(params![
+                    segment.note_id,
+                    segment.start_time,
+                    segment.end_time,
+                    segment.text,
+                    segment.speaker,
+                    segment.source_type,
+                    segment.source_id,
+                    &now
+                ])?;
                 count += 1;
             }
         }

@@ -4,7 +4,8 @@
 //! the ability to capture system audio output, which we use to record
 //! meeting participants' voices.
 
-#![cfg(target_os = "macos")]
+// Note: the module is already gated by `#[cfg(target_os = "macos")]` on its
+// declaration in audio/mod.rs, so no inner cfg attribute is needed here.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -219,18 +220,18 @@ fn create_stream_output_class() -> *const AnyClass {
             }
 
             // Create class inheriting from NSObject
-            let superclass = class!(NSObject) as *const _ as *const AnyClass;
-            let class_name = b"RustSCStreamOutput\0".as_ptr() as *const i8;
+            let superclass = class!(NSObject) as *const AnyClass;
+            let class_name = c"RustSCStreamOutput".as_ptr();
             let new_class = objc_allocateClassPair(superclass, class_name, 0);
 
             if new_class.is_null() {
                 // Class might already exist
-                CLASS = class!(RustSCStreamOutput) as *const _ as *const AnyClass;
+                CLASS = class!(RustSCStreamOutput) as *const AnyClass;
                 return;
             }
 
             // Add SCStreamOutput protocol
-            let protocol_name = b"SCStreamOutput\0".as_ptr() as *const i8;
+            let protocol_name = c"SCStreamOutput".as_ptr();
             let protocol = objc_getProtocol(protocol_name);
             if !protocol.is_null() {
                 class_addProtocol(new_class, protocol);
@@ -252,7 +253,7 @@ fn create_stream_output_class() -> *const AnyClass {
 
             let method_sel = sel!(stream:didOutputSampleBuffer:ofType:);
             // v = void, @ = object (self), : = SEL, @ = object (stream), @ = object (sampleBuffer), q = int64 (type)
-            let method_types = b"v@:@@q\0".as_ptr() as *const i8;
+            let method_types = c"v@:@@q".as_ptr();
             class_addMethod(
                 new_class,
                 method_sel,
@@ -491,7 +492,7 @@ impl MacOSSystemAudioCapture {
                 .ok_or_else(|| AudioError::PermissionDenied("Failed to retain delegate".to_string()))?;
 
             // Create a dispatch queue for audio callbacks
-            let queue_label = b"com.note67.screencapture.audio\0".as_ptr() as *const i8;
+            let queue_label = c"com.note67.screencapture.audio".as_ptr();
             unsafe extern "C" {
                 fn dispatch_queue_create(label: *const i8, attr: *const c_void) -> *mut c_void;
             }
