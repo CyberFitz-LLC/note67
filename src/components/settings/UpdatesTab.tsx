@@ -23,6 +23,19 @@ export function UpdatesTab() {
 
   const recentChanges = [
     {
+      version: "0.1.25",
+      date: "July 2026",
+      changes: [
+        "Fixed your own voice missing from the transcript - quiet microphones are now boosted before transcription instead of being treated as silence",
+        "Fixed short replies like \"hello\" or \"thanks\" being dropped from the live transcript",
+        "Fixed speech being discarded when you talk at the same time as the meeting audio",
+        "Live transcription now appears below earlier recordings instead of jumping to the top, and stays in view as it arrives",
+        "Fixed silent playback audio when continuing a recording",
+        "Recommended transcription model is now Turbo Q8 - same quality and speed, half the download",
+        "Faster, smaller app startup",
+      ],
+    },
+    {
       version: "0.1.24",
       date: "July 2026",
       changes: [
