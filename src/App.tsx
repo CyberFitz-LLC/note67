@@ -41,6 +41,7 @@ import { useThemeStore } from "./stores/themeStore";
 import { useRecordingStore } from "./stores/recordingStore";
 import { useLiveTranscriptionStore } from "./stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "./stores/summaryUiStore";
+import { useNoteUiStore } from "./stores/noteUiStore";
 import type { Note, TranscriptSegment } from "./types";
 
 // Lazy-loaded: GraphView pulls in d3, which is only needed on the graph view.
@@ -159,7 +160,7 @@ function App() {
   // Bumped after note edits so the global Tasks view reloads.
   const [tasksRefreshKey, setTasksRefreshKey] = useState(0);
   // When navigating from the global Tasks view, the task to focus in the note.
-  const [focusTaskId, setFocusTaskId] = useState<number | null>(null);
+  const setFocusTaskId = useNoteUiStore((s) => s.setFocusTaskId);
   const [showSettings, setShowSettings] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [settingsTab, setSettingsTab] = useState<
@@ -178,10 +179,10 @@ function App() {
   const [noteTranscripts, setNoteTranscripts] = useState<
     Record<string, TranscriptSegment[]>
   >({});
-  const [activeTab, setActiveTab] = useState<
-    "note" | "transcript" | "summary" | "tasks"
-  >("summary");
-  const [editingTitle, setEditingTitle] = useState(false);
+  // App only switches tabs (on record / graph / Tasks navigation); NoteView
+  // reads the active tab from the store and drives the tab bar itself.
+  const setActiveTab = useNoteUiStore((s) => s.setActiveTab);
+  const setEditingTitle = useNoteUiStore((s) => s.setEditingTitle);
   const [, setEditingDescription] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<Note | null>(null);
@@ -201,7 +202,7 @@ function App() {
     (s) => s.setGeneratingTitle
   );
   const bumpSummariesRefreshKey = useSummaryUiStore((s) => s.bumpRefreshKey);
-  const [showAISidebar, setShowAISidebar] = useState(false);
+  const toggleAISidebar = useNoteUiStore((s) => s.toggleAISidebar);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -330,6 +331,7 @@ function App() {
     profile.name,
     refreshSystemStatus,
     setRecordingNoteId,
+    setActiveTab,
   ]);
 
   // Keyboard shortcut: Cmd/Ctrl + N for new note
@@ -508,14 +510,14 @@ function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === "j") {
         e.preventDefault();
         if (selectedNoteId) {
-          setShowAISidebar((prev) => !prev);
+          toggleAISidebar();
         }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNoteId]);
+  }, [selectedNoteId, toggleAISidebar]);
 
   // Global right-click handler - prevent default and show custom menu
   useEffect(() => {
@@ -1110,10 +1112,6 @@ function App() {
             key={selectedNote.id}
             note={selectedNote}
             transcript={currentTranscript}
-            activeTab={activeTab}
-            editingTitle={editingTitle}
-            onTabChange={setActiveTab}
-            onEditTitle={() => setEditingTitle(true)}
             onUpdateTitle={handleUpdateTitle}
             onUpdateDescription={handleUpdateDescription}
             onStopRecording={handleStopRecording}
@@ -1200,8 +1198,6 @@ function App() {
                 }
               }
             }}
-            showAISidebar={showAISidebar}
-            onToggleAISidebar={() => setShowAISidebar((prev) => !prev)}
             onNavigateToNote={(noteId) => {
               const targetNote = notes.find(n => n.id === noteId);
               if (targetNote) {
@@ -1223,7 +1219,6 @@ function App() {
               setShowSettings(true);
             }}
             onTasksChanged={handleTasksChanged}
-            focusTaskId={focusTaskId}
           />
         ) : currentView === "notes" ? (
           <EmptyState

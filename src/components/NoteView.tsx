@@ -16,15 +16,12 @@ import { useWhisperStore } from "../stores/whisperStore";
 import { useRecordingStore } from "../stores/recordingStore";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
+import { useNoteUiStore } from "../stores/noteUiStore";
 import type { Note, TranscriptSegment, AudioSegment } from "../types";
 
 export interface NoteViewProps {
   note: Note;
   transcript: TranscriptSegment[];
-  activeTab: "note" | "transcript" | "summary" | "tasks";
-  editingTitle: boolean;
-  onTabChange: (tab: "note" | "transcript" | "summary" | "tasks") => void;
-  onEditTitle: () => void;
   onUpdateTitle: (title: string) => void;
   onUpdateDescription: (desc: string) => void;
   onStopRecording: () => void;
@@ -36,9 +33,6 @@ export interface NoteViewProps {
   onRegenerate: () => void;
   onClose: () => void;
   onTranscriptUpdated?: () => void;
-  // AI sidebar props
-  showAISidebar?: boolean;
-  onToggleAISidebar?: () => void;
   // Backlinks navigation
   onNavigateToNote?: (noteId: string) => void;
   // Wiki link navigation
@@ -47,17 +41,11 @@ export interface NoteViewProps {
   onOpenGuide?: () => void;
   // #3: notify the parent to refresh the global Tasks view after edits.
   onTasksChanged?: () => void;
-  // Task to focus when opened from the global Tasks view.
-  focusTaskId?: number | null;
 }
 
 export function NoteView({
   note,
   transcript,
-  activeTab,
-  editingTitle,
-  onTabChange,
-  onEditTitle,
   onUpdateTitle,
   onUpdateDescription,
   onStopRecording,
@@ -69,13 +57,10 @@ export function NoteView({
   onRegenerate,
   onClose,
   onTranscriptUpdated,
-  showAISidebar = false,
-  onToggleAISidebar,
   onNavigateToNote,
   onWikiLinkClick,
   onOpenGuide,
   onTasksChanged,
-  focusTaskId,
 }: NoteViewProps) {
   // Read straight from the stores rather than taking these as props — they are
   // already global state, so threading them through App.tsx bought nothing.
@@ -99,6 +84,17 @@ export function NoteView({
 
   const isRegenerating = useSummaryUiStore((s) => s.isGeneratingTitle);
   const summariesRefreshKey = useSummaryUiStore((s) => s.refreshKey);
+
+  // Note-pane view state. App also drives these (switching tabs when a
+  // recording starts, or when navigating in from the graph/Tasks views), so
+  // they live in a store rather than being passed down with a setter each.
+  const activeTab = useNoteUiStore((s) => s.activeTab);
+  const onTabChange = useNoteUiStore((s) => s.setActiveTab);
+  const editingTitle = useNoteUiStore((s) => s.editingTitle);
+  const setEditingTitle = useNoteUiStore((s) => s.setEditingTitle);
+  const showAISidebar = useNoteUiStore((s) => s.showAISidebar);
+  const onToggleAISidebar = useNoteUiStore((s) => s.toggleAISidebar);
+  const focusTaskId = useNoteUiStore((s) => s.focusTaskId);
 
   const ollamaStatus = useOllamaStore((s) => s.status);
   const ollamaRunning = ollamaStatus?.running ?? false;
@@ -302,7 +298,7 @@ export function NoteView({
   // Set titleValue to current note.title when entering edit mode
   const handleEditTitle = () => {
     setTitleValue(note.title);
-    onEditTitle();
+    setEditingTitle(true);
   };
 
   return (
