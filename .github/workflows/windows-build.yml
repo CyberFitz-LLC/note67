@@ -1,0 +1,69 @@
+name: Windows Build
+
+# Produces an unsigned Windows installer for testing fork changes.
+#
+# The upstream Release workflow is tag-driven and needs Apple/Tauri signing
+# secrets this fork does not have, so this is a separate, secret-free build that
+# publishes the installer as a workflow artifact instead of a GitHub release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Gate the build on the test suite: an installer that fails its own tests
+      # is not worth downloading.
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      # createUpdaterArtifacts is on in tauri.conf.json and requires
+      # TAURI_SIGNING_PRIVATE_KEY, which this fork has no reason to hold. Turn it
+      # off for this build rather than committing a key.
+      - name: Build Windows installer
+        shell: bash
+        run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: note67-windows-installers
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
