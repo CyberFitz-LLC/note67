@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AudioInputDevice } from "../types";
 
 /** Result of dual recording containing paths to all recorded files */
 export interface DualRecordingResult {
@@ -120,6 +121,23 @@ export const audioApi = {
   /** Check if the app has permission to use the microphone */
   hasMicrophonePermission: (): Promise<boolean> => {
     return invoke("has_microphone_permission");
+  },
+
+  // ========== Input device selection ==========
+
+  /** List the input devices available for recording */
+  listInputDevices: (): Promise<AudioInputDevice[]> => {
+    return invoke("list_audio_input_devices");
+  },
+
+  /** Get the pinned input device name (null follows the system default) */
+  getPreferredInputDevice: (): Promise<string | null> => {
+    return invoke("get_preferred_input_device");
+  },
+
+  /** Pin an input device by name, or pass null to follow the system default */
+  setPreferredInputDevice: (deviceName: string | null): Promise<void> => {
+    return invoke("set_preferred_input_device", { deviceName });
   },
 
   /** Start listen-only recording (system audio only, no mic) with segment tracking */

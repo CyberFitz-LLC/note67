@@ -1,11 +1,23 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+import { useInputDevices } from "../../hooks";
+
 interface SystemTabProps {
   onPermissionChange?: () => void;
 }
 
 export function SystemTab({ onPermissionChange }: SystemTabProps) {
+  const {
+    devices,
+    selectedDevice,
+    missingDevice,
+    loading: devicesLoading,
+    saving: savingDevice,
+    error: deviceError,
+    selectDevice,
+    refresh: refreshDevices,
+  } = useInputDevices();
   const [autostart, setAutostart] = useState(false);
   const [autostartLoading, setAutostartLoading] = useState(true);
   const [systemAudioSupported, setSystemAudioSupported] = useState(false);
@@ -116,6 +128,9 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
       setMicAvailable(available);
       setMicPermission(permission);
       setMicAuthStatus(status);
+      // Devices are only enumerable once permission is granted on macOS, so a
+      // permission refresh is also the moment the list becomes worth re-reading.
+      await refreshDevices();
       // Notify parent of permission change
       onPermissionChange?.();
     } catch (err) {
@@ -138,6 +153,7 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
         const status = await invoke<number>("get_microphone_auth_status");
         setMicAuthStatus(status);
       }
+      await refreshDevices();
       // Notify parent of permission change
       onPermissionChange?.();
     } catch (err) {
@@ -400,6 +416,119 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
             )}
           </div>
         )}
+      </div>
+
+      {/* Input device picker */}
+      <div
+        className="p-4 rounded-xl"
+        style={{ backgroundColor: "var(--color-bg-subtle)" }}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <p className="font-medium" style={{ color: "var(--color-text)" }}>
+              Input Device
+            </p>
+            <p
+              className="text-xs"
+              style={{ color: "var(--color-text-tertiary)" }}
+            >
+              Which microphone Note67 records from
+            </p>
+          </div>
+          <button
+            onClick={refreshDevices}
+            disabled={devicesLoading}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              color: "var(--color-text-secondary)",
+              border: "1px solid var(--color-border)",
+            }}
+          >
+            {devicesLoading ? "Loading..." : "Refresh"}
+          </button>
+        </div>
+
+        <select
+          aria-label="Input device"
+          value={selectedDevice ?? ""}
+          disabled={devicesLoading || savingDevice}
+          onChange={(e) => selectDevice(e.target.value || null)}
+          className="w-full p-2.5 rounded-lg text-sm disabled:opacity-50"
+          style={{
+            backgroundColor: "var(--color-bg-elevated)",
+            color: "var(--color-text)",
+            border: "1px solid var(--color-border)",
+          }}
+        >
+          <option value="">
+            System Default
+            {devices.find((d) => d.isDefault)
+              ? ` (${devices.find((d) => d.isDefault)?.name})`
+              : ""}
+          </option>
+          {devices.map((device) => (
+            <option key={device.name} value={device.name}>
+              {device.name}
+            </option>
+          ))}
+          {/* Keep a pinned-but-absent device visible rather than silently
+              snapping the dropdown back to System Default. */}
+          {missingDevice && (
+            <option value={missingDevice}>
+              {missingDevice} (not connected)
+            </option>
+          )}
+        </select>
+
+        {missingDevice && (
+          <div
+            className="mt-3 p-3 rounded-lg text-xs"
+            style={{
+              backgroundColor: "rgba(245, 158, 11, 0.08)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            <p>
+              <strong>"{missingDevice}" is not connected.</strong> Recordings
+              will use the system default until it is plugged back in.
+            </p>
+          </div>
+        )}
+
+        {deviceError && (
+          <div
+            className="mt-3 p-3 rounded-lg text-xs"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.08)",
+              color: "#dc2626",
+            }}
+          >
+            {deviceError}
+          </div>
+        )}
+
+        {!devicesLoading && devices.length === 0 && !deviceError && (
+          <div
+            className="mt-3 p-3 rounded-lg text-xs"
+            style={{
+              backgroundColor: "rgba(239, 68, 68, 0.08)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            <p>
+              No input devices found. Connect a microphone and click "Refresh".
+            </p>
+          </div>
+        )}
+
+        <p
+          className="mt-3 text-xs"
+          style={{ color: "var(--color-text-tertiary)" }}
+        >
+          Changing this takes effect on the next recording; it will not switch
+          the microphone mid-recording.
+        </p>
       </div>
 
       {/* System Audio Section (macOS only) */}

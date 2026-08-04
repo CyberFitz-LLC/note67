@@ -1,4 +1,5 @@
 pub mod converter;
+pub mod devices;
 pub mod mixer;
 pub mod recorder;
 pub mod system_audio;
@@ -9,6 +10,7 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub use devices::{list_input_devices, AudioInputDevice};
 pub use mixer::build_playback_track;
 pub use recorder::{
     pause_recording, resume_recording, start_recording, stop_recording, RecordingPhase,

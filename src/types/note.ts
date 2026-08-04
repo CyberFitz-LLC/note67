@@ -139,6 +139,13 @@ export interface AudioSegment {
   created_at: string;
 }
 
+// An input device that can be picked for recording (matches Rust AudioInputDevice)
+export interface AudioInputDevice {
+  name: string;
+  /** Whether this is the operating system's current default input device */
+  isDefault: boolean;
+}
+
 // Recording phase enum (matches Rust RecordingPhase)
 export enum RecordingPhase {
   Idle = 0,

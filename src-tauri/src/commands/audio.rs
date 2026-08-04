@@ -6,10 +6,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::audio::{
-    self, build_playback_track, is_system_audio_available, RecordingPhase, RecordingState,
-    SystemAudioCapture,
+    self, build_playback_track, is_system_audio_available, AudioInputDevice, RecordingPhase,
+    RecordingState, SystemAudioCapture,
 };
 use crate::db::Database;
+
+/// Settings key holding the pinned input device name.
+pub const INPUT_DEVICE_SETTING: &str = "input_device";
 
 /// Result of dual recording containing paths to all recorded files
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +136,59 @@ pub fn has_microphone_available() -> bool {
     }
 
     false
+}
+
+// ========== Input Device Selection ==========
+
+/// List the input devices available for recording.
+#[tauri::command]
+pub fn list_audio_input_devices() -> Result<Vec<AudioInputDevice>, String> {
+    audio::list_input_devices().map_err(|e| e.to_string())
+}
+
+/// Get the pinned input device name. `None` means "follow the system default".
+#[tauri::command]
+pub fn get_preferred_input_device(state: State<AudioState>) -> Option<String> {
+    state.recording.get_preferred_input_device()
+}
+
+/// Pin an input device by name, or pass `None` to follow the system default.
+///
+/// The name is not validated against the devices present: a user who unplugs a
+/// USB mic overnight should still have it pinned in the morning. Recording falls
+/// back to the system default for as long as it is absent.
+#[tauri::command]
+pub fn set_preferred_input_device(
+    device_name: Option<String>,
+    state: State<AudioState>,
+    db: State<Database>,
+) -> Result<(), String> {
+    state
+        .recording
+        .set_preferred_input_device(device_name)
+        .map_err(|e| e.to_string())?;
+
+    // Read back the normalised value so the database and the running state
+    // cannot disagree about what "" means.
+    let stored = state.recording.get_preferred_input_device();
+    db.set_setting(INPUT_DEVICE_SETTING, stored.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())
+}
+
+/// Load the pinned input device from settings into the running audio state.
+///
+/// Called once at startup; the device is otherwise only read when a recording
+/// segment begins.
+pub fn restore_preferred_input_device(state: &AudioState, db: &Database) {
+    match db.get_setting(INPUT_DEVICE_SETTING) {
+        Ok(Some(name)) => {
+            if let Err(e) = state.recording.set_preferred_input_device(Some(name)) {
+                eprintln!("Failed to restore the saved input device: {}", e);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("Failed to read the saved input device: {}", e),
+    }
 }
 
 /// Check if the app has microphone permission (macOS)

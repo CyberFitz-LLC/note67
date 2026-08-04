@@ -14,6 +14,7 @@ export type {
   OllamaModel,
   OllamaStatus,
   AudioSegment,
+  AudioInputDevice,
   UploadedAudio,
   AudioItem,
   RetranscribeResult,

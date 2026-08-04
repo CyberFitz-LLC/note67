@@ -1,6 +1,7 @@
 export { useOllama, useSummaries } from "./useAI";
 export { useNotes } from "./useNotes";
 export { useRecording } from "./useRecording";
+export { useInputDevices } from "./useInputDevices";
 export { useModels, useTranscription, useLiveTranscription } from "./useTranscription";
 export { useUpdater } from "./useUpdater";
 export { useSystemStatus } from "./useSystemStatus";

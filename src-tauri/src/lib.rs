@@ -164,7 +164,12 @@ pub fn run() {
             // Clean up orphaned temp files from interrupted uploads
             cleanup_temp_files(app.handle());
 
-            app.manage(AudioState::default());
+            let audio_state = AudioState::default();
+            // Restore the pinned microphone before any recording can start.
+            if let Some(db) = app.try_state::<Database>() {
+                commands::restore_preferred_input_device(&audio_state, &db);
+            }
+            app.manage(audio_state);
             app.manage(AiState::default());
             let transcription_state = init_transcription_state(app.handle());
             app.manage(transcription_state);
@@ -364,6 +369,9 @@ pub fn run() {
             commands::has_microphone_permission,
             commands::get_microphone_auth_status,
             commands::request_microphone_permission,
+            commands::list_audio_input_devices,
+            commands::get_preferred_input_device,
+            commands::set_preferred_input_device,
             commands::start_dual_recording,
             commands::stop_dual_recording,
             commands::get_segment_playback_path,

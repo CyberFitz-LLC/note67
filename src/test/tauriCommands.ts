@@ -48,6 +48,12 @@ export const defaultCommands: CommandMap = {
   get_microphone_auth_status: 3, // Authorized
   request_microphone_permission: true,
   open_microphone_settings: null,
+  list_audio_input_devices: [
+    { name: "Built-in Microphone", isDefault: true },
+    { name: "Blue Yeti", isDefault: false },
+  ],
+  get_preferred_input_device: null, // follows the system default
+  set_preferred_input_device: null,
   is_system_audio_supported: true,
   has_system_audio_permission: true,
   request_system_audio_permission: true,
