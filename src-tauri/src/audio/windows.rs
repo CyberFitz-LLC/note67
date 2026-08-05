@@ -13,9 +13,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use hound::{WavSpec, WavWriter};
-use wasapi::{Device, Direction, SampleType, ShareMode};
+use wasapi::{Device, DeviceCollection, Direction, SampleType, ShareMode};
 
 use super::system_audio::{SystemAudioCapture, SystemAudioResult};
+use crate::audio::devices::{resolve_device_selection, AudioDevice, DeviceSelection};
 use crate::audio::AudioError;
 
 /// Shared state for audio writing, accessible from the capture thread
@@ -75,6 +76,82 @@ fn get_default_render_device() -> Result<Device, AudioError> {
     })
 }
 
+/// Friendly names of every active playback device.
+fn render_device_names() -> Result<Vec<String>, AudioError> {
+    ensure_com_initialized();
+
+    let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
+    })?;
+    let count = collection.get_nbr_devices().map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to count playback devices: {}", e))
+    })?;
+
+    let mut names = Vec::new();
+    for index in 0..count {
+        // A device that vanishes mid-enumeration (or refuses to name itself) is
+        // skipped rather than failing the whole list.
+        if let Ok(device) = collection.get_device_at_index(index)
+            && let Ok(name) = device.get_friendlyname()
+        {
+            names.push(name);
+        }
+    }
+
+    Ok(names)
+}
+
+/// List the playback devices whose output can be captured.
+///
+/// Names that collide are deduplicated: WASAPI is asked for a device *by name*,
+/// so a second identically-named entry could never actually be opened.
+pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
+    let default_name = get_default_render_device()
+        .ok()
+        .and_then(|d| d.get_friendlyname().ok());
+
+    let mut seen = std::collections::HashSet::new();
+    let mut devices = Vec::new();
+
+    for name in render_device_names()? {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let is_default = default_name.as_deref() == Some(name.as_str());
+        devices.push(AudioDevice { name, is_default });
+    }
+
+    Ok(devices)
+}
+
+/// Open the playback device to capture from, falling back to the system default.
+///
+/// Shares its rules with the microphone picker: an exact name match, and a
+/// pinned-but-absent device falls back rather than failing, because a meeting
+/// that records nothing is worse than one recorded from the wrong speakers.
+fn resolve_render_device(preferred: Option<&str>) -> Result<Device, AudioError> {
+    let available = render_device_names()?;
+
+    match resolve_device_selection(&available, preferred) {
+        DeviceSelection::Named(name) => {
+            let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
+                AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
+            })?;
+            collection.get_device_with_name(&name).map_err(|e| {
+                AudioError::PermissionDenied(format!("Failed to open playback device: {}", e))
+            })
+        }
+        DeviceSelection::MissingFallback { requested } => {
+            eprintln!(
+                "Saved playback device {:?} is not available; capturing the system default instead",
+                requested
+            );
+            get_default_render_device()
+        }
+        DeviceSelection::Default => get_default_render_device(),
+    }
+}
+
 /// Downsample audio from source rate to 16kHz mono for Whisper
 fn downsample_to_16k_mono(samples: &[f32], src_rate: u32, channels: u16) -> Vec<f32> {
     // Convert stereo to mono by averaging channels
@@ -107,6 +184,9 @@ fn downsample_to_16k_mono(samples: &[f32], src_rate: u32, channels: u16) -> Vec<
 pub struct WindowsSystemAudioCapture {
     is_capturing: Arc<AtomicBool>,
     capture_thread: Mutex<Option<JoinHandle<()>>>,
+    /// Playback device the user pinned, by friendly name. `None` follows the
+    /// system default. Read when capture starts.
+    preferred_device: Mutex<Option<String>>,
 }
 
 impl WindowsSystemAudioCapture {
@@ -114,6 +194,7 @@ impl WindowsSystemAudioCapture {
         Ok(Self {
             is_capturing: Arc::new(AtomicBool::new(false)),
             capture_thread: Mutex::new(None),
+            preferred_device: Mutex::new(None),
         })
     }
 
@@ -126,6 +207,7 @@ impl WindowsSystemAudioCapture {
     fn run_capture_loop(
         is_capturing: Arc<AtomicBool>,
         output_path: PathBuf,
+        preferred_device: Option<String>,
     ) -> Result<(), AudioError> {
         // Initialize COM for this thread (get_default_render_device also does this,
         // but we call it explicitly here for the capture thread)
@@ -135,8 +217,9 @@ impl WindowsSystemAudioCapture {
             ));
         }
 
-        // Get default render device
-        let device = get_default_render_device()?;
+        // A wasapi Device is neither Send nor Sync, so it cannot be handed to
+        // this thread — only the name crosses, and the device is opened here.
+        let device = resolve_render_device(preferred_device.as_deref())?;
 
         // Get the audio client for loopback capture
         let mut audio_client = device.get_iaudioclient().map_err(|e| {
@@ -385,12 +468,17 @@ impl SystemAudioCapture for WindowsSystemAudioCapture {
 
         // Clone for the capture thread
         let is_capturing = Arc::clone(&self.is_capturing);
+        let preferred_device = self
+            .preferred_device
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
 
         // Spawn capture thread
         let handle = thread::Builder::new()
             .name("wasapi-loopback-capture".to_string())
             .spawn(move || {
-                let _ = Self::run_capture_loop(is_capturing, output_path);
+                let _ = Self::run_capture_loop(is_capturing, output_path, preferred_device);
             })
             .map_err(AudioError::IoError)?;
 
@@ -433,7 +521,24 @@ impl SystemAudioCapture for WindowsSystemAudioCapture {
     fn is_capturing(&self) -> bool {
         self.is_capturing.load(Ordering::Relaxed)
     }
-}
+
+    fn set_preferred_device(&self, name: Option<String>) -> SystemAudioResult<()> {
+        let mut guard = self
+            .preferred_device
+            .lock()
+            .map_err(|_| AudioError::LockError)?;
+        // Normalise "" to None so there is one representation of "follow the
+        // system default".
+        *guard = name.filter(|n| !n.trim().is_empty());
+        Ok(())
+    }
+
+    fn get_preferred_device(&self) -> Option<String> {
+        self.preferred_device
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
 
 impl Default for WindowsSystemAudioCapture {
     fn default() -> Self {

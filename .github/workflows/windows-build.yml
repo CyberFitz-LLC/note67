@@ -59,6 +59,28 @@ jobs:
         shell: bash
         run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
+      # ggml probes the *build* machine's CPU and bakes in whatever it finds, so
+      # an AVX-512 runner produces an installer that dies with
+      # STATUS_ILLEGAL_INSTRUCTION on ordinary consumer CPUs. cmake/portable-cpu.cmake
+      # pins the baseline; this proves it took effect, by reading the cache the
+      # build actually used rather than trusting the config.
+      - name: Verify a portable CPU baseline was used
+        shell: pwsh
+        run: |
+          $cache = Get-ChildItem -Path src-tauri/target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -like "*whisper-rs-sys*" } | Select-Object -First 1
+          if (-not $cache) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the CPU baseline." }
+          Write-Host "Cache: $($cache.FullName)"
+          $flags = Select-String -Path $cache.FullName -Pattern '^GGML_(NATIVE|AVX|AVX2|AVX512|FMA):'
+          $flags | ForEach-Object { Write-Host $_.Line }
+          if ($flags -match '^GGML_AVX512:BOOL=ON') {
+            throw "AVX-512 was baked into this build; it will crash on CPUs without it."
+          }
+          if (-not ($flags -match '^GGML_NATIVE:BOOL=OFF')) {
+            throw "GGML_NATIVE is not OFF; the build probed this runner's CPU and is not portable."
+          }
+          Write-Host "OK: portable baseline (AVX2, no AVX-512)."
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:

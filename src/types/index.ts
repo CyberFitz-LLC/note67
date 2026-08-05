@@ -17,7 +17,7 @@ export type {
   AiProviderConfig,
   AiConnectionTest,
   AudioSegment,
-  AudioInputDevice,
+  AudioDevice,
   UploadedAudio,
   AudioItem,
   RetranscribeResult,

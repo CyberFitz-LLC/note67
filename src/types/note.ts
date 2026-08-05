@@ -156,10 +156,11 @@ export interface AudioSegment {
   created_at: string;
 }
 
-// An input device that can be picked for recording (matches Rust AudioInputDevice)
-export interface AudioInputDevice {
+// A device that can be picked: a microphone to record from, or (Windows only)
+// a playback device to capture system audio from. Matches Rust AudioDevice.
+export interface AudioDevice {
   name: string;
-  /** Whether this is the operating system's current default input device */
+  /** Whether this is the OS default for its direction */
   isDefault: boolean;
 }
 

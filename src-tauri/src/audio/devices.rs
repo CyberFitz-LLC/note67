@@ -1,9 +1,13 @@
-//! Input-device enumeration and selection.
+//! Audio-device enumeration and selection.
 //!
 //! Recording used to always open `default_input_device()`. This module lets the
 //! user pin a specific microphone instead, while keeping the old behaviour as
 //! the fallback whenever the pinned device is gone (unplugged, renamed, or on a
 //! different machine that shares the same settings database).
+//!
+//! `resolve_device_selection` is deliberately direction-agnostic: the Windows
+//! loopback capture picks a *playback* device by exactly the same rules, and
+//! two copies of those rules would drift.
 
 use std::collections::HashSet;
 
@@ -12,18 +16,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioError;
 
-/// An input device the user can pick for recording.
+/// A device the user can pick — a microphone to record from, or (on Windows) a
+/// playback device to capture system audio from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AudioInputDevice {
+pub struct AudioDevice {
     pub name: String,
-    /// Whether this is the host's current default input device.
+    /// Whether this is the operating system's current default for its direction.
     pub is_default: bool,
 }
 
 /// Which device a recording should open.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputSelection {
+pub enum DeviceSelection {
     /// No preference saved — follow the system default, including when the user
     /// changes it in the OS while the app is running.
     Default,
@@ -39,15 +44,15 @@ pub enum InputSelection {
 ///
 /// Split out from the cpal calls so the fallback rules can be tested without
 /// audio hardware, which CI does not have.
-pub fn resolve_input_selection(available: &[String], preferred: Option<&str>) -> InputSelection {
+pub fn resolve_device_selection(available: &[String], preferred: Option<&str>) -> DeviceSelection {
     match preferred {
         // Both "never set" and "explicitly cleared" mean follow the system.
-        None => InputSelection::Default,
-        Some(name) if name.trim().is_empty() => InputSelection::Default,
+        None => DeviceSelection::Default,
+        Some(name) if name.trim().is_empty() => DeviceSelection::Default,
         // Exact match only: cpal addresses devices by their exact name, so a
         // fuzzy match here would open a device the user did not pick.
-        Some(name) if available.iter().any(|d| d == name) => InputSelection::Named(name.to_string()),
-        Some(name) => InputSelection::MissingFallback {
+        Some(name) if available.iter().any(|d| d == name) => DeviceSelection::Named(name.to_string()),
+        Some(name) => DeviceSelection::MissingFallback {
             requested: name.to_string(),
         },
     }
@@ -63,7 +68,7 @@ fn input_device_names(host: &cpal::Host) -> Result<Vec<String>, AudioError> {
 /// Devices whose names collide are deduplicated: cpal can only be asked for a
 /// device *by name*, so offering the user a second "USB Audio" we could never
 /// actually open would be a lie.
-pub fn list_input_devices() -> Result<Vec<AudioInputDevice>, AudioError> {
+pub fn list_input_devices() -> Result<Vec<AudioDevice>, AudioError> {
     let host = cpal::default_host();
     let default_name = host.default_input_device().and_then(|d| d.name().ok());
 
@@ -75,7 +80,7 @@ pub fn list_input_devices() -> Result<Vec<AudioInputDevice>, AudioError> {
             continue;
         }
         let is_default = default_name.as_deref() == Some(name.as_str());
-        devices.push(AudioInputDevice { name, is_default });
+        devices.push(AudioDevice { name, is_default });
     }
 
     Ok(devices)
@@ -86,21 +91,21 @@ pub fn open_input_device(preferred: Option<&str>) -> Result<cpal::Device, AudioE
     let host = cpal::default_host();
     let available = input_device_names(&host)?;
 
-    match resolve_input_selection(&available, preferred) {
-        InputSelection::Named(name) => host
+    match resolve_device_selection(&available, preferred) {
+        DeviceSelection::Named(name) => host
             .input_devices()?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
             // Only reachable if the device disappeared between the two
             // enumerations above.
             .ok_or(AudioError::NoInputDevice),
-        InputSelection::MissingFallback { requested } => {
+        DeviceSelection::MissingFallback { requested } => {
             eprintln!(
                 "Saved input device {:?} is not available; recording with the system default instead",
                 requested
             );
             host.default_input_device().ok_or(AudioError::NoInputDevice)
         }
-        InputSelection::Default => host.default_input_device().ok_or(AudioError::NoInputDevice),
+        DeviceSelection::Default => host.default_input_device().ok_or(AudioError::NoInputDevice),
     }
 }
 
@@ -118,8 +123,8 @@ mod tests {
     #[test]
     fn no_preference_follows_the_system_default() {
         assert_eq!(
-            resolve_input_selection(&available(), None),
-            InputSelection::Default
+            resolve_device_selection(&available(), None),
+            DeviceSelection::Default
         );
     }
 
@@ -128,20 +133,20 @@ mod tests {
         // The settings store is string-typed, so "cleared" arrives as an empty
         // string rather than as None.
         assert_eq!(
-            resolve_input_selection(&available(), Some("")),
-            InputSelection::Default
+            resolve_device_selection(&available(), Some("")),
+            DeviceSelection::Default
         );
         assert_eq!(
-            resolve_input_selection(&available(), Some("   ")),
-            InputSelection::Default
+            resolve_device_selection(&available(), Some("   ")),
+            DeviceSelection::Default
         );
     }
 
     #[test]
     fn a_present_device_is_selected() {
         assert_eq!(
-            resolve_input_selection(&available(), Some("Blue Yeti")),
-            InputSelection::Named("Blue Yeti".to_string())
+            resolve_device_selection(&available(), Some("Blue Yeti")),
+            DeviceSelection::Named("Blue Yeti".to_string())
         );
     }
 
@@ -149,12 +154,12 @@ mod tests {
     fn an_absent_device_falls_back_rather_than_failing() {
         // Unplugging the pinned mic must not stop the user recording.
         assert_eq!(
-            resolve_input_selection(&available(), Some("Blue Yeti")),
-            InputSelection::Named("Blue Yeti".to_string())
+            resolve_device_selection(&available(), Some("Blue Yeti")),
+            DeviceSelection::Named("Blue Yeti".to_string())
         );
         assert_eq!(
-            resolve_input_selection(&["MacBook Pro Microphone".to_string()], Some("Blue Yeti")),
-            InputSelection::MissingFallback {
+            resolve_device_selection(&["MacBook Pro Microphone".to_string()], Some("Blue Yeti")),
+            DeviceSelection::MissingFallback {
                 requested: "Blue Yeti".to_string()
             }
         );
@@ -165,16 +170,16 @@ mod tests {
         // cpal opens devices by exact name; a near-match would silently record
         // from the wrong microphone.
         assert!(matches!(
-            resolve_input_selection(&available(), Some("blue yeti")),
-            InputSelection::MissingFallback { .. }
+            resolve_device_selection(&available(), Some("blue yeti")),
+            DeviceSelection::MissingFallback { .. }
         ));
         assert!(matches!(
-            resolve_input_selection(&available(), Some("Yeti")),
-            InputSelection::MissingFallback { .. }
+            resolve_device_selection(&available(), Some("Yeti")),
+            DeviceSelection::MissingFallback { .. }
         ));
         assert!(matches!(
-            resolve_input_selection(&available(), Some("Blue Yeti 2")),
-            InputSelection::MissingFallback { .. }
+            resolve_device_selection(&available(), Some("Blue Yeti 2")),
+            DeviceSelection::MissingFallback { .. }
         ));
     }
 
@@ -183,11 +188,11 @@ mod tests {
         // open_input_device turns this into NoInputDevice; the resolver's job is
         // only to say "not the pinned one".
         assert_eq!(
-            resolve_input_selection(&[], Some("Blue Yeti")),
-            InputSelection::MissingFallback {
+            resolve_device_selection(&[], Some("Blue Yeti")),
+            DeviceSelection::MissingFallback {
                 requested: "Blue Yeti".to_string()
             }
         );
-        assert_eq!(resolve_input_selection(&[], None), InputSelection::Default);
+        assert_eq!(resolve_device_selection(&[], None), DeviceSelection::Default);
     }
 }

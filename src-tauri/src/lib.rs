@@ -168,6 +168,7 @@ pub fn run() {
             // Restore the pinned microphone before any recording can start.
             if let Some(db) = app.try_state::<Database>() {
                 commands::restore_preferred_input_device(&audio_state, &db);
+                commands::restore_preferred_output_device(&audio_state, &db);
             }
             app.manage(audio_state);
 
@@ -376,6 +377,10 @@ pub fn run() {
             commands::get_microphone_auth_status,
             commands::request_microphone_permission,
             commands::list_audio_input_devices,
+            commands::is_output_device_selectable,
+            commands::list_audio_output_devices,
+            commands::get_preferred_output_device,
+            commands::set_preferred_output_device,
             commands::get_preferred_input_device,
             commands::set_preferred_input_device,
             commands::start_dual_recording,

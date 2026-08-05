@@ -6,13 +6,15 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 use crate::audio::{
-    self, build_playback_track, is_system_audio_available, AudioInputDevice, RecordingPhase,
+    self, build_playback_track, is_system_audio_available, AudioDevice, RecordingPhase,
     RecordingState, SystemAudioCapture,
 };
 use crate::db::Database;
 
 /// Settings key holding the pinned input device name.
 pub const INPUT_DEVICE_SETTING: &str = "input_device";
+/// Settings key holding the pinned playback (loopback capture) device name.
+pub const OUTPUT_DEVICE_SETTING: &str = "output_device";
 
 /// Result of dual recording containing paths to all recorded files
 #[derive(Debug, Clone, Serialize)]
@@ -142,7 +144,7 @@ pub fn has_microphone_available() -> bool {
 
 /// List the input devices available for recording.
 #[tauri::command]
-pub fn list_audio_input_devices() -> Result<Vec<AudioInputDevice>, String> {
+pub fn list_audio_input_devices() -> Result<Vec<AudioDevice>, String> {
     audio::list_input_devices().map_err(|e| e.to_string())
 }
 
@@ -188,6 +190,71 @@ pub fn restore_preferred_input_device(state: &AudioState, db: &Database) {
         }
         Ok(None) => {}
         Err(e) => eprintln!("Failed to read the saved input device: {}", e),
+    }
+}
+
+// ========== Output (playback) Device Selection ==========
+
+/// Whether this platform lets the user choose which playback device is captured.
+#[tauri::command]
+pub fn is_output_device_selectable() -> bool {
+    audio::is_output_device_selectable()
+}
+
+/// List the playback devices whose audio can be captured.
+#[tauri::command]
+pub fn list_audio_output_devices() -> Result<Vec<AudioDevice>, String> {
+    audio::list_output_devices().map_err(|e| e.to_string())
+}
+
+/// Get the pinned playback device name. `None` follows the system default.
+#[tauri::command]
+pub fn get_preferred_output_device(state: State<AudioState>) -> Result<Option<String>, String> {
+    let capture = state.system_capture.lock().map_err(|e| e.to_string())?;
+    Ok(capture.as_ref().and_then(|cap| cap.get_preferred_device()))
+}
+
+/// Pin a playback device to capture system audio from.
+///
+/// As with the microphone, the name is not validated against what is present:
+/// a docking station unplugged overnight should still be pinned in the morning.
+#[tauri::command]
+pub fn set_preferred_output_device(
+    device_name: Option<String>,
+    state: State<AudioState>,
+    db: State<Database>,
+) -> Result<(), String> {
+    {
+        let capture = state.system_capture.lock().map_err(|e| e.to_string())?;
+        match capture.as_ref() {
+            Some(cap) => cap.set_preferred_device(device_name).map_err(|e| e.to_string())?,
+            None => return Err("System audio capture is not available on this platform".to_string()),
+        }
+    }
+
+    // Read back the normalised value so the database and the running state
+    // cannot disagree about what "" means.
+    let stored = {
+        let capture = state.system_capture.lock().map_err(|e| e.to_string())?;
+        capture.as_ref().and_then(|cap| cap.get_preferred_device())
+    };
+    db.set_setting(OUTPUT_DEVICE_SETTING, stored.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())
+}
+
+/// Load the pinned playback device from settings into the running audio state.
+pub fn restore_preferred_output_device(state: &AudioState, db: &Database) {
+    let Ok(Some(name)) = db.get_setting(OUTPUT_DEVICE_SETTING) else {
+        return;
+    };
+
+    let Ok(capture) = state.system_capture.lock() else {
+        return;
+    };
+    if let Some(cap) = capture.as_ref()
+        && let Err(e) = cap.set_preferred_device(Some(name))
+    {
+        eprintln!("Failed to restore the saved playback device: {}", e);
     }
 }
 

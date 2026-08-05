@@ -34,6 +34,44 @@ pub trait SystemAudioCapture: Send + Sync {
 
     /// Check if currently capturing
     fn is_capturing(&self) -> bool;
+
+    /// Pin a playback device to capture from, by name. `None` follows the
+    /// system default.
+    ///
+    /// Defaults to accepting and ignoring the choice. macOS captures the whole
+    /// system mix through ScreenCaptureKit, where there is no output device to
+    /// choose between — the equivalent knob there is which *applications* to
+    /// include, which is a different feature.
+    fn set_preferred_device(&self, _name: Option<String>) -> SystemAudioResult<()> {
+        Ok(())
+    }
+
+    /// The pinned playback device, if this platform supports choosing one.
+    fn get_preferred_device(&self) -> Option<String> {
+        None
+    }
+}
+
+/// List the playback devices whose audio can be captured.
+///
+/// Empty on platforms where the choice does not exist; pair it with
+/// [`is_output_device_selectable`] to tell "none found" apart from
+/// "not applicable here".
+pub fn list_output_devices() -> SystemAudioResult<Vec<crate::audio::AudioDevice>> {
+    #[cfg(target_os = "windows")]
+    {
+        super::windows::list_render_devices()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// Whether this platform lets the user choose which playback device is captured.
+pub fn is_output_device_selectable() -> bool {
+    cfg!(target_os = "windows")
 }
 
 /// Get the system audio capture implementation for the current platform

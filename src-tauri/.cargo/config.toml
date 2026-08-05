@@ -1,0 +1,7 @@
+# Applies to local builds as well as CI, so a developer's own Windows build is
+# as portable as the released one. See cmake/portable-cpu.cmake for why.
+#
+# `relative = true` resolves the path against this file's parent directory, so
+# it works regardless of where cargo is invoked from.
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/portable-cpu.cmake", relative = true, force = false }
