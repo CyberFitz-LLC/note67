@@ -2,6 +2,7 @@ export { useOllama, useSummaries } from "./useAI";
 export { useNotes } from "./useNotes";
 export { useRecording } from "./useRecording";
 export { useInputDevices } from "./useInputDevices";
+export { useOutputDevices } from "./useOutputDevices";
 export { useAiProvider } from "./useAiProvider";
 export { useModels, useTranscription, useLiveTranscription } from "./useTranscription";
 export { useUpdater } from "./useUpdater";

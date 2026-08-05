@@ -54,6 +54,10 @@ export const defaultCommands: CommandMap = {
   ],
   get_preferred_input_device: null, // follows the system default
   set_preferred_input_device: null,
+  is_output_device_selectable: false, // Windows-only; off in the mocked env
+  list_audio_output_devices: [],
+  get_preferred_output_device: null,
+  set_preferred_output_device: null,
   is_system_audio_supported: true,
   has_system_audio_permission: true,
   request_system_audio_permission: true,

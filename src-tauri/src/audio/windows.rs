@@ -539,6 +539,7 @@ impl SystemAudioCapture for WindowsSystemAudioCapture {
             .ok()
             .and_then(|guard| guard.clone())
     }
+}
 
 impl Default for WindowsSystemAudioCapture {
     fn default() -> Self {
