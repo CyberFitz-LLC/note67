@@ -170,7 +170,13 @@ pub fn run() {
                 commands::restore_preferred_input_device(&audio_state, &db);
             }
             app.manage(audio_state);
-            app.manage(AiState::default());
+
+            let ai_state = AiState::default();
+            // Restore the saved model backend before the UI queries its status.
+            if let Some(db) = app.try_state::<Database>() {
+                tauri::async_runtime::block_on(commands::restore_provider_config(&ai_state, &db));
+            }
+            app.manage(ai_state);
             let transcription_state = init_transcription_state(app.handle());
             app.manage(transcription_state);
 
@@ -416,6 +422,9 @@ pub fn run() {
             commands::retranscribe_note,
             // AI commands
             commands::get_ollama_status,
+            commands::get_ai_provider_config,
+            commands::set_ai_provider_config,
+            commands::test_ai_connection,
             commands::list_ollama_models,
             commands::select_ollama_model,
             commands::get_selected_model,

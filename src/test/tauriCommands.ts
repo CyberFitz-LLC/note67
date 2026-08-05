@@ -62,16 +62,32 @@ export const defaultCommands: CommandMap = {
   set_autostart_enabled: null,
   is_meeting_detection_enabled: false,
 
-  // Ollama (running + model selected)
+  // Model backend (running + model selected)
   get_ollama_status: {
     running: true,
     models: [{ name: "gemma3:4b" }],
     selected_model: "gemma3:4b",
+    provider: "ollama",
   },
   list_ollama_models: [{ name: "gemma3:4b" }],
   get_selected_model: "gemma3:4b",
   select_ollama_model: null,
   is_ai_generating: false,
+  get_ai_provider_config: {
+    provider: "ollama",
+    baseUrl: "http://localhost:11434",
+    hasApiKey: false,
+  },
+  set_ai_provider_config: {
+    provider: "ollama",
+    baseUrl: "http://localhost:11434",
+    hasApiKey: false,
+  },
+  test_ai_connection: {
+    ok: true,
+    message: "Connected. 1 model(s) available.",
+    modelCount: 1,
+  },
 
   // Whisper (a model is downloaded + loaded)
   list_models: [{ size: "large-v3-turbo", downloaded: true }],

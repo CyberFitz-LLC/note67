@@ -1,7 +1,44 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { OllamaStatus, OllamaModel, Summary, SummaryType } from "../types";
+import type {
+  OllamaStatus,
+  OllamaModel,
+  Summary,
+  SummaryType,
+  AiProvider,
+  AiProviderConfig,
+  AiConnectionTest,
+} from "../types";
 
 export const aiApi = {
+  // ===== Provider configuration =====
+
+  /** Read the current provider settings (the API key is never returned) */
+  getProviderConfig: (): Promise<AiProviderConfig> => {
+    return invoke("get_ai_provider_config");
+  },
+
+  /**
+   * Point the app at a different model server.
+   *
+   * Pass `apiKey: undefined` to keep the stored key, or `""` to clear it.
+   */
+  setProviderConfig: (
+    provider: AiProvider,
+    baseUrl: string,
+    apiKey?: string
+  ): Promise<AiProviderConfig> => {
+    return invoke("set_ai_provider_config", {
+      provider,
+      baseUrl,
+      apiKey: apiKey ?? null,
+    });
+  },
+
+  /** Probe the configured server without changing anything */
+  testConnection: (): Promise<AiConnectionTest> => {
+    return invoke("test_ai_connection");
+  },
+
   // Ollama status
   getOllamaStatus: (): Promise<OllamaStatus> => {
     return invoke("get_ollama_status");

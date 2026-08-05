@@ -111,18 +111,35 @@ export interface TranscriptionResult {
   language: string | null;
 }
 
-// Ollama types for AI summaries
+// Which kind of model server the app talks to
+export type AiProvider = "ollama" | "openai_compat";
+
+// A model offered by the configured backend.
 export interface OllamaModel {
   name: string;
-  size: number;
-  modified_at: string;
-  digest: string;
+  /** Bytes on disk. Ollama reports this; OpenAI-compatible servers do not. */
+  size?: number;
+  modified_at?: string;
 }
 
 export interface OllamaStatus {
   running: boolean;
   models: OllamaModel[];
   selected_model: string | null;
+  provider: AiProvider;
+}
+
+// Provider settings. The API key is never returned, only whether one is set.
+export interface AiProviderConfig {
+  provider: AiProvider;
+  baseUrl: string;
+  hasApiKey: boolean;
+}
+
+export interface AiConnectionTest {
+  ok: boolean;
+  message: string;
+  modelCount: number;
 }
 
 // Audio segment for pause/resume/continue recording

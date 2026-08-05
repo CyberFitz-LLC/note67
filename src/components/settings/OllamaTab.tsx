@@ -1,4 +1,5 @@
-import { useOllama } from "../../hooks";
+import { useAiProvider, useOllama } from "../../hooks";
+import { ProviderSettings } from "./ProviderSettings";
 
 export function OllamaTab() {
   const {
@@ -9,7 +10,17 @@ export function OllamaTab() {
     selectedModel,
     selectModel,
     checkStatus,
+    status,
   } = useOllama();
+
+  const provider = useAiProvider();
+
+  // Which backend the status above actually came from. Defaults to Ollama so
+  // the copy is right on first paint, before the config has loaded.
+  const providerKind =
+    status?.provider ?? provider.config?.provider ?? "ollama";
+  const isOllama = providerKind === "ollama";
+  const serverLabel = isOllama ? "Ollama" : "Model server";
 
   const formatSize = (bytes: number) => {
     const gb = bytes / (1024 * 1024 * 1024);
@@ -38,6 +49,16 @@ export function OllamaTab() {
 
   return (
     <div>
+      {provider.config && (
+        // Remounting on a config change re-seeds the form from the values the
+        // backend actually stored, which may be normalised (a trimmed slash).
+        <ProviderSettings
+          key={`${provider.config.provider}|${provider.config.baseUrl}|${provider.config.hasApiKey}`}
+          provider={provider}
+          config={provider.config}
+        />
+      )}
+
       {/* Status */}
       <div className="mb-6">
         <div className="flex items-center justify-between">
@@ -50,7 +71,7 @@ export function OllamaTab() {
               className="text-sm font-medium"
               style={{ color: "var(--color-text)" }}
             >
-              Ollama {isRunning ? "Running" : "Not Running"}
+              {serverLabel} {isRunning ? "Running" : "Not Running"}
             </span>
           </div>
           <button
@@ -71,25 +92,36 @@ export function OllamaTab() {
               color: "#b45309",
             }}
           >
-            <p className="font-medium mb-1">Ollama is not running</p>
-            <p className="text-xs">
-              Follow our{" "}
-              <a
-                href="https://note67.com/ollama-setup"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline font-medium"
-              >
-                Ollama setup guide
-              </a>{" "}
-              to get started.
+            <p className="font-medium mb-1">
+              {isOllama
+                ? "Ollama is not running"
+                : "The model server is not reachable"}
             </p>
+            {isOllama ? (
+              <p className="text-xs">
+                Follow our{" "}
+                <a
+                  href="https://note67.com/ollama-setup"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-medium"
+                >
+                  Ollama setup guide
+                </a>{" "}
+                to get started.
+              </p>
+            ) : (
+              <p className="text-xs">
+                Check that the server is running and the URL above is correct,
+                then use "Test connection".
+              </p>
+            )}
           </div>
         )}
       </div>
 
       {/* Model Recommendations */}
-      {isRunning && (
+      {isRunning && isOllama && (
         <div
           className="mb-6 p-3 rounded-xl text-sm"
           style={{
@@ -156,17 +188,23 @@ export function OllamaTab() {
                 className="text-xs"
                 style={{ color: "var(--color-text-tertiary)" }}
               >
-                Follow our{" "}
-                <a
-                  href="https://note67.com/ollama-setup"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline font-medium"
-                  style={{ color: "var(--color-accent)" }}
-                >
-                  setup guide
-                </a>{" "}
-                to download a model.
+                {isOllama ? (
+                  <>
+                    Follow our{" "}
+                    <a
+                      href="https://note67.com/ollama-setup"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline font-medium"
+                      style={{ color: "var(--color-accent)" }}
+                    >
+                      setup guide
+                    </a>{" "}
+                    to download a model.
+                  </>
+                ) : (
+                  "The server is reachable but is not serving any models."
+                )}
               </p>
             </div>
           ) : (
@@ -245,7 +283,9 @@ export function OllamaTab() {
                       className="text-xs"
                       style={{ color: "var(--color-text-tertiary)" }}
                     >
-                      {formatSize(model.size)}
+                      {model.size !== undefined
+                        ? formatSize(model.size)
+                        : "\u00a0"}
                     </p>
                   </div>
                 </button>
