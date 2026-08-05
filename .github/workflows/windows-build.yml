@@ -17,6 +17,12 @@ jobs:
   build:
     runs-on: windows-latest
 
+    env:
+      # Also set in .cargo/config.toml for local builds. Duplicated here with an
+      # absolute path so CI does not depend on cargo's cwd-based config
+      # discovery, which varies between the test step and the tauri build.
+      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/src-tauri/cmake/portable-cpu.cmake
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +40,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # CMake never re-configures a restored cache, so a stale
+          # CMakeCache.txt would keep GGML_NATIVE=ON. Bump on baseline changes.
+          key: portable-cpu-v1
 
       - name: Install dependencies
         run: npm ci
@@ -61,23 +70,58 @@ jobs:
 
       # ggml probes the *build* machine's CPU and bakes in whatever it finds, so
       # an AVX-512 runner produces an installer that dies with
-      # STATUS_ILLEGAL_INSTRUCTION on ordinary consumer CPUs. cmake/portable-cpu.cmake
-      # pins the baseline; this proves it took effect, by reading the cache the
-      # build actually used rather than trusting the config.
+      # STATUS_ILLEGAL_INSTRUCTION on ordinary consumer CPUs.
+      # src-tauri/cmake/portable-cpu.cmake pins the baseline; this proves it took
+      # effect, from the build tree rather than from the configuration we intended.
       - name: Verify a portable CPU baseline was used
         shell: pwsh
         run: |
-          $cache = Get-ChildItem -Path src-tauri/target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -like "*whisper-rs-sys*" } | Select-Object -First 1
-          if (-not $cache) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the CPU baseline." }
-          Write-Host "Cache: $($cache.FullName)"
-          $flags = Select-String -Path $cache.FullName -Pattern '^GGML_(NATIVE|AVX|AVX2|AVX512|FMA):'
-          $flags | ForEach-Object { Write-Host $_.Line }
-          if ($flags -match '^GGML_AVX512:BOOL=ON') {
-            throw "AVX-512 was baked into this build; it will crash on CPUs without it."
+          $caches = Get-ChildItem -Path src-tauri/target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -like "*whisper-rs-sys*" }
+          if (-not $caches) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the CPU baseline." }
+
+          $failed = $false
+          foreach ($cache in $caches) {
+            Write-Host "--- $($cache.FullName)"
+            $lines = Get-Content $cache.FullName
+
+            # GGML_NATIVE=OFF is the load-bearing assertion: it is what stops
+            # FindSIMD.cmake running at all. Checking GGML_AVX512 instead would
+            # be unsound, because FindSIMD sets it as a plain variable that
+            # shadows the cache entry -- the cache can read OFF while the
+            # compile used /arch:AVX512.
+            $native = $lines | Select-String -Pattern '^GGML_NATIVE:BOOL=' | Select-Object -First 1
+            Write-Host "    $($native.Line)"
+            if ($native.Line -notmatch '=OFF$') {
+              Write-Host "    FAIL: GGML_NATIVE is not OFF; this build probed the runner's CPU."
+              $failed = $true
+            }
+
+            # FindSIMD writes these as real cache entries, so their presence is
+            # direct evidence it ran despite the above.
+            $found = $lines | Select-String -Pattern '^(AVX512|AVX2|AVX|FMA)_FOUND:'
+            if ($found) {
+              $found | ForEach-Object { Write-Host "    $($_.Line)" }
+              if ($found -match '^AVX512_FOUND:BOOL=(TRUE|ON|1)') {
+                Write-Host "    FAIL: FindSIMD detected AVX-512 on the builder and enabled it."
+                $failed = $true
+              }
+            }
           }
-          if (-not ($flags -match '^GGML_NATIVE:BOOL=OFF')) {
-            throw "GGML_NATIVE is not OFF; the build probed this runner's CPU and is not portable."
+
+          # Most direct evidence of all: the generated build files carry the
+          # actual compiler flags, whatever the generator.
+          $avx512 = Get-ChildItem -Path src-tauri/target -Recurse -Include *.vcxproj,build.ninja,flags.make -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -like "*whisper-rs-sys*" } |
+                    Select-String -Pattern '/arch:AVX512' -List
+          if ($avx512) {
+            Write-Host "FAIL: /arch:AVX512 present in generated build files:"
+            $avx512 | ForEach-Object { Write-Host "    $($_.Path)" }
+            $failed = $true
+          }
+
+          if ($failed) {
+            throw "This build is not portable; it would crash on CPUs narrower than the runner."
           }
           Write-Host "OK: portable baseline (AVX2, no AVX-512)."
 
