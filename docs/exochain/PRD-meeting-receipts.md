@@ -52,6 +52,8 @@ needs, and it did not exist a month ago.
 - **N4** Putting transcripts, audio, or summaries into ExoChain or DAG-DB.
 - **N5** Public-fleet credential provisioning (see Risks).
 - **N6** Legal admissibility as a claim. See §6 and R4 in Risks.
+- **N7** Determining whether consent was legally sufficient in a jurisdiction.
+  The app records an assertion and a jurisdiction; it does not evaluate them.
 
 ## 5. Users
 
@@ -89,8 +91,10 @@ This section is the product. Getting it wrong makes the feature a liability.
 - **That the transcript is accurate.** Whisper output is attested as-is,
   hallucinations included.
 - **Who spoke.** No participant identity exists.
-- **That recording was consented to.** Unless consent is explicitly captured
-  (§8.4).
+- **That recording was consented to.** Where a consent basis is present (§8.4),
+  the receipt proves only that *the operator asserted* that basis at that time.
+  It is evidence of an assertion, never evidence of consent. A false assertion
+  produces a valid receipt.
 
 Every surface stating a receipt's meaning must use this language. "Verified" on
 its own is not acceptable UI copy.
@@ -197,17 +201,76 @@ than minting duplicates.
 re-hash years later won't match and the receipt becomes worthless. This is the
 highest-risk detail in the document.
 
-### 8.4 Consent (product decision required)
+### 8.4 Consent attestation
 
-Consent is legally significant and Note67 captures none today. Options:
+Recording a conversation is legally significant, and in much of the US it is
+regulated per-state rather than federally: some jurisdictions require only one
+party to consent, others require all parties. Note67 captures nothing about this
+today. A meeting receipt that is silent on consent is honest but of limited use
+to the person who most needs it.
 
-1. Omit — receipts say nothing about consent. Honest, least useful.
-2. A per-meeting affirmation the user ticks, attested in the receipt. Records
-   *that the operator asserted* consent, not that it was obtained.
-3. A `consent_refs` policy document referenced by the credential.
+**What is attested is an assertion, not a fact.** The app cannot observe whether
+consent was obtained. It can only record that the operator said so, when they
+said it, and on what basis. Every field, string, and schema name below is chosen
+to keep that distinction intact — a receipt that appears to certify consent
+itself would be worse than no receipt at all.
 
-**Recommend (2)** for v1, worded so it attests an assertion rather than a fact.
-Do not auto-assert consent.
+#### Capture
+
+A consent prompt appears when recording starts, before the first sample is
+written. It is **not** pre-ticked and has no default. The user picks a basis:
+
+| Basis | Meaning |
+|---|---|
+| `AllPartiesVerbal` | Everyone present was told and agreed, verbally |
+| `AllPartiesWritten` | Written agreement exists (calendar notice, contract, policy) |
+| `OnePartyOperator` | Operator is a party and relies on one-party consent |
+| `NoticeDisplayed` | Platform recording notice was shown to all participants |
+| `NotAsserted` | User declined to assert anything |
+
+`NotAsserted` is a legitimate outcome and is recorded as such. **Declining does
+not block recording** (goal G4) and does not produce a warning banner — the
+choice is the user's and the receipt simply reflects it.
+
+The prompt is dismissible-to-`NotAsserted` and can be disabled entirely in
+settings for users who find it noise, in which case every meeting records
+`NotAsserted`.
+
+#### What lands in the receipt
+
+Added to the meeting attestation payload (§8.3):
+
+```
+consent_basis          one of the values above
+consent_asserted_at    local timestamp when the operator made the assertion
+consent_jurisdiction   optional ISO-3166-2 (e.g. "US-WA"), user-set in settings
+consent_policy_ref     optional; hash of an org consent policy from the credential
+```
+
+No participant names, no free text. A receipt must not become a place personal
+data leaks by accident.
+
+`consent_asserted_at` is captured at recording start and is therefore *earlier*
+than the receipt's own timestamp. That ordering is the point: it shows the
+assertion preceded the recording rather than being applied retroactively. It is
+a local clock and is not itself attested — only the fact that this is what the
+app recorded.
+
+#### Org-level policy
+
+Where an organization has a standing consent policy, its hash goes in the
+credential's `consent_refs` and is echoed as `consent_policy_ref`. That binds a
+meeting to the policy in force when it was recorded, so a later policy change
+cannot rewrite what an old meeting claimed to follow.
+
+#### Wording rules
+
+Receipt-facing copy must attribute the assertion. Required form:
+
+> Operator asserted all-party verbal consent, 6 Aug 2026 09:14 (US-WA).
+
+Forbidden: "Consent verified", "Consented", a tick mark alone, or any string
+implying the system observed consent. §6 governs; this is an instance of it.
 
 ### 8.5 Enforcement seams
 
@@ -240,7 +303,7 @@ excludes R8, and recording is outside the governed surface by design.**
 | Phase | Deliverable | Blocked by |
 |---|---|---|
 | **P0** | Identity + credential + enrollment UI | toolkit #2, #3 |
-| **P1** | Meeting attestation, Pending/Attested states, frozen serialization | P0 |
+| **P1** | Meeting attestation, consent capture (§8.4), Pending/Attested states, frozen serialization | P0 |
 | **P2** | LYNK usage receipts on remote AI | P1 |
 | **P3** | Endpoint enforcement (counterparties) | toolkit #4 |
 | **P4** | Verification UI + provenance export | P1 |
@@ -269,14 +332,20 @@ receipt path does not support "provable chain / legally admissible." *Mitigation
 make no such claim until closed. This PRD deliberately claims only existence,
 integrity, and authorship.
 
-**R5 — Fleet provisioning does not exist.** The onboarding scaffold mints for a
+**R5 — A consent assertion reads as a consent guarantee.** The failure mode is a
+user relying on a receipt in a dispute and discovering it attests only their own
+claim. *Mitigation:* §8.4 wording rules, attribution in every string, and
+`NotAsserted` treated as ordinary rather than deficient. Worth a legal read
+before any external-facing copy.
+
+**R6 — Fleet provisioning does not exist.** The onboarding scaffold mints for a
 tool, not thousands of installs. *Mitigation:* internal use only until resolved.
 
-**R6 — Node availability becomes a support burden.** A desktop app acquires a
+**R7 — Node availability becomes a support burden.** A desktop app acquires a
 server dependency for part of its function. *Mitigation:* Pending state means
 outages degrade rather than break.
 
-**R7 — Upstream merges break byte parity.** Every merge from ZapYap re-runs
+**R8 — Upstream merges break byte parity.** Every merge from ZapYap re-runs
 conformance; R4/R5 byte-parity and R4 scope drift are the usual breakers.
 
 ## 11. Open questions
@@ -284,10 +353,12 @@ conformance; R4/R5 byte-parity and R4 scope drift are the usual breakers.
 1. Sanctioned emit path for a native-Rust subject (toolkit #2). Blocks P0.
 2. `subject_kind` and per-install identity (toolkit #3). Blocks P0.
 3. Endpoint → counterparty DID mapping (toolkit #4). Blocks P3.
-4. Was LYNK designed with this consumer shape in mind? Worth asking Bob directly.
-5. Should audio be hashed as well as the transcript? Anchors the source, but ties
+4. Does `consent_refs` carry a hash or a resolvable reference? §8.4 assumes a
+   hash; confirm against the credential schema before P1.
+5. Was LYNK designed with this consumer shape in mind? Worth asking Bob directly.
+6. Should audio be hashed as well as the transcript? Anchors the source, but ties
    the receipt to a file users may delete.
-6. Retention: what happens to a receipt when its note is deleted? The receipt
+7. Retention: what happens to a receipt when its note is deleted? The receipt
    outlives it by design — is that acceptable?
 
 ## 12. Success criteria
@@ -298,5 +369,8 @@ conformance; R4/R5 byte-parity and R4 scope drift are the usual breakers.
   and model, containing no transcript content.
 - A third party verifies a receipt hash against the node with nothing from us.
 - Every user-facing string about a receipt survives review against §6.
+- A meeting recorded with consent declined produces a valid receipt carrying
+  `NotAsserted`, with no warning banner and no behavioural difference.
+- No receipt-facing string states or implies that consent was verified.
 - Recording works with the node down, the credential expired, and enrollment
   skipped.
