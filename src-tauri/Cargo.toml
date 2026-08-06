@@ -13,6 +13,19 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# GPU backends for Whisper. Off by default so a plain `cargo build` stays
+# CPU-only and needs no SDK; CI builds one artifact per backend.
+#
+# Vulkan is the portable choice: one binary drives NVIDIA, AMD and Intel GPUs
+# and falls back to CPU when no device is present. CUDA is faster on NVIDIA but
+# produces an NVIDIA-only binary that must ship the CUDA runtime DLLs.
+#
+# Mutually exclusive in practice — pick one per build.
+[features]
+default = []
+gpu-vulkan = ["whisper-rs/vulkan"]
+gpu-cuda = ["whisper-rs/cuda"]
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-clipboard-manager = "2"

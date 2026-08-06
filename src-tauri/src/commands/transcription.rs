@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-use whisper_rs::{WhisperContext, WhisperContextParameters};
+use whisper_rs::WhisperContext;
 
 use crate::commands::audio::AudioState;
 use crate::db::models::NewTranscriptSegment;
@@ -186,15 +186,13 @@ pub fn load_model(size: String, state: State<TranscriptionState>) -> Result<(), 
         return Err(format!("Model {} is not downloaded", size));
     }
 
-    // Load the model
-    let transcriber = Transcriber::new(&model_path).map_err(|e| e.to_string())?;
-
-    // Also load WhisperContext for live transcription
-    let whisper_ctx = WhisperContext::new_with_params(
-        model_path.to_str().unwrap(),
-        WhisperContextParameters::default(),
-    )
-    .map_err(|e| format!("Failed to load whisper context: {}", e))?;
+    // Load the model once. This used to load it twice — once inside the
+    // transcriber and again for live transcription — leaving two copies of the
+    // weights resident (~900MB each for large-v3-turbo-q8). Whisper keeps the
+    // weights on the context and per-run scratch on the states created from it,
+    // so a single context serves both callers.
+    let whisper_ctx = Arc::new(Transcriber::load_context(&model_path).map_err(|e| e.to_string())?);
+    let transcriber = Transcriber::from_context(Arc::clone(&whisper_ctx));
 
     // Store the transcriber
     {
@@ -205,7 +203,7 @@ pub fn load_model(size: String, state: State<TranscriptionState>) -> Result<(), 
     // Store the whisper context
     {
         let mut ctx = state.whisper_ctx.lock().map_err(|e| e.to_string())?;
-        *ctx = Some(Arc::new(whisper_ctx));
+        *ctx = Some(whisper_ctx);
     }
 
     // Update current model

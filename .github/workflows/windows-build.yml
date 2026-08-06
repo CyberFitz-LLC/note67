@@ -1,10 +1,15 @@
 name: Windows Build
 
-# Produces an unsigned Windows installer for testing fork changes.
+# Produces unsigned Windows installers for testing fork changes.
 #
 # The upstream Release workflow is tag-driven and needs Apple/Tauri signing
 # secrets this fork does not have, so this is a separate, secret-free build that
-# publishes the installer as a workflow artifact instead of a GitHub release.
+# publishes installers as workflow artifacts instead of a GitHub release.
+#
+# Two GPU variants are built. Whisper on CPU runs at roughly real-time on a
+# mobile Xeon, and Note67 transcribes the mic and system tracks separately, so a
+# meeting costs about twice its own length to process. Offloading to a GPU is
+# the difference between usable and not.
 
 on:
   workflow_dispatch:
@@ -13,122 +18,192 @@ on:
       - main
       - 'feat/**'
 
+env:
+  # Also set in .cargo/config.toml for local builds. Duplicated here with an
+  # absolute path so CI does not depend on cargo's cwd-based config discovery,
+  # which varies between the test step and the tauri build.
+  CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/src-tauri/cmake/portable-cpu.cmake
+
 jobs:
-  build:
+  # Runs once. No point paying for it per GPU variant.
+  checks:
     runs-on: windows-latest
-
-    env:
-      # Also set in .cargo/config.toml for local builds. Duplicated here with an
-      # absolute path so CI does not depend on cargo's cwd-based config
-      # discovery, which varies between the test step and the tauri build.
-      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/src-tauri/cmake/portable-cpu.cmake
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          # CMake never re-configures a restored cache, so a stale
-          # CMakeCache.txt would keep GGML_NATIVE=ON. Bump on baseline changes.
-          key: portable-cpu-v1
-
-      - name: Install dependencies
-        run: npm ci
-
-      # Gate the build on the test suite: an installer that fails its own tests
-      # is not worth downloading.
+          key: checks-portable-cpu-v1
+      - run: npm ci
       - name: Lint
         run: npm run lint
-
       - name: Typecheck
         run: npx tsc --noEmit
-
       - name: Unit tests
         run: npm test
-
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
-      # createUpdaterArtifacts is on in tauri.conf.json and requires
-      # TAURI_SIGNING_PRIVATE_KEY, which this fork has no reason to hold. Turn it
-      # off for this build rather than committing a key.
-      - name: Build Windows installer
+  build:
+    needs: checks
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Portable: one binary drives NVIDIA, AMD and Intel, and falls back to
+          # CPU when no Vulkan device is present.
+          - variant: vulkan
+            features: gpu-vulkan
+          # Faster on NVIDIA, but the binary is NVIDIA-only and has to ship the
+          # CUDA runtime DLLs.
+          - variant: cuda
+            features: gpu-cuda
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # Separate cache per variant: the CMake cache bakes in the backend.
+          key: ${{ matrix.variant }}-portable-cpu-v1
+
+      - name: Install Vulkan SDK
+        if: matrix.variant == 'vulkan'
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          # The package does not reliably export VULKAN_SDK, and
+          # whisper-rs-sys reads that variable to find the headers and libs.
+          $root = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $root) { throw "Vulkan SDK not found under C:\VulkanSDK after install." }
+          Write-Host "VULKAN_SDK=$($root.FullName)"
+          "VULKAN_SDK=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Third-party action. Pin to a SHA if that matters more than convenience.
+      - name: Install CUDA Toolkit
+        if: matrix.variant == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.0'
+          method: 'network'
+          # Only what ggml needs to compile and link; the full toolkit is a
+          # multi-gigabyte download for no gain.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      - run: npm ci
+
+      # CUDA links its runtime dynamically, so these DLLs must ship beside the
+      # exe or the app dies at startup on any machine without the toolkit.
+      # Staged before the build so the bundler can pick them up as resources —
+      # copying them afterwards leaves them outside the installer entirely.
+      - name: Stage CUDA runtime DLLs
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          $bin = "$env:CUDA_PATH\bin"
+          if (-not (Test-Path $bin)) { throw "CUDA_PATH not set or missing bin/: '$env:CUDA_PATH'" }
+          $want = Get-ChildItem $bin -Filter *.dll |
+                  Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' }
+          if (-not $want) { throw "No cudart/cublas DLLs found in $bin" }
+          New-Item -ItemType Directory -Force -Path src-tauri/cuda-runtime | Out-Null
+          foreach ($dll in $want) {
+            Copy-Item $dll.FullName -Destination src-tauri/cuda-runtime -Force
+            Write-Host "staged $($dll.Name)"
+          }
+
+      - name: Build Windows installer (${{ matrix.variant }})
         shell: bash
-        run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: |
+          if [ "${{ matrix.variant }}" = "cuda" ]; then
+            # Resource paths are relative to src-tauri; "./" puts them next to
+            # the exe, which is where the loader looks.
+            BUNDLE='{"bundle":{"createUpdaterArtifacts":false,"resources":{"cuda-runtime/*.dll":"./"}}}'
+          else
+            BUNDLE='{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+          npm run tauri build -- --features ${{ matrix.features }} --config "$BUNDLE"
 
       # ggml probes the *build* machine's CPU and bakes in whatever it finds, so
       # an AVX-512 runner produces an installer that dies with
       # STATUS_ILLEGAL_INSTRUCTION on ordinary consumer CPUs.
-      # src-tauri/cmake/portable-cpu.cmake pins the baseline; this proves it took
-      # effect, from the build tree rather than from the configuration we intended.
-      - name: Verify a portable CPU baseline was used
+      # src-tauri/cmake/portable-cpu.cmake pins the baseline. This proves both
+      # that it took effect and that the GPU backend really was compiled in,
+      # from the build tree rather than from the configuration we intended.
+      - name: Verify CPU baseline and GPU backend
         shell: pwsh
         run: |
           $caches = Get-ChildItem -Path src-tauri/target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
                     Where-Object { $_.FullName -like "*whisper-rs-sys*" }
-          if (-not $caches) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the CPU baseline." }
+          if (-not $caches) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the build." }
 
           $failed = $false
+          $sawBackend = $false
+          $backend = if ("${{ matrix.variant }}" -eq "vulkan") { "GGML_VULKAN" } else { "GGML_CUDA" }
+
           foreach ($cache in $caches) {
             Write-Host "--- $($cache.FullName)"
             $lines = Get-Content $cache.FullName
 
-            # GGML_NATIVE=OFF is the load-bearing assertion: it is what stops
-            # FindSIMD.cmake running at all. Checking GGML_AVX512 instead would
-            # be unsound, because FindSIMD sets it as a plain variable that
-            # shadows the cache entry -- the cache can read OFF while the
-            # compile used /arch:AVX512.
+            # GGML_NATIVE=OFF is the load-bearing CPU assertion: it is what stops
+            # FindSIMD.cmake running. Checking GGML_AVX512 would be unsound —
+            # FindSIMD sets it as a plain variable that shadows the cache entry,
+            # so the cache can read OFF while the compile used /arch:AVX512.
             $native = $lines | Select-String -Pattern '^GGML_NATIVE:BOOL=' | Select-Object -First 1
-            Write-Host "    $($native.Line)"
-            if ($native.Line -notmatch '=OFF$') {
-              Write-Host "    FAIL: GGML_NATIVE is not OFF; this build probed the runner's CPU."
-              $failed = $true
-            }
-
-            # FindSIMD writes these as real cache entries, so their presence is
-            # direct evidence it ran despite the above.
-            $found = $lines | Select-String -Pattern '^(AVX512|AVX2|AVX|FMA)_FOUND:'
-            if ($found) {
-              $found | ForEach-Object { Write-Host "    $($_.Line)" }
-              if ($found -match '^AVX512_FOUND:BOOL=(TRUE|ON|1)') {
-                Write-Host "    FAIL: FindSIMD detected AVX-512 on the builder and enabled it."
+            if ($native) {
+              Write-Host "    $($native.Line)"
+              if ($native.Line -notmatch '=OFF$') {
+                Write-Host "    FAIL: GGML_NATIVE is not OFF; this build probed the runner's CPU."
                 $failed = $true
               }
             }
+
+            $found = $lines | Select-String -Pattern '^AVX512_FOUND:'
+            if ($found -match '^AVX512_FOUND:BOOL=(TRUE|ON|1)') {
+              Write-Host "    FAIL: FindSIMD detected AVX-512 on the builder and enabled it."
+              $failed = $true
+            }
+
+            # A silent fallback to CPU is the failure this catches: the installer
+            # would work, just slowly, and nobody would notice until a user did.
+            $gpu = $lines | Select-String -Pattern "^$($backend):BOOL=" | Select-Object -First 1
+            if ($gpu) {
+              Write-Host "    $($gpu.Line)"
+              if ($gpu.Line -match '=ON$') { $sawBackend = $true }
+            }
           }
 
-          # Most direct evidence of all: the generated build files carry the
-          # actual compiler flags, whatever the generator.
           $avx512 = Get-ChildItem -Path src-tauri/target -Recurse -Include *.vcxproj,build.ninja,flags.make -ErrorAction SilentlyContinue |
                     Where-Object { $_.FullName -like "*whisper-rs-sys*" } |
                     Select-String -Pattern '/arch:AVX512' -List
           if ($avx512) {
-            Write-Host "FAIL: /arch:AVX512 present in generated build files:"
-            $avx512 | ForEach-Object { Write-Host "    $($_.Path)" }
+            Write-Host "FAIL: /arch:AVX512 present in generated build files."
             $failed = $true
           }
 
-          if ($failed) {
-            throw "This build is not portable; it would crash on CPUs narrower than the runner."
+          if (-not $sawBackend) {
+            Write-Host "FAIL: $backend was never ON; this build would silently run on CPU."
+            $failed = $true
           }
-          Write-Host "OK: portable baseline (AVX2, no AVX-512)."
+
+          if ($failed) { throw "Build verification failed." }
+          Write-Host "OK: portable CPU baseline (AVX2, no AVX-512) with $backend enabled."
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: note67-windows-installers
+          name: note67-windows-${{ matrix.variant }}
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/msi/*.msi

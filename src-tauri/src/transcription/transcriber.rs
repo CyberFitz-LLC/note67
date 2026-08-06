@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use super::TranscriptionError;
@@ -23,29 +24,53 @@ pub struct TranscriptionResult {
 
 /// Transcriber for audio files using Whisper
 pub struct Transcriber {
-    ctx: WhisperContext,
+    /// Shared with live transcription. Whisper keeps model weights on the
+    /// context and per-run scratch on the states created from it, so one
+    /// context serves both callers; loading a second one would put another
+    /// copy of the weights (~900MB for large-v3-turbo-q8) in memory for no
+    /// benefit.
+    ctx: Arc<WhisperContext>,
     is_transcribing: AtomicBool,
 }
 
 impl Transcriber {
-    /// Create a new transcriber with the specified model
-    pub fn new(model_path: &Path) -> Result<Self, TranscriptionError> {
+    /// Load a Whisper context from a model file.
+    ///
+    /// Exposed so the caller can load once and hand the same context to both
+    /// this transcriber and live transcription.
+    pub fn load_context(model_path: &Path) -> Result<WhisperContext, TranscriptionError> {
         if !model_path.exists() {
             return Err(TranscriptionError::ModelNotFound(
                 model_path.to_string_lossy().to_string(),
             ));
         }
 
-        let ctx = WhisperContext::new_with_params(
+        WhisperContext::new_with_params(
             model_path.to_str().unwrap(),
+            // Defaults request GPU when a GPU backend was compiled in (see the
+            // gpu-vulkan / gpu-cuda features) and fall back to CPU otherwise.
             WhisperContextParameters::default(),
         )
-        .map_err(|e| TranscriptionError::ModelLoadError(e.to_string()))?;
+        .map_err(|e| TranscriptionError::ModelLoadError(e.to_string()))
+    }
 
-        Ok(Self {
+    /// Build a transcriber over an already-loaded context.
+    pub fn from_context(ctx: Arc<WhisperContext>) -> Self {
+        Self {
             ctx,
             is_transcribing: AtomicBool::new(false),
-        })
+        }
+    }
+
+    /// Create a new transcriber with the specified model, loading its own
+    /// context.
+    pub fn new(model_path: &Path) -> Result<Self, TranscriptionError> {
+        Ok(Self::from_context(Arc::new(Self::load_context(model_path)?)))
+    }
+
+    /// The shared context, so the caller can reuse it for live transcription.
+    pub fn context(&self) -> Arc<WhisperContext> {
+        Arc::clone(&self.ctx)
     }
 
     /// Check if currently transcribing
