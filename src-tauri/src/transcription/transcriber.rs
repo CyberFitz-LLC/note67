@@ -100,6 +100,9 @@ impl Transcriber {
         // Read the WAV file and convert to f32 samples
         let samples = self.load_audio(audio_path)?;
 
+        // Serialised against live transcription, which shares this context.
+        let _inference = crate::transcription::lock_inference();
+
         // Create whisper state
         let mut state = self
             .ctx

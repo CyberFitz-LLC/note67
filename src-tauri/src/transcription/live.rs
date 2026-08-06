@@ -500,6 +500,11 @@ fn transcribe_samples(
     time_offset: f64,
     language: Option<&str>,
 ) -> Result<TranscriptionResult, TranscriptionError> {
+    // One inference at a time: mic and system audio are transcribed
+    // concurrently against a shared context, which a GPU backend cannot take.
+    // See transcription::inference_lock.
+    let _inference = crate::transcription::lock_inference();
+
     // Convert to mono if needed
     let mono_samples: Vec<f32> = if channels > 1 {
         samples
