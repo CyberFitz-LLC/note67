@@ -2,7 +2,14 @@
 
 Status: **proposal, not started.** Written 2026-08-05 against
 `exochained-toolkit` @ `dcff78a`, whose contract is pinned to exochain
-`7b70f649`.
+`7b70f649` (2026-07-06).
+
+**Verified against exochain HEAD `86e9a029` (2026-07-15), 141 commits past that
+pin.** Only one of those commits touches AVC credential/validation semantics —
+`e5609e45`, which adds the LYNK LLM usage receipt protocol this proposal now
+builds on. The rest of the contract's enforcement surface is unchanged, so the
+toolkit's pin is not materially stale for R1-R9 — but it does not know about
+LYNK.
 
 ## The bar
 
@@ -49,6 +56,28 @@ allows, and every transit is signed.* The app stays fully functional offline.
 - **R8 (DAG-DB governed state).** Notes live in local SQLite. Routing note
   writes through `POST /api/v1/dag-db/*` would delete offline operation. Exclude
   from the `required_set`.
+
+## Use LYNK, not a bespoke tool
+
+exochain `e5609e45` added the **EXOCHAIN LYNK Protocol** LLM usage receipt
+(`crates/exo-avc/src/llm_usage_receipt.rs`, route
+`POST /api/v1/avc/llm-usage/receipts/emit`). It is purpose-built for the action
+this proposal governs, so Note67 should ride it rather than invent a
+`note67.summarize.remote` tool.
+
+`LlmUsageEvidence` carries `provider`, `provider_endpoint`, `model_id`,
+`prompt_hash`, `completion_hash`, `usage` (tokens, cost) and a `custody_mode`.
+Those first three map one-to-one onto what `ProviderConfig` already holds.
+
+**`custody_mode: ReceiptMinimized` is the reason this works for a privacy-first
+app.** The receipt proves *that* a transcript went to a named endpoint and model,
+using hashes only; meeting content never enters ExoChain. Provenance without
+custody.
+
+`avc_llm_usage_action_request` builds the action with
+`tool = "exo.avc.lynk.llm_usage.evidence.v1"` and
+`requested_permission = Execute`, which is why the draft credential lists that
+tool string and `Execute` rather than a bespoke name.
 
 ## Why the action model fits
 
@@ -110,6 +139,17 @@ those land, regardless of what is built here.
 
 ## Open questions (filed against `exochained-toolkit`)
 
+Resolved by reading HEAD:
+
+- `DataClass` has nine variants (`Public, Internal, Confidential, Restricted,
+  PersonalData, SensitivePersonalData, Financial, LegalPrivileged,
+  Custom(String)`). A meeting transcript is identifiable speech by named
+  participants, so the draft classes it **`PersonalData`**, not `Confidential`.
+- `AvcSubjectKind` has **no** Device or Installation variant (`AiAgent`,
+  `AgentSwarm`, `Workflow`, `Service`, `Holon`, `OrganizationUnit`, `Unknown`),
+  so `Service` is the only defensible fit today — which is what issue #3 asks
+  about.
+
 1. **R9 for a native-Rust subject.** The emit flow is external signing: the WASM
    yields canonical CBOR payload bytes, the runtime signs them, the WASM
    assembles the request. That shape exists because every partner so far is
@@ -123,9 +163,7 @@ those land, regardless of what is built here.
 
 Also unresolved, not yet filed:
 
-4. Is `Confidential` in the `DataClass` enum at ref `7b70f649`? It appears in
-   OmertaSec's Charter Protocol prose but was not confirmed in the enum.
-5. **Fleet provisioning.** The onboarding scaffold mints for *a tool*. Many
+4. **Fleet provisioning.** The onboarding scaffold mints for *a tool*. Many
    end-user installs is a model that does not exist yet. Fine for internal use;
    not fine for public distribution.
 

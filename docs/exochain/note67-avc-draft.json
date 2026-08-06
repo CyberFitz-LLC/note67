@@ -3,12 +3,55 @@
   "issuer_did": "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
   "principal_did": "did:exo:8EVGmqLo15JEnrbcrLo9r84qX1mtrVeBdPjHLUtb1sXX",
   "subject_did": "did:exo:REPLACE_WITH_NOTE67_SUBJECT_DID",
-  "subject_kind": { "Service": { "service_id": "note67" } },
-  "created_at": { "physical_ms": 0, "logical": 0 },
-  "expires_at": { "physical_ms": 0, "logical": 0 },
+  "subject_kind": {
+    "Service": {
+      "service_id": "note67"
+    }
+  },
+  "created_at": {
+    "physical_ms": 0,
+    "logical": 0
+  },
+  "expires_at": {
+    "physical_ms": 0,
+    "logical": 0
+  },
   "delegated_intent": {
-    "intent_id": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    "purpose": "Capture and transcribe meetings on the user's own device, and send transcript content only to the model endpoints this credential names.",
+    "intent_id": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "purpose": "Capture and transcribe meetings on the user's own device, and send transcript content only to the model endpoints this credential names, receipting each send as EXOCHAIN LYNK Protocol LLM usage evidence under ReceiptMinimized custody.",
     "allowed_objectives": [
       "meeting-note-export",
       "remote-model-endpoint-change",
@@ -21,17 +64,27 @@
     "delegation_allowed": false
   },
   "authority_scope": {
-    "permissions": ["Read", "Write"],
-    "tools": [
-      "note67.export",
-      "note67.model.configure",
-      "note67.summarize.remote"
+    "permissions": [
+      "Read",
+      "Write",
+      "Execute"
     ],
-    "data_classes": ["Confidential", "Internal"],
+    "tools": [
+      "exo.avc.lynk.llm_usage.evidence.v1",
+      "note67.export",
+      "note67.model.configure"
+    ],
+    "data_classes": [
+      "Internal",
+      "Confidential",
+      "PersonalData"
+    ],
     "counterparties": [
       "did:exo:REPLACE_WITH_APPROVED_MODEL_ENDPOINT_DID"
     ],
-    "jurisdictions": ["US"]
+    "jurisdictions": [
+      "US"
+    ]
   },
   "constraints": {
     "max_budget_minor_units": null,
