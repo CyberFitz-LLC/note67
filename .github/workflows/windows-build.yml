@@ -102,6 +102,24 @@ jobs:
           # multi-gigabyte download for no gain.
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
 
+      # The toolkit ships the MSBuild integration but does not register it with
+      # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
+      # toolset found". Copying the props/targets into every VC
+      # BuildCustomizations directory is the standard fix.
+      - name: Register CUDA with Visual Studio
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+          if (-not (Test-Path $src)) { throw "CUDA VS integration not found at $src" }
+          $targets = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Directory `
+                       -Filter BuildCustomizations -ErrorAction SilentlyContinue
+          if (-not $targets) { throw "No VC BuildCustomizations directory found." }
+          foreach ($t in $targets) {
+            Copy-Item "$src\*" $t.FullName -Force
+            Write-Host "registered CUDA into $($t.FullName)"
+          }
+
       - run: npm ci
 
       # CUDA links its runtime dynamically, so these DLLs must ship beside the
