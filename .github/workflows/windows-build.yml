@@ -13,6 +13,14 @@ name: Windows Build
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: >-
+          Runner label to build on. Defaults to GitHub-hosted. Point at a
+          self-hosted Windows runner (e.g. "win-gpu") when GitHub Actions is
+          degraded or hosted capacity is unavailable.
+        required: false
+        default: windows-latest
   push:
     branches:
       - main
@@ -27,7 +35,8 @@ env:
 jobs:
   # Runs once. No point paying for it per GPU variant.
   checks:
-    runs-on: windows-latest
+    # `inputs` is empty for push events, so this falls back to hosted.
+    runs-on: ${{ inputs.runner || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,7 +60,7 @@ jobs:
 
   build:
     needs: checks
-    runs-on: windows-latest
+    runs-on: ${{ inputs.runner || 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,8 +87,31 @@ jobs:
           # Separate cache per variant: the CMake cache bakes in the backend.
           key: ${{ matrix.variant }}-portable-cpu-v1
 
+      # A self-hosted runner keeps its SDKs between jobs; a hosted one never
+      # has them. Detect rather than reinstall, so the same workflow is
+      # efficient on both.
+      - name: Detect pre-installed SDKs
+        id: sdk
+        shell: pwsh
+        run: |
+          $vk = $env:VULKAN_SDK
+          if (-not $vk) {
+            $found = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                     Sort-Object Name -Descending | Select-Object -First 1
+            if ($found) { $vk = $found.FullName }
+          }
+          if ($vk) {
+            Write-Host "Vulkan SDK already present: $vk"
+            "VULKAN_SDK=$vk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          "vulkan=$([bool]$vk)".ToLower() | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $cuda = $env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")
+          if ($cuda) { Write-Host "CUDA Toolkit already present: $env:CUDA_PATH" }
+          "cuda=$($cuda.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Install Vulkan SDK
-        if: matrix.variant == 'vulkan'
+        if: matrix.variant == 'vulkan' && steps.sdk.outputs.vulkan != 'true'
         shell: pwsh
         run: |
           choco install vulkan-sdk -y --no-progress
@@ -93,7 +125,7 @@ jobs:
 
       # Third-party action. Pin to a SHA if that matters more than convenience.
       - name: Install CUDA Toolkit
-        if: matrix.variant == 'cuda'
+        if: matrix.variant == 'cuda' && steps.sdk.outputs.cuda != 'true'
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
           cuda: '12.5.0'
