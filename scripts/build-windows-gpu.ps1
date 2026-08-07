@@ -84,6 +84,28 @@ if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "l
     Write-Host "  ok  libclang ($env:LIBCLANG_PATH)" -ForegroundColor DarkGreen
 }
 
+# whisper-rs-sys pins bindgen 0.69, which predates LLVM 20. Against a newer
+# libclang bindgen only *warns*, then emits opaque `_address`-only structs — so
+# the build dies much later with dozens of "no field ... on type
+# whisper_full_params" errors that look nothing like a toolchain mismatch.
+$clangExe = Join-Path $env:LIBCLANG_PATH "clang.exe"
+if (Test-Path $clangExe) {
+    $verLine = (& $clangExe --version 2>&1 | Select-Object -First 1)
+    if ($verLine -match 'version (\d+)\.') {
+        $clangMajor = [int]$Matches[1]
+        Write-Host "      $verLine" -ForegroundColor DarkGray
+        if ($clangMajor -ge 20) {
+            Write-Warning @"
+libclang $clangMajor is newer than bindgen 0.69 (pinned by whisper-rs-sys) supports.
+Expect the build to fail with "no field ... on type whisper_full_params".
+Install LLVM 18 and point LIBCLANG_PATH at it:
+  https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe
+  `$env:LIBCLANG_PATH = "C:\LLVM18\bin"
+"@
+        }
+    }
+}
+
 if ($Backend -eq 'cuda') {
     if (-not $env:CUDA_PATH -or -not (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")) {
         throw "CUDA toolkit not found (CUDA_PATH unset or missing bin\nvcc.exe). Install: winget install Nvidia.CUDA, then restart the shell."
