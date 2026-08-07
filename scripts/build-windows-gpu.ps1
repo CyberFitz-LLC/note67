@@ -15,6 +15,7 @@
       winget install Rustlang.Rustup
       winget install OpenJS.NodeJS.LTS
       winget install LLVM.LLVM             # bindgen needs libclang.dll
+      winget install Kitware.CMake         # whisper.cpp is a CMake project
       winget install Microsoft.VisualStudio.2022.BuildTools `
         --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
       winget install Nvidia.CUDA          # CUDA builds only
@@ -44,6 +45,9 @@ Write-Host "Repo: $repo`n" -ForegroundColor Cyan
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
 Require-Command cargo "Install with: winget install Rustlang.Rustup (then restart the shell)"
 Require-Command npm   "Install with: winget install OpenJS.NodeJS.LTS (then restart the shell)"
+# whisper.cpp builds through CMake. Preinstalled on GitHub's runners, so CI
+# never surfaces its absence.
+Require-Command cmake "Install with: winget install Kitware.CMake (then restart the shell)"
 
 # The MSVC linker is what actually matters, and it is not on PATH outside a
 # developer shell — so look for the installation rather than the executable.
