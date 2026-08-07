@@ -88,22 +88,29 @@ if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "l
 # libclang bindgen only *warns*, then emits opaque `_address`-only structs — so
 # the build dies much later with dozens of "no field ... on type
 # whisper_full_params" errors that look nothing like a toolchain mismatch.
-$clangExe = Join-Path $env:LIBCLANG_PATH "clang.exe"
-if (Test-Path $clangExe) {
-    $verLine = (& $clangExe --version 2>&1 | Select-Object -First 1)
-    if ($verLine -match 'version (\d+)\.') {
-        $clangMajor = [int]$Matches[1]
-        Write-Host "      $verLine" -ForegroundColor DarkGray
-        if ($clangMajor -ge 20) {
-            Write-Warning @"
-libclang $clangMajor is newer than bindgen 0.69 (pinned by whisper-rs-sys) supports.
-Expect the build to fail with "no field ... on type whisper_full_params".
-Install LLVM 18 and point LIBCLANG_PATH at it:
-  https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe
+$clangDll = Join-Path $env:LIBCLANG_PATH "libclang.dll"
+$clangMajor = $null
+if (Test-Path $clangDll) {
+    # Read the DLL's own version rather than shelling out to clang.exe, which
+    # is not always installed beside it (Visual Studio's clang directory often
+    # has no clang.exe at all).
+    $fv = (Get-Item $clangDll).VersionInfo.FileVersion
+    if ($fv -match '^(\d+)\.') { $clangMajor = [int]$Matches[1] }
+    Write-Host "      libclang $fv" -ForegroundColor DarkGray
+}
+if ($clangMajor -and $clangMajor -ge 20) {
+    throw @"
+libclang $clangMajor is too new for bindgen 0.69, which whisper-rs-sys pins.
+
+bindgen only warns about this, then emits opaque structs, so the build fails
+much later with dozens of "no field ... on type whisper_full_params" errors.
+
+Fix:
+  Invoke-WebRequest https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe -OutFile "`$env:TEMP\llvm18.exe"
+  Start-Process -Wait "`$env:TEMP\llvm18.exe" -ArgumentList "/S","/D=C:\LLVM18"
   `$env:LIBCLANG_PATH = "C:\LLVM18\bin"
+  cargo clean -p whisper-rs-sys -p whisper-rs --manifest-path src-tauri\Cargo.toml
 "@
-        }
-    }
 }
 
 if ($Backend -eq 'cuda') {
