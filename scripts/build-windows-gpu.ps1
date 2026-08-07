@@ -174,6 +174,24 @@ if ($Backend -eq 'cuda') {
     Write-Host "  ok  Vulkan SDK ($env:VULKAN_SDK)" -ForegroundColor DarkGreen
 }
 
+# whisper-rs-sys does not declare rerun-if-env-changed for LIBCLANG_PATH, so
+# cargo considers the crate fresh even when a different libclang would generate
+# different bindings. Pointing at a new LLVM therefore changes nothing until the
+# build directory is removed, and the failure looks identical — 71 "no field ...
+# on type whisper_full_params" errors from cached, opaque bindings.
+$stamp = Join-Path $repo "src-tauri\target\.libclang-used"
+$previous = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { $null }
+if ($previous -and $previous -ne $env:LIBCLANG_PATH) {
+    Write-Host "`nlibclang changed since the last build:" -ForegroundColor Yellow
+    Write-Host "  was: $previous"
+    Write-Host "  now: $env:LIBCLANG_PATH"
+    Write-Host "Removing cached whisper-rs-sys bindings so they are regenerated." -ForegroundColor Yellow
+    Get-ChildItem "$repo\src-tauri\target" -Recurse -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $stamp) | Out-Null
+Set-Content -Path $stamp -Value $env:LIBCLANG_PATH
+
 Write-Host "`nInstalling npm dependencies..." -ForegroundColor Cyan
 npm ci
 if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
