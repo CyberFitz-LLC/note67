@@ -144,9 +144,14 @@ jobs:
         run: |
           $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
           if (-not (Test-Path $src)) { throw "CUDA VS integration not found at $src" }
-          $targets = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Directory `
-                       -Filter BuildCustomizations -ErrorAction SilentlyContinue
-          if (-not $targets) { throw "No VC BuildCustomizations directory found." }
+          # Build Tools commonly installs under "Program Files (x86)" while a
+          # full Visual Studio lands under "Program Files". Searching only one
+          # finds nothing, silently.
+          $roots = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+          $targets = $roots | Where-Object { Test-Path $_ } | ForEach-Object {
+                       Get-ChildItem $_ -Recurse -Directory -Filter BuildCustomizations -ErrorAction SilentlyContinue
+                     } | Sort-Object FullName -Unique
+          if (-not $targets) { throw "No VC BuildCustomizations directory found under: $($roots -join '; ')" }
           foreach ($t in $targets) {
             Copy-Item "$src\*" $t.FullName -Force
             Write-Host "registered CUDA into $($t.FullName)"

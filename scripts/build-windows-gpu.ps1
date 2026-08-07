@@ -101,17 +101,36 @@ if ($Backend -eq 'cuda') {
     # since it writes under Program Files.
     $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
     if (Test-Path $src) {
-        $targets = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -Directory `
-                     -Filter BuildCustomizations -ErrorAction SilentlyContinue
+        # Search the install vswhere reported first, then BOTH Program Files
+        # roots. Build Tools commonly lands under "Program Files (x86)" while a
+        # full Visual Studio lands under "Program Files"; looking in only one of
+        # them finds nothing and — worse — finds it silently.
+        $roots = @()
+        if ($vs) { $roots += $vs }
+        $roots += @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+        $targets = $roots | Where-Object { $_ -and (Test-Path $_) } | ForEach-Object {
+            Get-ChildItem $_ -Recurse -Directory -Filter BuildCustomizations -ErrorAction SilentlyContinue
+        } | Sort-Object FullName -Unique
+
+        if (-not $targets) {
+            throw "No VC BuildCustomizations directory found under: $($roots -join '; '). Without it CMake fails with 'No CUDA toolset found'."
+        }
+        $registered = 0
         foreach ($t in $targets) {
-            $already = Test-Path (Join-Path $t.FullName "CUDA*.props")
-            if ($already) { Write-Host "  ok  CUDA already registered in $($t.FullName)" -ForegroundColor DarkGreen; continue }
+            if (Test-Path (Join-Path $t.FullName "CUDA*.props")) {
+                Write-Host "  ok  CUDA already registered in $($t.FullName)" -ForegroundColor DarkGreen
+                $registered++; continue
+            }
             try {
                 Copy-Item "$src\*" $t.FullName -Force -ErrorAction Stop
                 Write-Host "  ok  registered CUDA into $($t.FullName)" -ForegroundColor DarkGreen
+                $registered++
             } catch {
-                Write-Warning "Could not write to $($t.FullName) — re-run this script in an elevated shell if the build fails with 'No CUDA toolset found'."
+                Write-Warning "Could not write to $($t.FullName): $($_.Exception.Message)"
             }
+        }
+        if ($registered -eq 0) {
+            throw "Found $($targets.Count) BuildCustomizations director$(if($targets.Count -eq 1){'y'}else{'ies'}) but registered none — re-run this script in an elevated shell."
         }
     } else {
         Write-Warning "CUDA VS integration not found at $src; the build may fail with 'No CUDA toolset found'."
