@@ -14,6 +14,7 @@
     Prerequisites, all one-time:
       winget install Rustlang.Rustup
       winget install OpenJS.NodeJS.LTS
+      winget install LLVM.LLVM             # bindgen needs libclang.dll
       winget install Microsoft.VisualStudio.2022.BuildTools `
         --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
       winget install Nvidia.CUDA          # CUDA builds only
@@ -55,11 +56,40 @@ if (Test-Path $vswhere) {
     Write-Warning "vswhere.exe not found; cannot verify MSVC. Continuing — the build will fail loudly if it is missing."
 }
 
+# whisper-rs-sys runs bindgen over the whisper headers, and bindgen loads
+# libclang.dll at build time. GitHub's runners ship LLVM preinstalled, so CI
+# never surfaces this; a clean workstation does — 20 minutes into the build,
+# which is why it is checked here instead.
+if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
+    $candidates = @("${env:ProgramFiles}\LLVM\bin")
+    if ($vs) {
+        # Visual Studio ships clang under the C++ Clang tools component.
+        $candidates += @(
+            "$vs\VC\Tools\Llvm\x64\bin",
+            "$vs\VC\Tools\Llvm\bin"
+        )
+    }
+    $hit = $candidates | Where-Object { Test-Path (Join-Path $_ "libclang.dll") } | Select-Object -First 1
+    if ($hit) {
+        $env:LIBCLANG_PATH = $hit
+        Write-Host "  ok  libclang ($hit)" -ForegroundColor DarkGreen
+    } else {
+        throw "libclang.dll not found. Install with: winget install LLVM.LLVM (then restart the shell), or set LIBCLANG_PATH to a directory containing libclang.dll."
+    }
+} else {
+    Write-Host "  ok  libclang ($env:LIBCLANG_PATH)" -ForegroundColor DarkGreen
+}
+
 if ($Backend -eq 'cuda') {
     if (-not $env:CUDA_PATH -or -not (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")) {
         throw "CUDA toolkit not found (CUDA_PATH unset or missing bin\nvcc.exe). Install: winget install Nvidia.CUDA, then restart the shell."
     }
     Write-Host "  ok  CUDA ($env:CUDA_PATH)" -ForegroundColor DarkGreen
+    # CUDA_PATH does not necessarily point at the newest toolkit installed, and
+    # nvcc rejects host compilers it does not know. VS 2022 is the mainline
+    # target for 12.x and 13.x alike.
+    $nvccVer = (& "$env:CUDA_PATH\bin\nvcc.exe" --version 2>&1 | Select-String 'release ([\d.]+)').Matches.Groups[1].Value
+    if ($nvccVer) { Write-Host "      nvcc release $nvccVer" -ForegroundColor DarkGray }
 
     # The toolkit ships MSBuild integration but does not register it with Visual
     # Studio, so CMake's enable_language(CUDA) fails with "No CUDA toolset
