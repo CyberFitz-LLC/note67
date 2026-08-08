@@ -73,25 +73,49 @@ function Get-LibclangMajor {
     return 0
 }
 
-if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
-    $candidates = @("C:\LLVM18\bin", "${env:ProgramFiles}\LLVM\bin")
-    if ($vs) {
-        # Visual Studio ships clang under the C++ Clang tools component.
-        $candidates += @("$vs\VC\Tools\Llvm\x64\bin", "$vs\VC\Tools\Llvm\bin")
+# Score every candidate, including whatever LIBCLANG_PATH already names, and
+# prefer one bindgen 0.69 can parse. An explicit but broken LIBCLANG_PATH is the
+# common case: it does not survive a shell restart, so it tends to be whatever
+# was set last, and taking it on trust is how the same failure repeats.
+$candidates = @()
+if ($env:LIBCLANG_PATH) { $candidates += $env:LIBCLANG_PATH }
+$candidates += @("C:\LLVM18\bin", "${env:ProgramFiles}\LLVM\bin")
+if ($vs) { $candidates += @("$vs\VC\Tools\Llvm\x64\bin", "$vs\VC\Tools\Llvm\bin") }
+
+$found = $candidates | Select-Object -Unique |
+         ForEach-Object { [pscustomobject]@{ Dir = $_; Major = (Get-LibclangMajor $_) } } |
+         Where-Object { $null -ne $_.Major }
+
+if (-not $found) {
+    throw "libclang.dll not found. Install LLVM 18 (see the header of this script) or set LIBCLANG_PATH."
+}
+
+$usable = $found | Where-Object { $_.Major -lt 20 } | Select-Object -First 1
+if ($usable) {
+    if ($env:LIBCLANG_PATH -ne $usable.Dir) {
+        Write-Host "  ok  libclang $($usable.Major) ($($usable.Dir))" -ForegroundColor DarkGreen
+        Write-Host "      (preferred over libclang $($found[0].Major) at $($found[0].Dir))" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  ok  libclang $($usable.Major) ($($usable.Dir))" -ForegroundColor DarkGreen
     }
-    $found = $candidates | ForEach-Object { [pscustomobject]@{ Dir = $_; Major = (Get-LibclangMajor $_) } } |
-             Where-Object { $null -ne $_.Major }
-    if (-not $found) {
-        throw "libclang.dll not found. Install with: winget install LLVM.LLVM (then restart the shell), or set LIBCLANG_PATH to a directory containing libclang.dll."
-    }
-    # Prefer a version bindgen 0.69 can actually parse. Taking the newest is
-    # what produces opaque bindings and seventy misleading compile errors.
-    $usable = $found | Where-Object { $_.Major -lt 20 } | Select-Object -First 1
-    $pick = if ($usable) { $usable } else { $found | Select-Object -First 1 }
-    $env:LIBCLANG_PATH = $pick.Dir
-    Write-Host "  ok  libclang $($pick.Major) ($($pick.Dir))" -ForegroundColor DarkGreen
+    $env:LIBCLANG_PATH = $usable.Dir
 } else {
-    Write-Host "  ok  libclang ($env:LIBCLANG_PATH)" -ForegroundColor DarkGreen
+    $newest = $found | Select-Object -First 1
+    throw @"
+Only libclang $($newest.Major) is available ($($newest.Dir)), which is too new for
+bindgen 0.69 as pinned by whisper-rs-sys. bindgen only warns, then emits opaque
+structs, and the build fails much later with "no field ... on type
+whisper_full_params".
+
+Install LLVM 18 side by side (curl handles a flaky connection better than
+Invoke-WebRequest, and retries):
+
+  curl.exe -L --retry 5 --retry-all-errors --retry-delay 3 -o "`$env:TEMP\llvm18.exe" ``
+    https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe
+  Start-Process -Wait "`$env:TEMP\llvm18.exe" -ArgumentList "/S","/D=C:\LLVM18"
+
+Then re-run this script; it finds C:\LLVM18 on its own.
+"@
 }
 
 $clangDll = Join-Path $env:LIBCLANG_PATH "libclang.dll"
