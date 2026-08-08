@@ -64,30 +64,36 @@ if (Test-Path $vswhere) {
 # libclang.dll at build time. GitHub's runners ship LLVM preinstalled, so CI
 # never surfaces this; a clean workstation does — 20 minutes into the build,
 # which is why it is checked here instead.
+function Get-LibclangMajor {
+    param([string]$Dir)
+    $dll = Join-Path $Dir "libclang.dll"
+    if (-not (Test-Path $dll)) { return $null }
+    $fv = (Get-Item $dll).VersionInfo.FileVersion
+    if ($fv -match '^(\d+)\.') { return [int]$Matches[1] }
+    return 0
+}
+
 if (-not $env:LIBCLANG_PATH -or -not (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
-    $candidates = @("${env:ProgramFiles}\LLVM\bin")
+    $candidates = @("C:\LLVM18\bin", "${env:ProgramFiles}\LLVM\bin")
     if ($vs) {
         # Visual Studio ships clang under the C++ Clang tools component.
-        $candidates += @(
-            "$vs\VC\Tools\Llvm\x64\bin",
-            "$vs\VC\Tools\Llvm\bin"
-        )
+        $candidates += @("$vs\VC\Tools\Llvm\x64\bin", "$vs\VC\Tools\Llvm\bin")
     }
-    $hit = $candidates | Where-Object { Test-Path (Join-Path $_ "libclang.dll") } | Select-Object -First 1
-    if ($hit) {
-        $env:LIBCLANG_PATH = $hit
-        Write-Host "  ok  libclang ($hit)" -ForegroundColor DarkGreen
-    } else {
+    $found = $candidates | ForEach-Object { [pscustomobject]@{ Dir = $_; Major = (Get-LibclangMajor $_) } } |
+             Where-Object { $null -ne $_.Major }
+    if (-not $found) {
         throw "libclang.dll not found. Install with: winget install LLVM.LLVM (then restart the shell), or set LIBCLANG_PATH to a directory containing libclang.dll."
     }
+    # Prefer a version bindgen 0.69 can actually parse. Taking the newest is
+    # what produces opaque bindings and seventy misleading compile errors.
+    $usable = $found | Where-Object { $_.Major -lt 20 } | Select-Object -First 1
+    $pick = if ($usable) { $usable } else { $found | Select-Object -First 1 }
+    $env:LIBCLANG_PATH = $pick.Dir
+    Write-Host "  ok  libclang $($pick.Major) ($($pick.Dir))" -ForegroundColor DarkGreen
 } else {
     Write-Host "  ok  libclang ($env:LIBCLANG_PATH)" -ForegroundColor DarkGreen
 }
 
-# whisper-rs-sys pins bindgen 0.69, which predates LLVM 20. Against a newer
-# libclang bindgen only *warns*, then emits opaque `_address`-only structs — so
-# the build dies much later with dozens of "no field ... on type
-# whisper_full_params" errors that look nothing like a toolchain mismatch.
 $clangDll = Join-Path $env:LIBCLANG_PATH "libclang.dll"
 $clangMajor = $null
 if (Test-Path $clangDll) {
