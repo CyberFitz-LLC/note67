@@ -65,6 +65,7 @@ blake3 = "1"
 bs58 = "0.5"
 getrandom = "0.2"
 hex = "0.4"
+sha2 = "0.10"
 
 # macOS-specific dependencies for system audio capture via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]

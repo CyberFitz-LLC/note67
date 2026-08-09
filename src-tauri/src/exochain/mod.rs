@@ -9,5 +9,9 @@
 //! exists.
 
 pub mod identity;
+pub mod transcript;
 
 pub use identity::{Identity, IdentityError};
+pub use transcript::{
+    CanonicalSegment, ChainError, Origin, Reason, TranscriptVersion, SERIALIZATION_V1,
+};
