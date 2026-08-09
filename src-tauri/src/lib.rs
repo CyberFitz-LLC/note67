@@ -2,6 +2,7 @@ mod ai;
 mod audio;
 mod commands;
 mod db;
+mod exochain;
 mod meeting_detection;
 mod transcription;
 

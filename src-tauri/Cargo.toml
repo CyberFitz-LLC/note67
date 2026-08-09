@@ -52,6 +52,20 @@ futures-util = "0.3"
 scopeguard = "1.2"
 regex = "1"
 
+# ExoChain. Native crates rather than the WASM adapter (DECISIONS.md D1):
+# exochain is Apache-2.0, which is a permitted direction into AGPL-3.0, and
+# exo-avc already exposes in Rust what the wasm bindings wrap for TypeScript
+# callers. Pinned exactly so the enforcement surface cannot move underneath us.
+# exochain-core 0.2.3 does not currently build (ml-dsa pins a pre-release
+# pkcs8), so the DID derivation is implemented against its specification and
+# guarded by a known-answer test. Swap to the crates once upstream is fixed;
+# the DIDs must not change. See src/exochain/identity.rs and DECISIONS.md D1.
+ed25519-dalek = "2"
+blake3 = "1"
+bs58 = "0.5"
+getrandom = "0.2"
+hex = "0.4"
+
 # macOS-specific dependencies for system audio capture via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
