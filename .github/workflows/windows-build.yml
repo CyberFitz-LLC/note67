@@ -55,8 +55,10 @@ jobs:
         run: npx tsc --noEmit
       - name: Unit tests
         run: npm test
+      # --workspace, not --lib: the canonical-form crate is a workspace member
+      # and its tests are the ones guarding byte parity with the sync service.
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
   build:
     needs: checks

@@ -5,41 +5,20 @@
 //! machines would mean sharing the private key. Per-install identity also means
 //! a lost laptop can be revoked on its own.
 //!
-//! The seed is generated and owned here: the intended dependency,
-//! `exochain-core`, cannot currently be built (see `derive_did` below), so the
-//! DID derivation is implemented against exochain's specification rather than
-//! by linking its crate. Swapping to the crate later must not change any DID,
-//! which `the_derivation_matches_exochains_specification` exists to catch.
+//! The seed is generated and owned here rather than extracted from a key pair:
+//! exochain's `SecretKey` deliberately does not expose its bytes, so we own the
+//! 32 random bytes, persist those, and reconstruct the pair from them.
+//!
+//! DID derivation itself lives in `note67-canonical`, because the sync service
+//! verifies that a device's registered DID matches the key it presents and both
+//! sides must agree byte for byte.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
+use note67_canonical::derive_did;
 use serde::{Deserialize, Serialize};
-
-/// Derive a DID exactly as exochain does.
-///
-/// From `exo-identity/src/did.rs`:
-///
-/// ```text
-/// let hash = blake3::hash(public_key.as_bytes());
-/// let encoded = bs58::encode(hash.as_bytes()).into_string();
-/// Did::new(&format!("did:exo:{encoded}"))
-/// ```
-///
-/// Reimplemented rather than linked because `exochain-core` 0.2.3 does not
-/// compile: it depends on `ml-dsa 0.1.0-rc.7` with default features, which
-/// pins a pre-release `pkcs8`, and cargo resolves the released 0.11.0 whose
-/// API differs. Pinning the pre-release cascades into `der` and `spki` and
-/// collides with reqwest's TLS stack. Filed upstream.
-///
-/// Nothing here is a variation on the spec: the whole hash is encoded, never a
-/// prefix. A truncated suffix is the footgun the onboarding docs call out, and
-/// the node rejects such a DID at emit time.
-fn derive_did(public_key: &[u8; 32]) -> String {
-    let hash = blake3::hash(public_key);
-    format!("did:exo:{}", bs58::encode(hash.as_bytes()).into_string())
-}
 
 /// Filename holding the raw 32-byte seed. Never leaves the host.
 const KEY_FILE: &str = "identity.key";
@@ -297,40 +276,15 @@ mod tests {
     }
 
     #[test]
-    fn the_derivation_matches_exochains_specification() {
-        // A known-answer test over the whole chain: seed -> ed25519 public key
-        // -> blake3 -> base58. If any step is swapped for a variant, or a hash
-        // is truncated, this changes. When exochain-core becomes buildable and
-        // this is replaced by a call to did_from_public_key, the value must
-        // stay identical — that is the point of pinning it here rather than
-        // only asserting shape.
+    fn the_public_key_derivation_is_stable() {
+        // The seed-to-public-key half of the identity. The public-key-to-DID
+        // half is pinned in note67-canonical, so between them the whole chain
+        // from stored bytes to DID is covered.
         let key = keypair_from_seed([0u8; 32]);
-        let public = key.verifying_key().to_bytes();
-
-        // Ed25519 public key for the all-zero seed is a published test vector.
         assert_eq!(
-            hex::encode(public),
+            hex::encode(key.verifying_key().to_bytes()),
             "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
             "ed25519 derivation changed"
-        );
-
-        let did = derive_did(&public);
-        let suffix = did.trim_start_matches("did:exo:");
-        // base58 of 32 bytes never exceeds 44 characters and is 43 or 44 in
-        // practice; anything shorter means the hash was cut.
-        assert!(
-            (43..=44).contains(&suffix.len()),
-            "unexpected DID length {}: {}",
-            suffix.len(),
-            did
-        );
-        // Decodes back to exactly the 32 hash bytes.
-        let decoded = bs58::decode(suffix).into_vec().expect("suffix is base58");
-        assert_eq!(decoded.len(), 32, "DID does not encode a full 32-byte hash");
-        assert_eq!(
-            decoded,
-            blake3::hash(&public).as_bytes().to_vec(),
-            "DID is not base58(blake3(public_key))"
         );
     }
 

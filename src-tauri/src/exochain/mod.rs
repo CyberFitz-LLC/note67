@@ -8,12 +8,16 @@
 //! the transcript chain is useful on its own before any credential exists.
 
 pub mod identity;
-pub mod transcript;
 pub mod vtt;
+
+/// The canonical forms, which live in their own crate because the sync service
+/// has to reproduce them byte for byte. Re-exported here so call sites read the
+/// same either way.
+pub use note67_canonical::transcript;
 
 // Re-exported for the call sites that use them directly. Everything else stays
 // reachable through its module — `exochain::identity::Identity`,
 // `exochain::vtt::VttError`, `exochain::transcript::verify_chain` — rather than
 // being surfaced here before anything consumes it.
-pub use transcript::{CanonicalSegment, ImportSource, Origin, Reason, TranscriptVersion};
+pub use note67_canonical::{CanonicalSegment, ImportSource, Origin, Reason, TranscriptVersion};
 pub use vtt::parse_vtt;
