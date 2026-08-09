@@ -5,13 +5,15 @@
 //! the choices behind it.
 //!
 //! Nothing here talks to a node yet: identity is derived and held locally, and
-//! is useful on its own for chaining transcript versions before any credential
-//! exists.
+//! the transcript chain is useful on its own before any credential exists.
 
 pub mod identity;
 pub mod transcript;
+pub mod vtt;
 
-pub use identity::{Identity, IdentityError};
-pub use transcript::{
-    CanonicalSegment, ChainError, Origin, Reason, TranscriptVersion, SERIALIZATION_V1,
-};
+// Re-exported for the call sites that use them directly. Everything else stays
+// reachable through its module — `exochain::identity::Identity`,
+// `exochain::vtt::VttError`, `exochain::transcript::verify_chain` — rather than
+// being surfaced here before anything consumes it.
+pub use transcript::{CanonicalSegment, ImportSource, Origin, Reason, TranscriptVersion};
+pub use vtt::parse_vtt;

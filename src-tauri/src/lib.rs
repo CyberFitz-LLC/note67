@@ -466,6 +466,7 @@ pub fn run() {
             commands::get_theme_preference,
             commands::set_theme_preference,
             commands::get_transcript_chain,
+            commands::import_vtt_transcript,
             commands::get_setting,
             commands::set_setting,
             commands::get_settings,

@@ -215,7 +215,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut stmt = conn.prepare(
             "SELECT version, content_hash, parent_hash, serialization, origin, reason,
-                    segment_count, created_at, receipt_hash
+                    segment_count, created_at, receipt_hash, source_tool, source_filename
              FROM transcript_versions WHERE note_id = ?1 ORDER BY version ASC",
         )?;
         let rows = stmt
@@ -230,6 +230,8 @@ impl Database {
                     segment_count: row.get::<_, i64>(6)? as usize,
                     created_at: row.get(7)?,
                     receipt_hash: row.get(8)?,
+                    source_tool: row.get(9)?,
+                    source_filename: row.get(10)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -259,8 +261,8 @@ impl Database {
         conn.execute(
             "INSERT INTO transcript_versions
                (note_id, version, content_hash, parent_hash, serialization, origin, reason,
-                segment_count, created_at, receipt_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                segment_count, created_at, receipt_hash, source_tool, source_filename)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 note_id,
                 v.version as i64,
@@ -272,6 +274,8 @@ impl Database {
                 v.segment_count as i64,
                 v.created_at,
                 v.receipt_hash,
+                v.source_tool,
+                v.source_filename,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -286,6 +290,17 @@ impl Database {
         note_id: &str,
         origin: crate::exochain::Origin,
         reason: crate::exochain::Reason,
+    ) -> anyhow::Result<Option<crate::exochain::TranscriptVersion>> {
+        self.record_transcript_version_from(note_id, origin, reason, None)
+    }
+
+    /// As above, naming where an imported transcript came from.
+    pub fn record_transcript_version_from(
+        &self,
+        note_id: &str,
+        origin: crate::exochain::Origin,
+        reason: crate::exochain::Reason,
+        source: Option<crate::exochain::ImportSource>,
     ) -> anyhow::Result<Option<crate::exochain::TranscriptVersion>> {
         let segments: Vec<crate::exochain::CanonicalSegment> = self
             .get_transcript_segments(note_id)?
@@ -311,6 +326,7 @@ impl Database {
             return Ok(None);
         };
 
+        let version = version.with_source(source);
         self.insert_transcript_version(note_id, &version)?;
         Ok(Some(version))
     }

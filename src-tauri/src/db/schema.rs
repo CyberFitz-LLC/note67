@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 #[allow(dead_code)]
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     let version = get_schema_version(conn)?;
@@ -47,6 +47,9 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     }
     if version < 14 {
         migrate_v14(conn)?;
+    }
+    if version < 15 {
+        migrate_v15(conn)?;
     }
 
     Ok(())
@@ -541,5 +544,23 @@ fn migrate_v14(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     set_schema_version(conn, 14)?;
+    Ok(())
+}
+
+fn migrate_v15(conn: &Connection) -> rusqlite::Result<()> {
+    // Where an imported transcript came from. A receipt over an import can only
+    // claim that this content arrived and has not changed since, so it has to
+    // name what produced it — otherwise the receipt reads like one over a
+    // transcript we made ourselves.
+    //
+    // Null for recorded transcripts, which have no external source.
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE transcript_versions ADD COLUMN source_tool TEXT;
+         ALTER TABLE transcript_versions ADD COLUMN source_filename TEXT;
+         COMMIT;",
+    )?;
+
+    set_schema_version(conn, 15)?;
     Ok(())
 }

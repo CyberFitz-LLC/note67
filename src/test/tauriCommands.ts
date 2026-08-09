@@ -28,6 +28,12 @@ export const defaultCommands: CommandMap = {
 
   // settings
   get_transcript_chain: { versions: [], intact: true },
+  import_vtt_transcript: {
+    noteId: "note-imported",
+    title: "Imported transcript",
+    segmentCount: 0,
+    speakers: [],
+  },
   get_settings: {},
   get_setting: null,
   set_setting: null,

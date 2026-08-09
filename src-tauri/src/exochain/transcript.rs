@@ -106,6 +106,31 @@ pub struct TranscriptVersion {
     /// is an ordinary state rather than an error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_hash: Option<String>,
+    /// What produced an imported transcript, e.g. "Microsoft Teams". `None` for
+    /// anything Note67 recorded itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_tool: Option<String>,
+    /// The file an import came from, as the user knew it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_filename: Option<String>,
+}
+
+/// Where an imported transcript came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSource {
+    pub tool: String,
+    pub filename: String,
+}
+
+impl TranscriptVersion {
+    /// Attach the provenance of an import.
+    pub fn with_source(mut self, source: Option<ImportSource>) -> Self {
+        if let Some(src) = source {
+            self.source_tool = Some(src.tool);
+            self.source_filename = Some(src.filename);
+        }
+        self
+    }
 }
 
 /// A transcript segment reduced to the fields that are attested.
@@ -238,6 +263,8 @@ pub fn next_version(
         segment_count: segments.len(),
         created_at,
         receipt_hash: None,
+        source_tool: None,
+        source_filename: None,
     })
 }
 
@@ -448,6 +475,28 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn an_import_records_where_it_came_from() {
+        // A receipt over an import must name its source, or it reads like one
+        // over a transcript this app produced.
+        let v = next_version(None, &sample(), Origin::Imported, Reason::Import, now())
+            .unwrap()
+            .with_source(Some(ImportSource {
+                tool: "Microsoft Teams".into(),
+                filename: "Weekly Sync.vtt".into(),
+            }));
+        assert_eq!(v.source_tool.as_deref(), Some("Microsoft Teams"));
+        assert_eq!(v.source_filename.as_deref(), Some("Weekly Sync.vtt"));
+    }
+
+    #[test]
+    fn a_recorded_version_names_no_source() {
+        let v = next_version(None, &sample(), Origin::Recorded, Reason::Initial, now())
+            .unwrap()
+            .with_source(None);
+        assert!(v.source_tool.is_none() && v.source_filename.is_none());
     }
 
     #[test]
