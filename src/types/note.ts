@@ -43,10 +43,7 @@ export interface Summary {
 }
 
 export type SummaryType =
-  | "overview"
-  | "action_items"
-  | "key_decisions"
-  | "custom";
+  "overview" | "action_items" | "key_decisions" | "custom";
 
 // #3: Action items — structured rows (the action_items table is the source of
 // truth), edited in the note's Actions tab and surfaced in the global Tasks view.
@@ -162,6 +159,28 @@ export interface AudioDevice {
   name: string;
   /** Whether this is the OS default for its direction */
   isDefault: boolean;
+}
+
+// A link in a note's transcript version chain (matches Rust TranscriptVersion)
+export interface TranscriptVersion {
+  version: number;
+  contentHash: string;
+  parentHash: string | null;
+  serialization: string;
+  /** "recorded" = Note67 captured and produced it; "imported" = it arrived from elsewhere */
+  origin: "recorded" | "imported";
+  reason: "initial" | "retranscribe" | "edit" | "import";
+  segmentCount: number;
+  createdAt: string;
+  /** Present once a node has signed this version */
+  receiptHash?: string;
+}
+
+export interface TranscriptChain {
+  versions: TranscriptVersion[];
+  /** False when a version was removed, reordered or substituted */
+  intact: boolean;
+  brokenReason?: string;
 }
 
 // Recording phase enum (matches Rust RecordingPhase)

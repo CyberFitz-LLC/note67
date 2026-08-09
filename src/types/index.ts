@@ -18,6 +18,8 @@ export type {
   AiConnectionTest,
   AudioSegment,
   AudioDevice,
+  TranscriptVersion,
+  TranscriptChain,
   UploadedAudio,
   AudioItem,
   RetranscribeResult,

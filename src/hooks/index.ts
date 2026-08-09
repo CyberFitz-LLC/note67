@@ -4,6 +4,7 @@ export { useRecording } from "./useRecording";
 export { useInputDevices } from "./useInputDevices";
 export { useOutputDevices } from "./useOutputDevices";
 export { useAiProvider } from "./useAiProvider";
+export { useTranscriptChain } from "./useTranscriptChain";
 export { useModels, useTranscription, useLiveTranscription } from "./useTranscription";
 export { useUpdater } from "./useUpdater";
 export { useSystemStatus } from "./useSystemStatus";
