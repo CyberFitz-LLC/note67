@@ -178,15 +178,32 @@ Deployed on the Fitz Swarm, the same pattern already running for Hindsight MCP.
 A separate repository from the app, so upstream merges stay clean; the shared
 canonical-form crate is the only coupling.
 
-## 10. Open questions
+## 10. Resolved
 
-1. **Does the app keep working signed out?** It should — recording is local and
-   must not need a token. But then notes exist before an owner does, and get
-   attributed on first sign-in. Simplest is to require sign-in only for sync.
-2. **Group membership resolution.** Reading Entra groups from a token's claims
-   is limited when a user has many; the alternative is Graph lookups server-side,
-   which needs its own app permissions.
-3. **Attachment of images.** Note bodies can embed images. Those are files, not
-   rows, and need either object storage or exclusion.
-4. **Retention.** An archive that never forgets is a liability as well as a
-   feature. Worth a policy before there is a year of meetings in it.
+1. **Signed out, the app works.** Recording, transcription and the local chain
+   never need a token; sign-in is required only to sync. Notes therefore exist
+   before an owner does and are attributed on first sign-in — which also means a
+   user who never signs in has a perfectly functional local app, and that is the
+   intended experience rather than a degraded one.
+2. **Group membership resolves server-side via Graph.** Token claims truncate
+   once a user is in many groups, and a sharing rule that silently stops
+   applying to exactly the people in the most groups is the worst kind of bug.
+   The service therefore holds its own Graph application permission and caches
+   membership with a short TTL.
+3. **Attachments are excluded.** Note bodies can embed images; those are files
+   rather than rows and need object storage. Notes sync without them for now,
+   and the gap is tracked in [`../BACKLOG.md`](../BACKLOG.md) rather than half
+   solved.
+4. **Retention: never forgets by default, with policy available.** An archive
+   that quietly discards a meeting is worse than one that grows, so the default
+   is to keep everything. A tenant may configure a policy; when one exists,
+   deletions it performs are ordinary archive deletions and propagate as
+   tombstones like any other.
+
+## 11. Still open
+
+- Whether a note recorded before sign-in, then shared, should show its
+  pre-attribution history. Probably yes, but it exposes that the note predates
+  its owner.
+- Rate limiting and quota. Not urgent for a single team; needed before this
+  faces anything wider.
