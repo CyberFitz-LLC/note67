@@ -888,6 +888,23 @@ pub async fn retranscribe_note(
 
     state.is_transcribing.store(false, Ordering::SeqCst);
 
+    // Extend the chain. Re-transcription that lands on identical text records
+    // nothing — that is not a new state — so this is a no-op more often than
+    // not. Logged rather than propagated: the transcript was replaced
+    // successfully, and failing here would report the whole pass as failed.
+    match db.record_transcript_version(
+        &note_id,
+        crate::exochain::Origin::Recorded,
+        crate::exochain::Reason::Retranscribe,
+    ) {
+        Ok(Some(v)) => println!(
+            "[retranscribe] transcript v{} recorded for {} ({})",
+            v.version, note_id, v.content_hash
+        ),
+        Ok(None) => println!("[retranscribe] transcript unchanged for {note_id}; no new version"),
+        Err(e) => eprintln!("Failed to record the transcript version for {note_id}: {e}"),
+    }
+
     // Emit final progress
     let _ = app.emit("retranscribe-progress", serde_json::json!({
         "noteId": note_id,

@@ -35,6 +35,27 @@ pub enum Origin {
     Imported,
 }
 
+impl Origin {
+    /// Stored as text in the database and in receipts, so the mapping is
+    /// explicit rather than whatever a serializer happens to emit.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Origin::Recorded => "recorded",
+            Origin::Imported => "imported",
+        }
+    }
+
+    /// Unknown values read as `Imported`: it is the weaker claim, and a row we
+    /// cannot interpret should not be presented as something we observed
+    /// end to end.
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "recorded" => Origin::Recorded,
+            _ => Origin::Imported,
+        }
+    }
+}
+
 /// Why a new version exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +64,26 @@ pub enum Reason {
     Retranscribe,
     Edit,
     Import,
+}
+
+impl Reason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Reason::Initial => "initial",
+            Reason::Retranscribe => "retranscribe",
+            Reason::Edit => "edit",
+            Reason::Import => "import",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Self {
+        match value {
+            "initial" => Reason::Initial,
+            "retranscribe" => Reason::Retranscribe,
+            "import" => Reason::Import,
+            _ => Reason::Edit,
+        }
+    }
 }
 
 /// One link in a note's transcript chain.
@@ -471,6 +512,23 @@ mod tests {
     #[test]
     fn an_empty_chain_is_rejected() {
         assert_eq!(verify_chain(&[]), Err(ChainError::Empty));
+    }
+
+    #[test]
+    fn the_stored_forms_round_trip() {
+        for o in [Origin::Recorded, Origin::Imported] {
+            assert_eq!(Origin::from_db(o.as_str()), o);
+        }
+        for r in [Reason::Initial, Reason::Retranscribe, Reason::Edit, Reason::Import] {
+            assert_eq!(Reason::from_db(r.as_str()), r);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_origin_reads_as_the_weaker_claim() {
+        // A row we cannot interpret must not be presented as something whose
+        // production we observed.
+        assert_eq!(Origin::from_db("something-else"), Origin::Imported);
     }
 
     #[test]

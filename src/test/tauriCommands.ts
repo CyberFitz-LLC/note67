@@ -27,6 +27,7 @@ export const defaultCommands: CommandMap = {
   set_theme_preference: null,
 
   // settings
+  get_transcript_chain: { versions: [], intact: true },
   get_settings: {},
   get_setting: null,
   set_setting: null,

@@ -271,16 +271,70 @@ pub fn end_note(
     id: String,
     audio_path: Option<String>,
 ) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now();
+    {
+        // Scoped: record_transcript_version takes the same lock, and the
+        // connection mutex is not reentrant.
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now();
 
-    conn.execute(
-        "UPDATE notes SET ended_at = ?1, updated_at = ?2, audio_path = ?3 WHERE id = ?4",
-        (now.to_rfc3339(), now.to_rfc3339(), &audio_path, &id),
-    )
-    .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE notes SET ended_at = ?1, updated_at = ?2, audio_path = ?3 WHERE id = ?4",
+            (now.to_rfc3339(), now.to_rfc3339(), &audio_path, &id),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // Anchor the live transcript as the first version of this note's chain.
+    //
+    // Logged rather than propagated: the meeting is over and the transcript is
+    // saved either way. Failing the call would leave the user with an error on
+    // an action that otherwise succeeded, and the chain can still be extended
+    // afterwards — versions descend from whatever tip exists, so a skipped
+    // recording leaves no gap.
+    if let Err(e) = db.record_transcript_version(
+        &id,
+        crate::exochain::Origin::Recorded,
+        crate::exochain::Reason::Initial,
+    ) {
+        eprintln!("Failed to record the initial transcript version for {id}: {e}");
+    }
 
     Ok(())
+}
+
+/// The transcript version chain for a note, oldest first, with whether it
+/// verifies as unbroken.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChain {
+    pub versions: Vec<crate::exochain::TranscriptVersion>,
+    /// False when a version was removed, reordered or substituted.
+    pub intact: bool,
+    /// Why it does not verify, when it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken_reason: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_transcript_chain(db: State<Database>, note_id: String) -> Result<TranscriptChain, String> {
+    let versions = db.get_transcript_versions(&note_id).map_err(|e| e.to_string())?;
+
+    // An empty chain is not broken — it is a note that has not been
+    // transcribed yet, which is an ordinary state.
+    let (intact, broken_reason) = if versions.is_empty() {
+        (true, None)
+    } else {
+        match crate::exochain::transcript::verify_chain(&versions) {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        }
+    };
+
+    Ok(TranscriptChain {
+        versions,
+        intact,
+        broken_reason,
+    })
 }
 
 #[tauri::command]

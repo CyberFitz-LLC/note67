@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 #[allow(dead_code)]
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 14;
 
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     let version = get_schema_version(conn)?;
@@ -44,6 +44,9 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     }
     if version < 13 {
         migrate_v13(conn)?;
+    }
+    if version < 14 {
+        migrate_v14(conn)?;
     }
 
     Ok(())
@@ -503,5 +506,40 @@ fn migrate_v13(conn: &Connection) -> rusqlite::Result<()> {
 
     set_schema_version(conn, 13)?;
 
+    Ok(())
+}
+
+fn migrate_v14(conn: &Connection) -> rusqlite::Result<()> {
+    // The transcript version chain. Append-only: rows are never updated except
+    // to record a receipt hash once a version is attested.
+    //
+    // content_hash is the hash of the canonical bytes (see
+    // exochain::transcript), and serialization records which canonical form
+    // produced it, so a future format can coexist with receipts minted under
+    // this one instead of invalidating them.
+    conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE IF NOT EXISTS transcript_versions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             note_id TEXT NOT NULL,
+             version INTEGER NOT NULL,
+             content_hash TEXT NOT NULL,
+             parent_hash TEXT,
+             serialization TEXT NOT NULL,
+             origin TEXT NOT NULL,
+             reason TEXT NOT NULL,
+             segment_count INTEGER NOT NULL,
+             created_at TEXT NOT NULL,
+             receipt_hash TEXT,
+             attested_at TEXT,
+             UNIQUE(note_id, version),
+             FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_transcript_versions_note
+             ON transcript_versions(note_id, version);
+         COMMIT;",
+    )?;
+
+    set_schema_version(conn, 14)?;
     Ok(())
 }
