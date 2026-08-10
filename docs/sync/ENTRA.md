@@ -25,11 +25,15 @@ granted. This is what resolves group membership server-side: token claims
 truncate once a user belongs to many groups, and a sharing rule that silently
 stops applying to exactly the best-connected people is the worst kind of bug.
 
-**Client secret** — "note67-sync service", expires **2028-08-09**. Written on
-creation to `~/.note67-sync-client-secret` on the workstation and never
-displayed. Move it into VaultWarden and delete the file. Set a reminder well
-before expiry; when it lapses, group resolution fails while everything else
-keeps working, which is a confusing failure to diagnose cold.
+**Client secret** — "note67-sync service", expires **2028-08-09**. In
+VaultWarden as *Note67 Sync — Entra app registrations (CyberFitz Consulting
+LLC)*, alongside the tenant and client IDs so the service's whole environment
+is in one place. Never displayed; written to a file on creation, verified
+against the vault copy by hash, then shredded.
+
+Set a reminder well before expiry. When it lapses, group resolution fails while
+sign-in and sync keep working — a partial failure that looks like a sharing bug
+rather than an expired credential, and one nobody diagnoses quickly cold.
 
 ## Note67 Desktop — the app
 
