@@ -57,11 +57,13 @@ the physical thing it controls.
 
 ## Sync service
 
-Not started. Design in [`sync/DESIGN.md`](sync/DESIGN.md).
+Design in [`sync/DESIGN.md`](sync/DESIGN.md); code in
+[CyberFitz-LLC/note67-sync](https://github.com/CyberFitz-LLC/note67-sync).
 
-1. Extract the canonical transcript form into a shared crate — the service must
-   recompute hashes with byte-identical code, not a reimplementation.
-2. Service skeleton: axum, Entra JWT validation, device registration by DID.
+1. ~~Extract the canonical transcript form into a shared crate~~ — done:
+   `note67-canonical`, consumed by the service as a git dependency, so the hash
+   is computed by one implementation rather than two that agree today.
+2. ~~Service skeleton: axum, Entra JWT validation, device registration by DID.~~
 3. Sync protocol: change feed, per-device cursors, tombstones, chain re-base.
 4. Sharing: owner and explicit shares, Graph-resolved group membership.
 5. Client: sign-in, background sync, "Remove from this device" versus "Delete
