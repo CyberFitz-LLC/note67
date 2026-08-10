@@ -64,12 +64,28 @@ Design in [`sync/DESIGN.md`](sync/DESIGN.md); code in
    `note67-canonical`, consumed by the service as a git dependency, so the hash
    is computed by one implementation rather than two that agree today.
 2. ~~Service skeleton: axum, Entra JWT validation, device registration by DID.~~
-3. Sync protocol: change feed, per-device cursors, tombstones, chain re-base.
-4. Sharing: owner and explicit shares, Graph-resolved group membership.
+3. ~~Sync protocol: change feed, per-device cursors, tombstones, chain re-base.~~
+   Tested against a real Postgres; nothing deployed, and no live Entra token has
+   ever reached it.
+4. Sharing: owner and explicit shares, Graph-resolved group membership. Until
+   this exists a note is visible only to whoever created it — `access.rs` has
+   the shape but `Owner` is the only role it can return.
 5. Client: sign-in, background sync, "Remove from this device" versus "Delete
    from archive".
 6. Receipts for mirroring and for sharing.
 7. Retention policy support — never forgets by default.
+
+Smaller things the protocol left behind:
+
+- **A feed page carries whole transcripts.** Each version travels with every
+  segment it hashes, so `MAX_LIMIT` is set for the heaviest kind rather than the
+  average one. If pages get unwieldy, versions need a separate content fetch.
+- **Tombstones and `applied_changes` grow without bound.** Correct — the archive
+  never forgets by default — but the idempotency table has no reason to keep
+  rows past the point any client could still retry them.
+- **Deleting from the archive destroys the chain for that note.** The honest
+  reading of "delete", and a real loss of evidence. If that trade ever needs
+  revisiting, it is here.
 
 ## Build and release
 
