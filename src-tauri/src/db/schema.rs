@@ -607,6 +607,20 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
              PRIMARY KEY (kind, note_id, entity_id)
          );
 
+         -- Held while incoming changes are being written.
+         --
+         -- Without this the tracking triggers cannot tell a local edit from a
+         -- change that just arrived from the archive: applying one would queue
+         -- it to be pushed straight back, and two devices would bounce the same
+         -- note between them for ever. Every trigger below is guarded on this
+         -- table being empty.
+         --
+         -- A table rather than a Rust flag because the guard has to be visible
+         -- to SQLite, inside the trigger, at the moment the write happens.
+         CREATE TABLE IF NOT EXISTS sync_applying (
+             active INTEGER PRIMARY KEY CHECK (active = 1)
+         );
+
          -- Notes removed from this device but deliberately left in the archive.
          --
          -- Without this, 'Remove from this device' would pull the note straight
@@ -645,11 +659,15 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          END;
 
          -- Notes.
-         CREATE TRIGGER IF NOT EXISTS notes_sync_ins AFTER INSERT ON notes BEGIN
+         CREATE TRIGGER IF NOT EXISTS notes_sync_ins AFTER INSERT ON notes
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('note', new.id, '', lower(hex(randomblob(16))), 0, datetime('now'));
          END;
-         CREATE TRIGGER IF NOT EXISTS notes_sync_upd AFTER UPDATE ON notes BEGIN
+         CREATE TRIGGER IF NOT EXISTS notes_sync_upd AFTER UPDATE ON notes
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('note', new.id, '', lower(hex(randomblob(16))), 0, datetime('now'));
          END;
@@ -658,7 +676,9 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          -- sync does not pull the note back, and leaves the archive alone.
          -- Deleting from the archive is a separate, explicit action that
          -- enqueues its own tombstone before removing the row.
-         CREATE TRIGGER IF NOT EXISTS notes_sync_del AFTER DELETE ON notes BEGIN
+         CREATE TRIGGER IF NOT EXISTS notes_sync_del AFTER DELETE ON notes
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_suppressed (note_id, suppressed_at)
              VALUES (old.id, datetime('now'));
              -- Every queued change for this note goes, its own included. The
@@ -671,19 +691,21 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          END;
 
          -- Summaries.
-         CREATE TRIGGER IF NOT EXISTS summaries_sync_ins AFTER INSERT ON summaries BEGIN
+         CREATE TRIGGER IF NOT EXISTS summaries_sync_ins AFTER INSERT ON summaries
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              SELECT 'summary', new.note_id, s.sync_uid, lower(hex(randomblob(16))), 0, datetime('now')
              FROM summaries s WHERE s.id = new.id AND s.sync_uid IS NOT NULL;
          END;
          CREATE TRIGGER IF NOT EXISTS summaries_sync_upd AFTER UPDATE ON summaries
-         WHEN new.sync_uid IS NOT NULL
+         WHEN new.sync_uid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_applying)
          BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('summary', new.note_id, new.sync_uid, lower(hex(randomblob(16))), 0, datetime('now'));
          END;
          CREATE TRIGGER IF NOT EXISTS summaries_sync_del AFTER DELETE ON summaries
-         WHEN old.sync_uid IS NOT NULL
+         WHEN old.sync_uid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_applying)
          BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('summary', old.note_id, old.sync_uid, lower(hex(randomblob(16))), 1, datetime('now'));
@@ -692,19 +714,19 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          -- Action items. Those with no note are standalone tasks: they have no
          -- parent to authorize against, so they stay on this device.
          CREATE TRIGGER IF NOT EXISTS action_items_sync_ins AFTER INSERT ON action_items
-         WHEN new.note_id IS NOT NULL
+         WHEN new.note_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_applying)
          BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('actionItem', new.note_id, new.stable_id, lower(hex(randomblob(16))), 0, datetime('now'));
          END;
          CREATE TRIGGER IF NOT EXISTS action_items_sync_upd AFTER UPDATE ON action_items
-         WHEN new.note_id IS NOT NULL
+         WHEN new.note_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_applying)
          BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('actionItem', new.note_id, new.stable_id, lower(hex(randomblob(16))), 0, datetime('now'));
          END;
          CREATE TRIGGER IF NOT EXISTS action_items_sync_del AFTER DELETE ON action_items
-         WHEN old.note_id IS NOT NULL
+         WHEN old.note_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_applying)
          BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('actionItem', old.note_id, old.stable_id, lower(hex(randomblob(16))), 1, datetime('now'));
@@ -713,23 +735,31 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          -- Tags, identified by name. The tag row's id is local, but the name is
          -- unique and is what the tag actually is, so the same tag applied on
          -- two devices converges instead of duplicating.
-         CREATE TRIGGER IF NOT EXISTS note_tags_sync_ins AFTER INSERT ON note_tags BEGIN
+         CREATE TRIGGER IF NOT EXISTS note_tags_sync_ins AFTER INSERT ON note_tags
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              SELECT 'tag', new.note_id, t.name, lower(hex(randomblob(16))), 0, datetime('now')
              FROM tags t WHERE t.id = new.tag_id;
          END;
-         CREATE TRIGGER IF NOT EXISTS note_tags_sync_del AFTER DELETE ON note_tags BEGIN
+         CREATE TRIGGER IF NOT EXISTS note_tags_sync_del AFTER DELETE ON note_tags
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              SELECT 'tag', old.note_id, t.name, lower(hex(randomblob(16))), 1, datetime('now')
              FROM tags t WHERE t.id = old.tag_id;
          END;
 
          -- Links, identified by what they point at.
-         CREATE TRIGGER IF NOT EXISTS note_links_sync_ins AFTER INSERT ON note_links BEGIN
+         CREATE TRIGGER IF NOT EXISTS note_links_sync_ins AFTER INSERT ON note_links
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('link', new.source_note_id, new.target_title, lower(hex(randomblob(16))), 0, datetime('now'));
          END;
-         CREATE TRIGGER IF NOT EXISTS note_links_sync_del AFTER DELETE ON note_links BEGIN
+         CREATE TRIGGER IF NOT EXISTS note_links_sync_del AFTER DELETE ON note_links
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('link', old.source_note_id, old.target_title, lower(hex(randomblob(16))), 1, datetime('now'));
          END;
@@ -737,7 +767,9 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
          -- The chain. Append-only, so there is nothing to track but the append:
          -- a version that could be updated or deleted would attest nothing, and
          -- the archive rejects any attempt to rewrite one.
-         CREATE TRIGGER IF NOT EXISTS transcript_versions_sync_ins AFTER INSERT ON transcript_versions BEGIN
+         CREATE TRIGGER IF NOT EXISTS transcript_versions_sync_ins AFTER INSERT ON transcript_versions
+         WHEN NOT EXISTS (SELECT 1 FROM sync_applying)
+         BEGIN
              INSERT OR REPLACE INTO sync_dirty (kind, note_id, entity_id, client_change_id, deleted, queued_at)
              VALUES ('transcriptVersion', new.note_id, CAST(new.version AS TEXT), lower(hex(randomblob(16))), 0, datetime('now'));
          END;
@@ -910,6 +942,68 @@ mod tests {
         // gone from this device, so an update describing it would describe
         // something this machine can no longer see.
         assert!(dirty(&conn).is_empty(), "queued work outlived the note: {:?}", dirty(&conn));
+    }
+
+    /// Writing incoming changes, with tracking suspended.
+    ///
+    /// Mirrors what the sync engine does: hold the marker across the whole
+    /// apply, so nothing written during it is mistaken for a local edit.
+    fn while_applying(conn: &Connection, work: impl FnOnce(&Connection)) {
+        conn.execute("INSERT OR IGNORE INTO sync_applying (active) VALUES (1)", [])
+            .unwrap();
+        work(conn);
+        conn.execute("DELETE FROM sync_applying", []).unwrap();
+    }
+
+    #[test]
+    fn a_change_arriving_from_the_archive_is_not_queued_back_to_it() {
+        // The echo. Applying an incoming change writes to the same tables a
+        // local edit does, so without a guard the triggers would queue it for
+        // push and two devices would bounce the note between them for ever.
+        let conn = db();
+        while_applying(&conn, |c| {
+            a_note(c, "n1");
+            c.execute("INSERT INTO summaries (note_id, summary_type, content, created_at) VALUES ('n1','brief','x','t')", []).unwrap();
+            c.execute("INSERT INTO tags (name, created_at) VALUES ('standup','t')", []).unwrap();
+            c.execute("INSERT INTO note_tags (note_id, tag_id, created_at) VALUES ('n1',1,'t')", []).unwrap();
+            c.execute("INSERT INTO transcript_versions (note_id, version, content_hash, serialization, origin, reason, segment_count, created_at) VALUES ('n1',1,'abc','note67.transcript.v1','recorded','initial',2,'t')", []).unwrap();
+        });
+        assert!(dirty(&conn).is_empty(), "an applied change was queued back: {:?}", dirty(&conn));
+
+        // And the note really did arrive — the guard suppresses tracking, not
+        // the write itself.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes WHERE id='n1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn tracking_resumes_once_the_apply_is_over() {
+        // A guard that leaked would be worse than no guard: local edits would
+        // stop syncing silently, and only on the machines that had ever pulled.
+        let conn = db();
+        while_applying(&conn, |c| a_note(c, "n1"));
+        assert!(dirty(&conn).is_empty());
+
+        conn.execute("UPDATE notes SET title = 'Edited here' WHERE id = 'n1'", []).unwrap();
+        assert_eq!(dirty(&conn).len(), 1);
+    }
+
+    #[test]
+    fn a_note_removed_by_the_archive_is_not_suppressed_locally() {
+        // Suppression means "this device chose not to hold this note". A
+        // tombstone arriving from the archive is not that choice, and recording
+        // it as one would block the note from ever returning if it came back.
+        let conn = db();
+        a_note(&conn, "n1");
+        while_applying(&conn, |c| {
+            c.execute("DELETE FROM notes WHERE id = 'n1'", []).unwrap();
+        });
+        let suppressed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_suppressed", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(suppressed, 0);
     }
 
     #[test]
