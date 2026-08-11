@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod audio;
+pub mod exochain;
 pub mod export;
 pub mod graph;
 pub mod images;
@@ -14,6 +15,7 @@ pub mod upload;
 pub use ai::*;
 pub use audio::*;
 pub use export::*;
+pub use exochain::*;
 pub use graph::*;
 pub use images::*;
 pub use import::*;

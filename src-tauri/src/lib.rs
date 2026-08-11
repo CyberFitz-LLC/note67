@@ -360,6 +360,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             show_main_window,
+            commands::get_exochain_identity,
             commands::create_note,
             commands::get_note,
             commands::list_notes,
