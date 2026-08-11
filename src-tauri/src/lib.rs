@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod exochain;
 mod meeting_detection;
+mod sync;
 mod transcription;
 
 use commands::{init_transcription_state, AiState, AudioState};
