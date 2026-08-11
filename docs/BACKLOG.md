@@ -12,12 +12,48 @@ is only the list.
 
 | Item | Blocked by |
 |---|---|
-| Emit and verify receipts (R4/R5) — canonical `exo.avc.action.v1` signing | [exochain#812](https://github.com/exochain/exochain/issues/812) — `exochain-core` 0.2.3 does not build from crates.io |
-| Swap the DID derivation to `did_from_public_key` | Same. The known-answer test guards the swap; DIDs must not change |
-| Sanctioned emit path for a native-Rust subject | [exochained-toolkit#2](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/2) |
-| `subject_kind` for a desktop install | [exochained-toolkit#3](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/3) |
+| Emitting against the **production** node | Bob's runtime loader hook (see `project_avc_loader_hook_gap`) — production rejects credentials with an unresolved-issuer error until it ships. The local node is unaffected |
 | Endpoint → counterparty DID mapping, which turns evidence into enforcement | [exochained-toolkit#4](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/4) |
 | Conformance suite and CI gate | toolkit phases P2–P3 are unbuilt |
+
+### No longer blocked (corrected 2026-08-11)
+
+Two entries here were wrong, and being wrong about them cost weeks of not
+starting.
+
+**[exochain#812](https://github.com/exochain/exochain/issues/812) never blocked
+Note67.** It breaks `cargo add exochain-core` from crates.io, which matters to
+external developers and to nobody in this stack. The AVC workspace has always
+consumed the crates by **git rev at the ceremony commit**
+`dd18b58cd49f9c96f396180bb72722db4f7d70d7`, and that path builds — as long as
+two pre-release pins come with it, which is what `avc-app-registry`'s committed
+lock encodes and a fresh resolve does not:
+
+```toml
+pkcs8 = "=0.11.0-rc.11"
+spki  = "=0.8.0-rc.4"
+```
+
+Without them cargo takes released `pkcs8 0.11.0` / `spki 0.8.0`, and `ml-dsa
+0.1.0-rc.7` fails against trait impls that exist only in the `-rc` line. Verified
+from a clean two-dependency crate.
+
+**The DID derivation does not need swapping.** Note67's implementation, written
+against the spec because the crate would not build, produces a byte-identical
+DID to `exo_identity::did::did_from_public_key` — verified against the pinned
+all-zero-seed vector with both implementations compiled into one test. Adopting
+the crate is now a dependency choice rather than a correctness fix.
+
+**[toolkit#3](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/3)
+has a defensible answer already.** `AvcSubjectKind::Service { service_id }` is
+what the PRD picked, and it stays right until a Device variant exists. Bob's
+answer would let it be reconsidered; it does not gate the build.
+
+**[toolkit#2](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/2)
+is answered by the PRD's own design.** Emission is an HTTP `POST` to a node's
+`/api/v1/avc/receipts/emit`, not local signing, so "the sanctioned emit path for
+a native-Rust subject" is a question about a client, and the client is ours to
+write.
 
 ## Unverified on real hardware
 
