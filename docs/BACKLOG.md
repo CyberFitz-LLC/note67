@@ -12,14 +12,20 @@ is only the list.
 
 | Item | Blocked by |
 |---|---|
-| Emitting against the **production** node | Bob's runtime loader hook (see `project_avc_loader_hook_gap`) — production rejects credentials with an unresolved-issuer error until it ships. The local node is unaffected |
 | Endpoint → counterparty DID mapping, which turns evidence into enforcement | [exochained-toolkit#4](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/4) |
 | Conformance suite and CI gate | toolkit phases P2–P3 are unbuilt |
 
 ### No longer blocked (corrected 2026-08-11)
 
-Two entries here were wrong, and being wrong about them cost weeks of not
+Three entries here were wrong, and being wrong about them cost weeks of not
 starting.
+
+**Production is not blocked on the AVC root-trust loader.** Bob shipped the
+boot-time loader on 2026-05-31 (deploy `58e9eb62-…`); the operational issuer
+`did:exo:8EVGmqLo15…` registers from the verified bundle at startup, and both
+waiting credentials returned `HTTP 200 {"status":"registered"}` when replayed.
+The gap was real between 2026-05-30 and 2026-05-31 and has been closed since.
+Production `/health` answers 200 today.
 
 **[exochain#812](https://github.com/exochain/exochain/issues/812) never blocked
 Note67.** It breaks `cargo add exochain-core` from crates.io, which matters to
