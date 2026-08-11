@@ -23,6 +23,7 @@ import {
   ConfirmDialog,
   ContextMenu,
 } from "./components";
+import type { SettingsTab } from "./components";
 import { exportApi, aiApi, transcriptionApi, tagsApi, importApi } from "./api";
 import { getTagColor } from "./utils/tagColors";
 import { useTagsStore } from "./stores/tagsStore";
@@ -166,19 +167,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<
-    | "profile"
-    | "appearance"
-    | "system"
-    | "whisper"
-    | "ollama"
-    | "privacy"
-    | "shortcuts"
-    | "about"
-    | "updates"
-    | "disclaimer"
-    | "guide"
-  >("about");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("about");
   const [noteTranscripts, setNoteTranscripts] = useState<
     Record<string, TranscriptSegment[]>
   >({});

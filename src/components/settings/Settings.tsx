@@ -8,19 +8,21 @@ import { SystemTab } from "./SystemTab";
 import { WhisperTab } from "./WhisperTab";
 import { OllamaTab } from "./OllamaTab";
 import { PrivacyTab } from "./PrivacyTab";
+import { ExochainTab } from "./ExochainTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { AboutTab } from "./AboutTab";
 import { UpdatesTab } from "./UpdatesTab";
 import { DisclaimerTab } from "./DisclaimerTab";
 import { NoteGuideTab } from "./NoteGuideTab";
 
-type SettingsTab =
+export type SettingsTab =
   | "profile"
   | "appearance"
   | "system"
   | "whisper"
   | "ollama"
   | "privacy"
+  | "receipts"
   | "shortcuts"
   | "about"
   | "updates"
@@ -217,6 +219,26 @@ export function Settings({ onClose, initialTab = DEFAULT_TAB, onTabChange }: Set
                 strokeLinejoin="round"
                 strokeWidth={1.5}
                 d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            </svg>
+          ),
+        },
+        {
+          id: "receipts",
+          label: "Meeting Receipts",
+          warning: false,
+          icon: (
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
               />
             </svg>
           ),
@@ -437,6 +459,7 @@ export function Settings({ onClose, initialTab = DEFAULT_TAB, onTabChange }: Set
             {activeTab === "system" && <SystemTab onPermissionChange={refreshSystemStatus} />}
             {activeTab === "whisper" && <WhisperTab />}
             {activeTab === "ollama" && <OllamaTab />}
+            {activeTab === "receipts" && <ExochainTab />}
             {activeTab === "privacy" && <PrivacyTab />}
             {activeTab === "shortcuts" && <ShortcutsTab />}
             {activeTab === "about" && <AboutTab />}
