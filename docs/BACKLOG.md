@@ -76,6 +76,99 @@ the physical thing it controls.
 - **Remote model endpoints** — no request has reached a live vLLM or remote
   Ollama. SSE reassembly is tested against captured frames, not a server.
 
+## Audio routing and speaker attribution
+
+The three of these compound: with one mixed track and no diarization, a
+ten-person call transcribes as two speakers, and the interesting half is
+missing. Ordered by what unblocks what.
+
+### Device test panel — in progress
+
+Two real defects found 2026-08-12, both matching what a live meeting showed:
+
+1. **The level meter only ever measured the microphone.** `process_audio` in
+   `recorder.rs` is the only writer of `audio_level`, and it is the *input*
+   stream's callback. The Windows loopback path never touches it. So changing
+   the system-audio device could not move the meter — the meter was not
+   measuring that track.
+2. **The device is bound when the stream opens.** `run_recording` reads the
+   preference once and calls `open_input_device`. Changing it mid-recording
+   writes to a mutex nothing re-reads until the next recording, so the change
+   silently does nothing until then.
+
+`audio/levels.rs` is the measurement half: RMS, held peak, and a verdict
+(silent / quiet / healthy / clipping). Peak is held because a meter polled a few
+times a second misses the transients that matter, and clipping is judged from
+peak because a clipping track can sit at a perfectly ordinary average — which is
+how it goes unnoticed until the transcript is bad.
+
+Still to build: a per-track meter for the system capture, a test that runs
+outside a recording, and a panel that states the pass condition rather than just
+showing bars. The condition worth stating is **your own voice must not appear on
+the system track** — a mixed track is the failure that produces a light
+transcript, and it looks fine on a meter.
+
+The test must drive the same code path as recording. One that opened its own
+streams could pass while recording failed.
+
+### Merging transcripts of the same meeting
+
+Today an import always creates a new note, because merging would interleave
+content Note67 produced with content it did not, and a version records a single
+origin. That is right for one transcript and wrong for the real case: the same
+meeting recorded by Note67, Teams and Otter at once.
+
+Three sources of the same hour are worth more than three separate notes,
+because **where they disagree is information**. Teams knows who was speaking
+because it has each participant on a separate stream; Note67 has better audio
+of the room; Otter has its own errors. Aligning them gives per-segment
+attribution the local recording cannot produce alone.
+
+Design questions this raises, none of them settled:
+
+- **Alignment.** Clocks differ, and recordings start at different moments. The
+  offset has to be recovered from the content — a coarse text alignment over
+  timestamps, not timestamps alone.
+- **Provenance per segment.** A merged transcript is not `Recorded` or
+  `Imported`; it is derived from several sources with different standing. The
+  chain records one origin per version, so a merged version needs either a new
+  origin or a per-segment source. That decision bounds what a receipt over it
+  may claim, so it is not cosmetic.
+- **Which text wins.** Probably the highest-confidence source per segment, but
+  "confidence" is not comparable across tools.
+- **Idempotence.** Importing the same Teams file twice must not double the
+  transcript.
+
+### Speaker identification
+
+Wanted: `Speaker 1..n` instead of "You" and "Others", relabelling to real names,
+suggestions once someone has been labelled enough times, and always a manual
+override for a specific stretch.
+
+This is diarization, and it is a genuinely different thing from transcription —
+whisper.cpp does not do it. Realistic options, in order of cost:
+
+1. **Track-derived attribution**, which is what exists: which file a segment came
+   from. Correct for "me versus everyone else" and useless beyond it.
+2. **A diarization model** (pyannote-class, or whisper.cpp's tinydiarize for two
+   speakers). Real dependency, real GPU time, offline.
+3. **Speaker embeddings + a labelled store.** Embed each speaker turn, cluster
+   within a meeting for `Speaker N`, and match against previously labelled
+   embeddings across meetings to suggest names. This is the version that
+   remembers people.
+
+Notes on doing it properly:
+
+- **Voice prints are biometric data.** Storing embeddings of named colleagues is
+  a different privacy claim from storing a transcript, and the credential's
+  `data_classes` and the consent wording both have to say so.
+- **A manual label must always win** and must survive re-transcription, so labels
+  belong on a stable segment identity rather than on an index into the text.
+- **Relabelling changes the transcript**, so it appends a chain version. Attaching
+  a name is an edit to the content, and the chain would otherwise have a blind
+  spot exactly where the most human-meaningful change happens.
+- Merging (above) is the cheapest large win here: Teams already knows the names.
+
 ## Note67 app
 
 - **Manual transcript edits do not create a version.** `Reason::Edit` exists and
