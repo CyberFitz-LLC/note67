@@ -6,7 +6,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::audio::levels::LevelMeter;
 use crate::audio::AudioError;
+
+/// What the system-audio track is currently hearing.
+///
+/// Global, and platform-neutral, because the capture implementations are
+/// per-platform statics already and threading a handle through each of them
+/// would buy nothing. Until now nothing measured this track at all — the only
+/// meter in the app was the microphone's, which is why changing the system
+/// device appeared to do nothing.
+static SYSTEM_LEVEL: std::sync::OnceLock<LevelMeter> = std::sync::OnceLock::new();
+
+pub fn system_level() -> &'static LevelMeter {
+    SYSTEM_LEVEL.get_or_init(LevelMeter::new)
+}
 
 /// Result type for system audio operations
 pub type SystemAudioResult<T> = Result<T, AudioError>;
@@ -44,6 +58,14 @@ pub trait SystemAudioCapture: Send + Sync {
     /// include, which is a different feature.
     fn set_preferred_device(&self, _name: Option<String>) -> SystemAudioResult<()> {
         Ok(())
+    }
+
+    /// What this track is hearing right now, as (rms, held peak).
+    ///
+    /// Reads the shared meter rather than being implemented per platform: every
+    /// capture path already pushes its samples through one place.
+    fn current_level(&self) -> (f32, f32) {
+        (system_level().rms(), system_level().peak())
     }
 
     /// The pinned playback device, if this platform supports choosing one.

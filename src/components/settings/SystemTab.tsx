@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useInputDevices, useOutputDevices } from "../../hooks";
+import { DeviceTestPanel } from "./DeviceTestPanel";
 
 interface SystemTabProps {
   onPermissionChange?: () => void;
@@ -778,6 +779,8 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
           </p>
         </div>
       )}
+
+      <DeviceTestPanel />
 
       <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
         System settings are stored locally on this device.

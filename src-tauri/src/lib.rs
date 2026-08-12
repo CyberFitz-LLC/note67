@@ -173,6 +173,7 @@ pub fn run() {
                 commands::restore_preferred_output_device(&audio_state, &db);
             }
             app.manage(audio_state);
+            app.manage(commands::device_test::DeviceTestState::default());
 
             let ai_state = AiState::default();
             // Restore the saved model backend before the UI queries its status.
@@ -360,6 +361,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             show_main_window,
+            commands::start_device_test,
+            commands::stop_device_test,
+            commands::get_device_test_levels,
             commands::get_exochain_identity,
             commands::create_note,
             commands::get_note,
