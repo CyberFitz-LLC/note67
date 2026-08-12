@@ -4,7 +4,7 @@ mod commands;
 mod db;
 mod exochain;
 mod meeting_detection;
-mod merge;
+pub mod merge;
 mod sync;
 mod transcription;
 
@@ -365,6 +365,8 @@ pub fn run() {
             commands::start_device_test,
             commands::stop_device_test,
             commands::get_device_test_levels,
+            commands::merge_transcript_into_note,
+            commands::set_segment_speaker,
             commands::get_exochain_identity,
             commands::create_note,
             commands::get_note,

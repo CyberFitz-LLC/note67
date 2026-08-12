@@ -33,6 +33,15 @@ pub enum Origin {
     /// content was imported at a given time and has not changed since — not
     /// that it reflects a real meeting.
     Imported,
+    /// Note67 recorded the audio and produced the text, but some of the
+    /// attribution came from another tool's recording of the same meeting.
+    ///
+    /// Neither of the above would be honest. `Recorded` would claim the whole
+    /// result was observed here, when the speaker names were taken on trust
+    /// from Teams or Otter; `Imported` would disclaim text this app produced
+    /// from its own audio. A receipt over a merged version can attest the
+    /// content and the alignment, and must not attest that the names are right.
+    Merged,
 }
 
 impl Origin {
@@ -42,6 +51,7 @@ impl Origin {
         match self {
             Origin::Recorded => "recorded",
             Origin::Imported => "imported",
+            Origin::Merged => "merged",
         }
     }
 
@@ -51,6 +61,7 @@ impl Origin {
     pub fn from_db(value: &str) -> Self {
         match value {
             "recorded" => Origin::Recorded,
+            "merged" => Origin::Merged,
             _ => Origin::Imported,
         }
     }
@@ -64,6 +75,8 @@ pub enum Reason {
     Retranscribe,
     Edit,
     Import,
+    /// Another recording of the same meeting was folded in.
+    Merge,
 }
 
 impl Reason {
@@ -73,6 +86,7 @@ impl Reason {
             Reason::Retranscribe => "retranscribe",
             Reason::Edit => "edit",
             Reason::Import => "import",
+            Reason::Merge => "merge",
         }
     }
 
@@ -81,6 +95,7 @@ impl Reason {
             "initial" => Reason::Initial,
             "retranscribe" => Reason::Retranscribe,
             "import" => Reason::Import,
+            "merge" => Reason::Merge,
             _ => Reason::Edit,
         }
     }
@@ -565,10 +580,16 @@ mod tests {
 
     #[test]
     fn the_stored_forms_round_trip() {
-        for o in [Origin::Recorded, Origin::Imported] {
+        for o in [Origin::Recorded, Origin::Imported, Origin::Merged] {
             assert_eq!(Origin::from_db(o.as_str()), o);
         }
-        for r in [Reason::Initial, Reason::Retranscribe, Reason::Edit, Reason::Import] {
+        for r in [
+            Reason::Initial,
+            Reason::Retranscribe,
+            Reason::Edit,
+            Reason::Import,
+            Reason::Merge,
+        ] {
             assert_eq!(Reason::from_db(r.as_str()), r);
         }
     }
@@ -588,5 +609,46 @@ mod tests {
         assert_eq!(v.segment_count, 0);
         assert_eq!(content_hash(&[]), content_hash(&[]));
         assert_ne!(content_hash(&[]), content_hash(&sample()));
+    }
+}
+
+#[cfg(test)]
+mod merged_origin_tests {
+    use super::*;
+
+    #[test]
+    fn a_merged_origin_is_neither_recorded_nor_imported() {
+        // Recorded would claim the whole result was observed here, when the
+        // speaker names were taken on trust from another tool. Imported would
+        // disclaim text this app produced from its own audio.
+        assert_ne!(Origin::Merged, Origin::Recorded);
+        assert_ne!(Origin::Merged, Origin::Imported);
+        assert_eq!(Origin::from_db("merged"), Origin::Merged);
+    }
+
+    #[test]
+    fn older_code_reads_a_merged_version_as_the_weaker_claim() {
+        // Anything that does not know the variant falls through to Imported,
+        // which under-claims rather than over-claims. That is the only safe
+        // direction for a value that bounds what a receipt may say.
+        assert_eq!(Origin::from_db("something-new"), Origin::Imported);
+    }
+
+    #[test]
+    fn the_origin_is_not_part_of_the_hashed_content() {
+        // Adding a variant must not change any hash, or every receipt already
+        // minted would stop matching the transcript it attested.
+        let segments = [CanonicalSegment {
+            start_ms: 0,
+            end_ms: 1000,
+            speaker: Some("Bob Smith".into()),
+            text: "hello".into(),
+        }];
+        let recorded = next_version(None, &segments, Origin::Recorded, Reason::Initial, "t".into());
+        let merged = next_version(None, &segments, Origin::Merged, Reason::Merge, "t".into());
+        assert_eq!(
+            recorded.unwrap().content_hash,
+            merged.unwrap().content_hash
+        );
     }
 }
