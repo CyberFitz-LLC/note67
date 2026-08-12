@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod exochain;
 mod meeting_detection;
+mod merge;
 mod sync;
 mod transcription;
 
