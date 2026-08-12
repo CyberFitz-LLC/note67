@@ -9,4 +9,4 @@ export { tasksApi } from "./tasks";
 export { transcriptionApi } from "./transcription";
 export { uploadApi } from "./upload";
 export { importApi } from "./import";
-export type { ImportResult } from "./import";
+export type { ImportResult, MergeOutcome, Conflict } from "./import";

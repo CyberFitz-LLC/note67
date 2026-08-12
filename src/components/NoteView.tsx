@@ -10,7 +10,8 @@ import {
   UnlinkedMentionsPanel,
   ActionsTab,
 } from "./index";
-import { exportApi, notesApi, transcriptionApi } from "../api";
+import { exportApi, importApi, notesApi, transcriptionApi } from "../api";
+import { MergeTranscriptPanel } from "./MergeTranscriptPanel";
 import {
   useSummaries,
   useUploadedAudio,
@@ -28,6 +29,8 @@ import type { Note, TranscriptSegment, AudioSegment } from "../types";
 export interface NoteViewProps {
   note: Note;
   transcript: TranscriptSegment[];
+  /** Re-read the transcript after something here changed it. */
+  onTranscriptChanged?: () => void;
   onUpdateTitle: (title: string) => void;
   onUpdateDescription: (desc: string) => void;
   onStopRecording: () => void;
@@ -52,6 +55,7 @@ export interface NoteViewProps {
 export function NoteView({
   note,
   transcript,
+  onTranscriptChanged,
   onUpdateTitle,
   onUpdateDescription,
   onStopRecording,
@@ -906,7 +910,21 @@ export function NoteView({
                     audioSegments={audioSegments}
                     uploads={uploads}
                     isLive={isRecording}
+                    onRenameSpeaker={async (segmentIds, speaker) => {
+                      // Every segment in the turn, so a name applies to the
+                      // whole thing the person said rather than one row of it.
+                      for (const id of segmentIds) {
+                        await importApi.setSegmentSpeaker(note.id, id, speaker);
+                      }
+                      onTranscriptChanged?.();
+                    }}
                   />
+                  {!isRecording && (
+                    <MergeTranscriptPanel
+                      noteId={note.id}
+                      onMerged={() => onTranscriptChanged?.()}
+                    />
+                  )}
                   <TranscriptHistory
                     chain={transcriptChain}
                     loading={chainLoading}

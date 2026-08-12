@@ -1176,6 +1176,13 @@ function App() {
             key={selectedNote.id}
             note={selectedNote}
             transcript={currentTranscript}
+            onTranscriptChanged={async () => {
+              const refreshed = await loadTranscript(selectedNote.id);
+              setNoteTranscripts((prev) => ({
+                ...prev,
+                [selectedNote.id]: refreshed,
+              }));
+            }}
             onUpdateTitle={handleUpdateTitle}
             onUpdateDescription={handleUpdateDescription}
             onStopRecording={handleStopRecording}

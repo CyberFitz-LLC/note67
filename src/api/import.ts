@@ -11,6 +11,24 @@ export interface ImportResult {
   speakers: string[];
 }
 
+/** Where two recordings of the same meeting disagree. */
+export interface Conflict {
+  startMs: number;
+  text: string;
+  detail: string;
+}
+
+export interface MergeOutcome {
+  /** How far the other recording's clock was from ours. Null when refused. */
+  offsetMs: number | null;
+  segmentsNamed: number;
+  disagreements: number;
+  /** True when the two did not look like the same meeting, so nothing changed. */
+  rejected: boolean;
+  version?: TranscriptVersion;
+  conflicts: Conflict[];
+}
+
 export const importApi = {
   /**
    * Pick a WebVTT transcript and import it as a new note.
@@ -37,6 +55,51 @@ export const importApi = {
       path: String(selected),
       title: title ?? "",
       sourceTool: sourceTool ?? null,
+    });
+  },
+
+  /**
+   * Pick a transcript of a meeting this note already holds, and take its
+   * speaker names.
+   *
+   * Distinct from importing: this note keeps its own text and timings — that
+   * audio is what the receipts are about — and gains only the attribution it
+   * cannot derive on its own.
+   */
+  selectAndMergeVtt: async (
+    noteId: string,
+    sourceTool?: string
+  ): Promise<MergeOutcome | null> => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Transcript", extensions: ["vtt"] }],
+    });
+
+    if (!selected) return null;
+
+    return invoke<MergeOutcome>("merge_transcript_into_note", {
+      noteId,
+      path: String(selected),
+      sourceTool: sourceTool ?? null,
+    });
+  },
+
+  /**
+   * Set one segment's speaker by hand.
+   *
+   * Returns the chain version this appended, if the transcript changed.
+   * Naming a speaker changes what the transcript says, so it is recorded like
+   * any other edit.
+   */
+  setSegmentSpeaker: async (
+    noteId: string,
+    segmentId: number,
+    speaker: string | null
+  ): Promise<TranscriptVersion | null> => {
+    return invoke<TranscriptVersion | null>("set_segment_speaker", {
+      noteId,
+      segmentId,
+      speaker: speaker && speaker.trim() ? speaker.trim() : null,
     });
   },
 };
