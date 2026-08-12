@@ -224,9 +224,24 @@ Smaller things the protocol left behind:
 
 ## Build and release
 
-- **CUDA CI build is unverified.** It builds locally; the workflow's CUDA job has
-  never completed, having failed on Visual Studio integration and then on the
-  GitHub Actions outage.
+- **CUDA CI build has never succeeded.** It builds locally. On a hosted runner
+  `whisper-rs-sys`'s CMake step fails identifying the CUDA compiler
+  (`CMakeCUDACompilerId.cu`), which is the same Visual Studio integration gap
+  the workflow's copy step was meant to close — and evidently does not, at
+  least for compiler identification rather than only for the build. The Vulkan
+  job is green, so **CI does produce a working installer**; only the CUDA
+  variant is missing, and a local `build-windows-gpu.ps1` covers that.
+- **The NSIS bundler fetches its toolchain at build time.** A Vulkan build
+  failed with `failed to bundle project: io: Peer disconnected` and succeeded
+  on a straight re-run. Worth a retry before believing a bundling failure —
+  and worth pinning if it recurs, because a network blip currently looks like
+  a build error.
+- **Line endings are pinned in `.gitattributes`** (added 2026-08-12). Before
+  that, a Windows checkout could show a file as modified with an *empty*
+  `git diff`, which made `git checkout <branch>` abort — and the build then
+  ran from stale code and produced a normal-looking installer missing a week
+  of work. If a checkout ever refuses again, `git log --oneline -1` before
+  building is what catches it.
 - **`release.yml` needs two fixes before a real release.** It creates draft
   releases, and `/releases/latest/download/` only resolves for published ones, so
   the updater sees nothing until the draft is published by hand. Its macOS jobs
