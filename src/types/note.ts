@@ -186,8 +186,8 @@ export interface TranscriptVersion {
   parentHash: string | null;
   serialization: string;
   /** "recorded" = Note67 captured and produced it; "imported" = it arrived from elsewhere */
-  origin: "recorded" | "imported";
-  reason: "initial" | "retranscribe" | "edit" | "import";
+  origin: "recorded" | "imported" | "merged";
+  reason: "initial" | "retranscribe" | "edit" | "import" | "merge";
   segmentCount: number;
   createdAt: string;
   /** Present once a node has signed this version */

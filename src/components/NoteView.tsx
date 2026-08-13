@@ -983,6 +983,8 @@ export function NoteView({
                       chain={transcriptChain}
                       loading={chainLoading}
                       error={chainError}
+                      noteId={note.id}
+                      onAttested={() => onTranscriptChanged?.()}
                     />
                   </TranscriptDrawer>
                 </>

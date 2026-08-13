@@ -9,4 +9,6 @@ export { tasksApi } from "./tasks";
 export { transcriptionApi } from "./transcription";
 export { uploadApi } from "./upload";
 export { importApi } from "./import";
+export { exochainApi } from "./exochain";
+export type { Attestation } from "./exochain";
 export type { ImportResult, MergeOutcome, Conflict } from "./import";

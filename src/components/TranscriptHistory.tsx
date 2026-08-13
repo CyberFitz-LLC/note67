@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { exochainApi, type Attestation } from "../api";
 
 import type { TranscriptChain, TranscriptVersion } from "../types";
 
@@ -29,6 +30,9 @@ interface TranscriptHistoryProps {
   chain: TranscriptChain | null;
   loading: boolean;
   error: string | null;
+  /** Absent where attesting makes no sense — the history is read-only then. */
+  noteId?: string;
+  onAttested?: () => void;
 }
 
 /**
@@ -42,9 +46,13 @@ export function TranscriptHistory({
   chain,
   loading,
   error,
+  noteId,
+  onAttested,
 }: TranscriptHistoryProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [attesting, setAttesting] = useState(false);
+  const [outcome, setOutcome] = useState<Attestation | null>(null);
 
   // Nothing to show before a transcript exists. A note with no versions is an
   // ordinary state, not something to warn about.
@@ -237,13 +245,71 @@ export function TranscriptHistory({
                     {v.segmentCount} segment{v.segmentCount === 1 ? "" : "s"}
                   </span>
                 </div>
+
+                {/* The receipt belongs to a version, not to the note: it
+                    attests one content hash, and anywhere else it would end up
+                    pointing at whatever the transcript later became. */}
+                {v.receiptHash && (
+                  <button
+                    onClick={() => copy(v.receiptHash!)}
+                    className="mt-1 text-xs font-mono truncate block"
+                    style={{ color: "#22c55e" }}
+                    title={`Receipt ${v.receiptHash} — click to copy`}
+                  >
+                    {copied === v.receiptHash
+                      ? "copied"
+                      : `receipt ${shortHash(v.receiptHash)}`}
+                  </button>
+                )}
               </li>
             ))}
           </ol>
 
-          {/* PRD section 6 governs this wording. Nothing here has been signed by
-              a node yet, so the history must not imply it has been verified by
-              anyone — it is a local record of what changed and when. */}
+          {noteId && !latest.receiptHash && (
+            <button
+              type="button"
+              disabled={attesting}
+              onClick={async () => {
+                setAttesting(true);
+                setOutcome(null);
+                try {
+                  setOutcome(await exochainApi.attestMeeting(noteId));
+                  onAttested?.();
+                } catch (e) {
+                  // A thrown error is the app refusing before the node was
+                  // asked — no credential, no transcript. Same shape as
+                  // pending: nothing was attested and nothing changed.
+                  setOutcome({ status: "pending", reason: String(e) });
+                } finally {
+                  setAttesting(false);
+                }
+              }}
+              className="mt-3 text-xs px-3 py-1.5 rounded-lg disabled:opacity-50"
+              style={{
+                backgroundColor: "var(--color-bg)",
+                color: "var(--color-text)",
+              }}
+            >
+              {attesting ? "Asking the node…" : "Attest this version"}
+            </button>
+          )}
+
+          {outcome && outcome.status !== "attested" && (
+            <p
+              className="mt-2 text-xs"
+              style={{
+                color: outcome.status === "pending" ? "#eab308" : "#ef4444",
+              }}
+            >
+              {outcome.status === "pending"
+                ? `Not attested — the node was not reached, so nothing changed. ${outcome.reason}`
+                : `The node refused: ${outcome.reason}`}
+            </p>
+          )}
+
+          {/* PRD section 6 governs this wording. A version with no receipt has
+              been signed by nobody, so the history must not imply it has been
+              verified — it is a local record of what changed and when. */}
           <p
             className="mt-3 text-xs"
             style={{ color: "var(--color-text-tertiary)" }}
