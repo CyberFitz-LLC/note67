@@ -31,6 +31,8 @@ export function GraphView({ onSelectNote }: GraphViewProps) {
     tagFilter,
     viewMode,
     localCenterNoteId,
+    showOrphans,
+    setShowOrphans,
   } = useGraphStore();
 
   const settings = useGraphSettingsStore();
@@ -425,39 +427,6 @@ export function GraphView({ onSelectNote }: GraphViewProps) {
     );
   }
 
-  if (nodes.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-[var(--color-sidebar)] text-center px-8">
-        <div className="w-16 h-16 mb-4 text-[var(--color-text-tertiary)]">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-          >
-            <circle cx="6" cy="6" r="3" />
-            <circle cx="18" cy="6" r="3" />
-            <circle cx="6" cy="18" r="3" />
-            <circle cx="18" cy="18" r="3" />
-            <line x1="9" y1="6" x2="15" y2="6" />
-            <line x1="6" y1="9" x2="6" y2="15" />
-            <line x1="18" y1="9" x2="18" y2="15" />
-            <line x1="9" y1="18" x2="15" y2="18" />
-          </svg>
-        </div>
-        <h3 className="text-lg font-medium text-[var(--color-text)] mb-2">
-          No connections yet
-        </h3>
-        <p className="text-sm text-[var(--color-text-secondary)] max-w-sm">
-          Create links between notes using{" "}
-          <code className="px-1 py-0.5 bg-[var(--color-surface)] rounded">
-            [[Note Title]]
-          </code>{" "}
-          syntax to see them visualized here.
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div
@@ -490,6 +459,61 @@ export function GraphView({ onSelectNote }: GraphViewProps) {
 
       {/* D3 SVG canvas */}
       <svg ref={svgRef} className="w-full h-full" />
+
+      {/* Nothing to draw. Rendered over the canvas rather than instead of the
+          whole view: the controls have to stay reachable, or a filter that
+          empties the graph removes the only means of undoing itself. */}
+      {nodes.length === 0 && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 pointer-events-none">
+                <div className="w-16 h-16 mb-4 text-[var(--color-text-tertiary)]">
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  >
+                    <circle cx="6" cy="6" r="3" />
+                    <circle cx="18" cy="6" r="3" />
+                    <circle cx="6" cy="18" r="3" />
+                    <circle cx="18" cy="18" r="3" />
+                    <line x1="9" y1="6" x2="15" y2="6" />
+                    <line x1="6" y1="9" x2="6" y2="15" />
+                    <line x1="18" y1="9" x2="18" y2="15" />
+                    <line x1="9" y1="18" x2="15" y2="18" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-[var(--color-text)] mb-2">
+                  {showOrphans ? "No connections yet" : "Everything is hidden"}
+                </h3>
+                {showOrphans ? (
+                  <p className="text-sm text-[var(--color-text-secondary)] max-w-sm">
+                    Create links between notes using{" "}
+                    <code className="px-1 py-0.5 bg-[var(--color-surface)] rounded">
+                      [[Note Title]]
+                    </code>{" "}
+                    syntax to see them visualized here.
+                  </p>
+                ) : (
+                  <div className="pointer-events-auto">
+                    <p className="text-sm text-[var(--color-text-secondary)] max-w-sm">
+                      Every note here is unlinked, and unlinked notes are
+                      hidden.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowOrphans(true)}
+                      className="mt-3 text-sm px-3 py-1.5 rounded-lg"
+                      style={{
+                        backgroundColor: "var(--color-surface)",
+                        color: "var(--color-text)",
+                      }}
+                    >
+                      Show unlinked notes
+                    </button>
+                  </div>
+                )}
+              </div>
+      )}
 
       {/* Hover preview */}
       {hoveredNodeId && <GraphNodePreview nodeId={hoveredNodeId} />}
