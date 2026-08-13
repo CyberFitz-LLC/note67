@@ -332,6 +332,15 @@ impl WindowsSystemAudioCapture {
         // A wasapi Device is neither Send nor Sync, so it cannot be handed to
         // this thread — only the name crosses, and the device is opened here.
         let (device, loopback) = resolve_system_device(preferred_device.as_deref())?;
+        // What actually opened, which a fallback can make different from what
+        // was asked for.
+        crate::audio::system_audio::set_system_device(device.get_friendlyname().ok().map(|n| {
+            if loopback {
+                n
+            } else {
+                format!("{n} — recording device")
+            }
+        }));
 
         // Get the audio client for loopback capture
         let mut audio_client = device.get_iaudioclient().map_err(|e| {

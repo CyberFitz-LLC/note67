@@ -783,7 +783,8 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
         </div>
       )}
 
-      <DeviceTestPanel />
+      {/* Restarts the test whenever either selection changes. */}
+      <DeviceTestPanel boundTo={`${selectedDevice ?? ""}|${selectedOutputDevice ?? ""}`} />
 
       <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
         System settings are stored locally on this device.

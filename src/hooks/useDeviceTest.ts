@@ -10,6 +10,10 @@ export interface TrackLevel {
 export interface DeviceTestLevels {
   microphone: TrackLevel;
   system: TrackLevel;
+  /** The devices each track actually opened, which a fallback can make
+   *  different from what the picker shows. */
+  microphoneDevice: string | null;
+  systemDevice: string | null;
   /** False when the system capture never started, as opposed to hearing nothing. */
   systemAvailable: boolean;
 }
@@ -31,7 +35,14 @@ export function meterFraction(dbfs: number): number {
   return (dbfs - floor) / -floor;
 }
 
-export function useDeviceTest() {
+/**
+ * @param boundTo Changing this restarts the test.
+ *
+ * A capture binds its device when the stream opens, so changing a picker
+ * mid-test does nothing — the meters carry on reading the old devices, which
+ * looks exactly like a picker that has no effect.
+ */
+export function useDeviceTest(boundTo?: string) {
   const [running, setRunning] = useState(false);
   const [levels, setLevels] = useState<DeviceTestLevels | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +90,24 @@ export function useDeviceTest() {
       invoke("stop_device_test").catch(() => {});
     };
   }, []);
+
+  // Rebind when the selection changes. Without this the test keeps reading the
+  // devices it opened with, so switching to something that could not possibly
+  // work leaves the meters moving — and the picker looks broken when it is the
+  // test that is stale.
+  const rebinding = useRef(false);
+  useEffect(() => {
+    if (!running || rebinding.current) return;
+    rebinding.current = true;
+    stop()
+      .then(start)
+      .finally(() => {
+        rebinding.current = false;
+      });
+    // `running` is deliberately absent: including it would restart the test
+    // every time its own restart flipped the flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boundTo]);
 
   return { running, levels, error, start, stop };
 }

@@ -15,10 +15,12 @@ function Meter({
   label,
   hint,
   level,
+  device,
 }: {
   label: string;
   hint: string;
   level: TrackLevel | null;
+  device?: string | null;
 }) {
   const fraction = level ? meterFraction(level.rmsDbfs) : 0;
   const peak = level ? meterFraction(level.peakDbfs) : 0;
@@ -56,12 +58,18 @@ function Meter({
       >
         {hint}
       </p>
+      {/* What this meter is actually reading. A pinned device that has gone
+          away falls back to the default silently, so the picker's value is
+          not evidence of what opened. */}
+      <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+        {device ? `Reading: ${device}` : "Reading: nothing"}
+      </p>
     </div>
   );
 }
 
-export function DeviceTestPanel() {
-  const { running, levels, error, start, stop } = useDeviceTest();
+export function DeviceTestPanel({ boundTo }: { boundTo?: string }) {
+  const { running, levels, error, start, stop } = useDeviceTest(boundTo);
 
   const micHeard =
     levels?.microphone.verdict === "healthy" ||
@@ -112,11 +120,13 @@ export function DeviceTestPanel() {
             label="Your microphone"
             hint="Speak. This should move."
             level={levels?.microphone ?? null}
+            device={levels?.microphoneDevice}
           />
           <Meter
             label="Everyone else (system audio)"
             hint="Should move when others speak — and stay flat when you do."
             level={levels?.system ?? null}
+            device={levels?.systemDevice}
           />
 
           {levels && !levels.systemAvailable && (

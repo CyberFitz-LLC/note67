@@ -22,6 +22,27 @@ pub fn system_level() -> &'static LevelMeter {
     SYSTEM_LEVEL.get_or_init(LevelMeter::new)
 }
 
+/// The device the system-audio capture actually opened, and how.
+static SYSTEM_DEVICE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+pub fn set_system_device(name: Option<String>) {
+    if let Ok(mut current) = SYSTEM_DEVICE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+    {
+        *current = name;
+    }
+}
+
+pub fn system_device() -> Option<String> {
+    SYSTEM_DEVICE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|c| c.clone())
+}
+
 /// Result type for system audio operations
 pub type SystemAudioResult<T> = Result<T, AudioError>;
 

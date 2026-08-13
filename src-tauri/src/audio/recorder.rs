@@ -45,6 +45,13 @@ pub struct RecordingState {
     /// system default. Read when a segment starts, so changing it mid-recording
     /// takes effect on the next segment rather than cutting the current one.
     pub preferred_input_device: std::sync::Mutex<Option<String>>,
+    /// The device the current stream actually opened.
+    ///
+    /// Distinct from the preference: a pinned device that has gone away falls
+    /// back to the default silently, so the preference alone does not say what
+    /// is being recorded. Without this the only way to tell which device a
+    /// meter is reading is to guess.
+    pub opened_input_device: std::sync::Mutex<Option<String>>,
 
     // === Pause/Resume/Continue fields ===
     /// Current recording phase (Idle, Recording, Paused)
@@ -76,6 +83,7 @@ impl RecordingState {
             sample_rate: AtomicU32::new(0),
             channels: AtomicU32::new(0),
             preferred_input_device: std::sync::Mutex::new(None),
+            opened_input_device: std::sync::Mutex::new(None),
             // Pause/Resume/Continue fields
             phase: AtomicU8::new(RecordingPhase::Idle as u8),
             current_segment_index: AtomicU32::new(0),
@@ -298,6 +306,9 @@ pub fn stop_recording_preserving_state(state: &RecordingState) -> Result<(Option
 fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(), AudioError> {
     let preferred = state.get_preferred_input_device();
     let device = crate::audio::devices::open_input_device(preferred.as_deref())?;
+    if let Ok(mut opened) = state.opened_input_device.lock() {
+        *opened = device.name().ok();
+    }
 
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;

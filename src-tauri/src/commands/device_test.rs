@@ -53,6 +53,14 @@ fn track(rms: f32, peak: f32) -> TrackLevel {
 pub struct DeviceTestLevels {
     pub microphone: TrackLevel,
     pub system: TrackLevel,
+    /// The devices each track actually opened.
+    ///
+    /// Reported rather than assumed. A pinned device that has gone away falls
+    /// back to the default silently, so the picker's value does not say what a
+    /// meter is reading — and a meter you cannot attribute to a device is not
+    /// evidence of anything.
+    pub microphone_device: Option<String>,
+    pub system_device: Option<String>,
     /// False when the system track could not be started at all — no capture
     /// support, or no permission. Distinct from a silent track, which means the
     /// capture works and is hearing nothing.
@@ -150,6 +158,13 @@ pub fn get_device_test_levels(audio: State<AudioState>) -> DeviceTestLevels {
         // noted rather than papered over.
         microphone: track(mic_rms, mic_rms),
         system: track(sys_rms, sys_peak),
+        microphone_device: audio
+            .recording
+            .opened_input_device
+            .lock()
+            .ok()
+            .and_then(|d| d.clone()),
+        system_device: crate::audio::system_audio::system_device(),
         system_available: available,
     }
 }
@@ -182,6 +197,8 @@ mod tests {
         let levels = DeviceTestLevels {
             microphone: track(0.05, 0.05),
             system: track(0.0, 0.0),
+            microphone_device: Some("Blue Yeti".into()),
+            system_device: Some("VoiceMeeter Out B1 — recording device".into()),
             system_available: true,
         };
         let v = serde_json::to_value(&levels).unwrap();
@@ -189,6 +206,10 @@ mod tests {
         assert_eq!(v["system"]["verdict"], "silent");
         assert_eq!(v["systemAvailable"], true);
         assert!(v["microphone"]["rmsDbfs"].is_number());
+        // Which device each meter is reading, so a moving bar can be
+        // attributed rather than guessed at.
+        assert_eq!(v["microphoneDevice"], "Blue Yeti");
+        assert_eq!(v["systemDevice"], "VoiceMeeter Out B1 — recording device");
     }
 
     #[test]
@@ -199,6 +220,8 @@ mod tests {
         let unavailable = DeviceTestLevels {
             microphone: track(0.05, 0.05),
             system: track(0.0, 0.0),
+            microphone_device: Some("Blue Yeti".into()),
+            system_device: None,
             system_available: false,
         };
         assert_eq!(unavailable.system.verdict, "silent");
