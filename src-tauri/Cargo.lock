@@ -994,6 +994,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
+ "const-oid 0.9.6",
  "crypto-common 0.1.7",
  "subtle",
 ]
@@ -1268,35 +1269,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
-name = "exo-authority"
-version = "0.1.0-beta"
-source = "git+https://github.com/exochain/exochain.git?rev=dd18b58cd49f9c96f396180bb72722db4f7d70d7#dd18b58cd49f9c96f396180bb72722db4f7d70d7"
+name = "exochain-authority"
+version = "0.2.3"
+source = "git+https://github.com/exochain/exochain.git?rev=86e9a029b7a6#86e9a029b7a62417b658b04d0def7a979e21fc8b"
 dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
- "exo-core",
- "exo-identity",
+ "exochain-core",
+ "exochain-identity",
  "serde",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-avc"
-version = "0.1.0-beta"
-source = "git+https://github.com/exochain/exochain.git?rev=dd18b58cd49f9c96f396180bb72722db4f7d70d7#dd18b58cd49f9c96f396180bb72722db4f7d70d7"
+name = "exochain-avc"
+version = "0.2.3"
+source = "git+https://github.com/exochain/exochain.git?rev=86e9a029b7a6#86e9a029b7a62417b658b04d0def7a979e21fc8b"
 dependencies = [
  "ciborium",
- "exo-authority",
- "exo-core",
+ "exochain-authority",
+ "exochain-core",
  "serde",
+ "sha2",
  "thiserror 2.0.17",
 ]
 
 [[package]]
-name = "exo-core"
-version = "0.1.0-beta"
-source = "git+https://github.com/exochain/exochain.git?rev=dd18b58cd49f9c96f396180bb72722db4f7d70d7#dd18b58cd49f9c96f396180bb72722db4f7d70d7"
+name = "exochain-core"
+version = "0.2.3"
+source = "git+https://github.com/exochain/exochain.git?rev=86e9a029b7a6#86e9a029b7a62417b658b04d0def7a979e21fc8b"
 dependencies = [
  "blake3",
  "chrono",
@@ -1314,15 +1316,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo-identity"
-version = "0.1.0-beta"
-source = "git+https://github.com/exochain/exochain.git?rev=dd18b58cd49f9c96f396180bb72722db4f7d70d7#dd18b58cd49f9c96f396180bb72722db4f7d70d7"
+name = "exochain-identity"
+version = "0.2.3"
+source = "git+https://github.com/exochain/exochain.git?rev=86e9a029b7a6#86e9a029b7a62417b658b04d0def7a979e21fc8b"
 dependencies = [
  "blake3",
  "bs58",
  "chacha20poly1305",
  "ciborium",
- "exo-core",
+ "exochain-core",
  "getrandom 0.2.16",
  "hkdf",
  "serde",
@@ -2882,7 +2884,9 @@ dependencies = [
  "cpal",
  "dispatch",
  "ed25519-dalek",
- "exo-avc",
+ "exochain-authority",
+ "exochain-avc",
+ "exochain-core",
  "futures-util",
  "getrandom 0.2.16",
  "hex",

@@ -8,7 +8,9 @@
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::db::Database;
 use crate::exochain::credential::{self, Credential, Standing};
+use crate::exochain::emit::{self, Attestation};
 use crate::exochain::identity::{self, Identity};
 
 /// What the app knows about its own identity, and how far enrollment has got.
@@ -87,6 +89,81 @@ pub fn remove_exochain_credential(app: AppHandle) -> Result<IdentityView, String
     let (identity, _key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.to_string())?;
     Ok(view_with(identity, None))
+}
+
+/// Where the node lives, and what to present to it.
+///
+/// Settings rather than constants so a different chain can be pointed at
+/// without a rebuild — which is also how this gets tested against a local node
+/// before anything reaches production.
+const NODE_URL_KEY: &str = "exochain_node_url";
+const NODE_TOKEN_KEY: &str = "exochain_node_token";
+const DEFAULT_NODE_URL: &str = "https://exochain-production.up.railway.app";
+
+/// Ask a node to attest this note's current transcript.
+///
+/// Returns what the node said. A receipt is recorded only when one was minted:
+/// an unreachable node leaves the transcript exactly as it was, which is the
+/// whole reason recording never depends on the node.
+#[tauri::command]
+pub async fn attest_meeting(
+    app: AppHandle,
+    db: tauri::State<'_, Database>,
+    note_id: String,
+) -> Result<Attestation, String> {
+    let dir = identity_dir(&app)?;
+    let (identity, key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+
+    let Some(stored) = credential::load(&dir) else {
+        return Err("This installation has no credential yet, so nothing can be attested.".into());
+    };
+    if credential::standing(&stored, credential::now_ms()) != Standing::Active {
+        return Err(
+            "This installation's credential is not usable — see Settings, Meeting Receipts.".into(),
+        );
+    }
+
+    // The version being attested, captured before the request: a receipt names
+    // one content hash, and re-transcription during the round trip must not
+    // move which version it lands on.
+    let version = db
+        .latest_transcript_version(&note_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("This note has no transcript to attest.")?;
+
+    // Re-read as the node's type. The stored bytes are the issuer's, and this
+    // is the only place they are interpreted as a credential to act under.
+    let parsed = serde_json::to_string(&stored)
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .ok_or("The stored credential could not be read as a credential.")?;
+
+    let request = emit::build_request(&parsed, &key, &note_id, emit::now())?;
+
+    let node_url = db
+        .get_setting(NODE_URL_KEY)
+        .ok()
+        .flatten()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_URL.to_string());
+    let token = db.get_setting(NODE_TOKEN_KEY).ok().flatten();
+
+    let outcome = emit::emit(
+        &reqwest::Client::new(),
+        &node_url,
+        token.as_deref(),
+        &request,
+    )
+    .await;
+
+    if let Attestation::Attested { receipt_hash } = &outcome {
+        db.record_receipt(&note_id, version.version as i64, receipt_hash)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let _ = identity;
+    Ok(outcome)
 }
 
 fn view(identity: Identity) -> IdentityView {

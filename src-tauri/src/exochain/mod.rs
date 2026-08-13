@@ -8,6 +8,7 @@
 //! the transcript chain is useful on its own before any credential exists.
 
 pub mod credential;
+pub mod emit;
 pub mod identity;
 pub mod vtt;
 

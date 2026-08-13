@@ -240,6 +240,32 @@ impl Database {
     }
 
     /// The current tip of a note's chain.
+    /// Record the receipt a node minted for a transcript version.
+    ///
+    /// Written against a specific version, not the note: a receipt attests one
+    /// content hash, and attaching it to the note would leave it pointing at
+    /// whatever the transcript later became.
+    pub fn record_receipt(
+        &self,
+        note_id: &str,
+        version: i64,
+        receipt_hash: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE transcript_versions
+             SET receipt_hash = ?1, attested_at = ?2
+             WHERE note_id = ?3 AND version = ?4",
+            rusqlite::params![
+                receipt_hash,
+                chrono::Utc::now().to_rfc3339(),
+                note_id,
+                version
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn latest_transcript_version(
         &self,
         note_id: &str,
