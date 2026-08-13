@@ -131,15 +131,19 @@ export function ExochainTab() {
                   <div style={{ color: "#eab308" }}>
                     {identity.credential.standing === "expired"
                       ? "This credential has expired. Receipts minted while it was valid are unaffected."
-                      : "This credential's expiry could not be read, so it is not being relied on."}
+                      : "This credential does not carry note67.meeting.attest, so it cannot attest meetings. It needs re-minting with that tool in its authority scope."}
                   </div>
                 )}
                 <div style={{ color: "var(--color-text-secondary)" }}>
-                  Issued {identity.credential.issuedAt.slice(0, 10)}, expires{" "}
-                  {identity.credential.expiresAt.slice(0, 10)}
+                  Issued {new Date(identity.credential.issuedAtMs).toLocaleDateString()}, expires{" "}
+                  {new Date(identity.credential.expiresAtMs).toLocaleDateString()}
                 </div>
                 <div style={{ color: "var(--color-text-secondary)" }}>
-                  Scope: {identity.credential.authorityScope.join(", ") || "none"}
+                  Tools: {identity.credential.tools.join(", ") || "none"}
+                </div>
+                <div style={{ color: "var(--color-text-secondary)" }}>
+                  Data classes:{" "}
+                  {identity.credential.dataClasses.join(", ") || "none"}
                 </div>
                 <button
                   type="button"

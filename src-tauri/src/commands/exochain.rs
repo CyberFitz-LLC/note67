@@ -37,11 +37,14 @@ pub struct IdentityView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialView {
-    pub id: String,
     pub issuer_did: String,
-    pub issued_at: String,
-    pub expires_at: String,
-    pub authority_scope: Vec<String>,
+    /// Milliseconds since the epoch, as the credential expresses them.
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub tools: Vec<String>,
+    pub permissions: Vec<String>,
+    pub data_classes: Vec<String>,
+    pub purpose: String,
     pub standing: Standing,
 }
 
@@ -99,14 +102,16 @@ fn view_with(identity: Identity, credential: Option<Credential>) -> IdentityView
         created_at: identity.created_at,
         enrolled: credential
             .as_ref()
-            .is_some_and(|c| credential::standing(c, &chrono::Utc::now().to_rfc3339()) == Standing::Active),
+            .is_some_and(|c| credential::standing(c, credential::now_ms()) == Standing::Active),
         credential: credential.map(|c| CredentialView {
-            standing: credential::standing(&c, &chrono::Utc::now().to_rfc3339()),
-            id: c.id,
+            standing: credential::standing(&c, credential::now_ms()),
             issuer_did: c.issuer_did,
-            issued_at: c.issued_at,
-            expires_at: c.expires_at,
-            authority_scope: c.authority_scope,
+            issued_at_ms: c.created_at.physical_ms,
+            expires_at_ms: c.expires_at.physical_ms,
+            tools: c.authority_scope.tools,
+            permissions: c.authority_scope.permissions,
+            data_classes: c.authority_scope.data_classes,
+            purpose: c.delegated_intent.purpose,
         }),
     }
 }

@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-export type Standing = "active" | "expired" | "unreadable";
+export type Standing = "active" | "expired" | "notForMeetings";
 
 export interface InstalledCredential {
-  id: string;
   issuerDid: string;
-  issuedAt: string;
-  expiresAt: string;
-  authorityScope: string[];
+  issuedAtMs: number;
+  expiresAtMs: number;
+  tools: string[];
+  permissions: string[];
+  dataClasses: string[];
+  purpose: string;
   standing: Standing;
 }
 
