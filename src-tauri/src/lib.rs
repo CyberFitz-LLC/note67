@@ -367,6 +367,8 @@ pub fn run() {
             commands::get_device_test_levels,
             commands::merge_transcript_into_note,
             commands::set_segment_speaker,
+            commands::install_exochain_credential,
+            commands::remove_exochain_credential,
             commands::get_exochain_identity,
             commands::create_note,
             commands::get_note,

@@ -1,5 +1,16 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+
+export type Standing = "active" | "expired" | "unreadable";
+
+export interface InstalledCredential {
+  id: string;
+  issuerDid: string;
+  issuedAt: string;
+  expiresAt: string;
+  authorityScope: string[];
+  standing: Standing;
+}
 
 export interface ExochainIdentity {
   did: string;
@@ -7,8 +18,9 @@ export interface ExochainIdentity {
   deviceId: string;
   serviceId: string;
   createdAt: string;
-  /** True once a credential naming this DID has been installed. */
+  /** True once a usable credential naming this DID has been installed. */
   enrolled: boolean;
+  credential?: InstalledCredential;
 }
 
 /**
@@ -43,7 +55,32 @@ export function useExochainIdentity() {
     };
   }, []);
 
-  return { identity, error, loading };
+  /**
+   * Store a credential minted for this installation.
+   *
+   * Errors are returned rather than thrown: pasting the wrong file is the
+   * likely mistake and the message names both DIDs, which is the thing that
+   * lets someone find the right one.
+   */
+  const installCredential = useCallback(async (json: string) => {
+    try {
+      setIdentity(await invoke<ExochainIdentity>("install_exochain_credential", { json }));
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  }, []);
+
+  const removeCredential = useCallback(async () => {
+    try {
+      setIdentity(await invoke<ExochainIdentity>("remove_exochain_credential"));
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  }, []);
+
+  return { identity, error, loading, installCredential, removeCredential };
 }
 
 /**

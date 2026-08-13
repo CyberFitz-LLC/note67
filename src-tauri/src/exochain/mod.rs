@@ -7,6 +7,7 @@
 //! Nothing here talks to a node yet: identity is derived and held locally, and
 //! the transcript chain is useful on its own before any credential exists.
 
+pub mod credential;
 pub mod identity;
 pub mod vtt;
 

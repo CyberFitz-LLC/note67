@@ -44,7 +44,10 @@ function CopyField({ label, value }: { label: string; value: string }) {
 }
 
 export function ExochainTab() {
-  const { identity, error, loading } = useExochainIdentity();
+  const { identity, error, loading, installCredential, removeCredential } =
+    useExochainIdentity();
+  const [paste, setPaste] = useState("");
+  const [installError, setInstallError] = useState<string | null>(null);
 
   return (
     <div className="space-y-6">
@@ -121,7 +124,90 @@ export function ExochainTab() {
                 ? "Meetings recorded on this device can be attested."
                 : "No credential names this identity yet, so meetings are not attested. Transcripts are still versioned and tamper-evident on this device."}
             </div>
+
+            {identity.credential && (
+              <div className="mt-3 space-y-1 text-xs">
+                {identity.credential.standing !== "active" && (
+                  <div style={{ color: "#eab308" }}>
+                    {identity.credential.standing === "expired"
+                      ? "This credential has expired. Receipts minted while it was valid are unaffected."
+                      : "This credential's expiry could not be read, so it is not being relied on."}
+                  </div>
+                )}
+                <div style={{ color: "var(--color-text-secondary)" }}>
+                  Issued {identity.credential.issuedAt.slice(0, 10)}, expires{" "}
+                  {identity.credential.expiresAt.slice(0, 10)}
+                </div>
+                <div style={{ color: "var(--color-text-secondary)" }}>
+                  Scope: {identity.credential.authorityScope.join(", ") || "none"}
+                </div>
+                <button
+                  type="button"
+                  className="mt-1 underline"
+                  style={{ color: "var(--color-text-secondary)" }}
+                  onClick={async () => setInstallError(await removeCredential())}
+                >
+                  Remove credential
+                </button>
+              </div>
+            )}
           </div>
+
+          {!identity.credential && (
+            <div
+              className="p-4 rounded-xl space-y-2"
+              style={{ backgroundColor: "var(--color-bg-subtle)" }}
+            >
+              <h4
+                className="text-sm font-semibold"
+                style={{ color: "var(--color-text)" }}
+              >
+                Install a credential
+              </h4>
+              <p
+                className="text-sm"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Register this DID and public key with the AVC App Registry, then
+                paste the credential it issues. It must name this installation —
+                one issued for another machine is refused, because this device
+                could not sign for it.
+              </p>
+              <textarea
+                value={paste}
+                onChange={(e) => setPaste(e.target.value)}
+                rows={5}
+                spellCheck={false}
+                placeholder='{"id":"…","issuer_did":"…","subject_did":"…"}'
+                className="w-full text-xs p-2 rounded-lg font-mono"
+                style={{
+                  backgroundColor: "var(--color-bg)",
+                  color: "var(--color-text)",
+                }}
+              />
+              <button
+                type="button"
+                disabled={!paste.trim()}
+                className="text-sm px-3 py-1.5 rounded-lg disabled:opacity-50"
+                style={{
+                  backgroundColor: "var(--color-accent, #3b82f6)",
+                  color: "white",
+                }}
+                onClick={async () => {
+                  const failure = await installCredential(paste);
+                  setInstallError(failure);
+                  if (!failure) setPaste("");
+                }}
+              >
+                Install
+              </button>
+              {installError && (
+                <p className="text-sm" style={{ color: "#ef4444" }}>
+                  {installError}
+                </p>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

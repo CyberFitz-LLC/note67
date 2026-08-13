@@ -8,6 +8,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+use crate::exochain::credential::{self, Credential, Standing};
 use crate::exochain::identity::{self, Identity};
 
 /// What the app knows about its own identity, and how far enrollment has got.
@@ -19,12 +20,29 @@ pub struct IdentityView {
     pub device_id: String,
     pub service_id: String,
     pub created_at: String,
-    /// True once a credential naming this DID has been installed.
+    /// True once a credential naming this DID has been installed and is usable.
     ///
-    /// Always false today: nothing issues one yet. Present so the UI can say
-    /// "not enrolled" rather than implying attestation is happening when it is
-    /// not — the distinction the receipts are supposed to make.
+    /// False for an expired or unreadable one too: the point of the flag is
+    /// whether meetings can be attested right now, and a credential that
+    /// cannot authorise anything should not read as enrolment.
     pub enrolled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialView>,
+}
+
+/// What the UI shows about an installed credential.
+///
+/// The signature is deliberately absent. It is of no use on screen and this
+/// struct goes straight into the webview.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialView {
+    pub id: String,
+    pub issuer_did: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub authority_scope: Vec<String>,
+    pub standing: Standing,
 }
 
 fn identity_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -43,19 +61,53 @@ pub fn get_exochain_identity(app: AppHandle) -> Result<IdentityView, String> {
     let dir = identity_dir(&app)?;
     let (identity, _key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
         .map_err(|e| e.to_string())?;
-    Ok(view(identity))
+    Ok(view_with(identity, credential::load(&dir)))
+}
+
+/// Install a credential minted for this installation.
+#[tauri::command]
+pub fn install_exochain_credential(app: AppHandle, json: String) -> Result<IdentityView, String> {
+    let dir = identity_dir(&app)?;
+    let (identity, _key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+
+    let installed =
+        credential::install(&dir, &identity.did, json.trim()).map_err(|e| e.to_string())?;
+    Ok(view_with(identity, Some(installed)))
+}
+
+/// Remove the installed credential, keeping the identity.
+#[tauri::command]
+pub fn remove_exochain_credential(app: AppHandle) -> Result<IdentityView, String> {
+    let dir = identity_dir(&app)?;
+    credential::remove(&dir).map_err(|e| e.to_string())?;
+    let (identity, _key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+    Ok(view_with(identity, None))
 }
 
 fn view(identity: Identity) -> IdentityView {
+    view_with(identity, None)
+}
+
+fn view_with(identity: Identity, credential: Option<Credential>) -> IdentityView {
     IdentityView {
         did: identity.did,
         public_key_hex: identity.public_key_hex,
         device_id: identity.device_id,
         service_id: identity.service_id,
         created_at: identity.created_at,
-        // Enrollment is not built. Reporting anything else here would be the
-        // app claiming a credential it does not hold.
-        enrolled: false,
+        enrolled: credential
+            .as_ref()
+            .is_some_and(|c| credential::standing(c, &chrono::Utc::now().to_rfc3339()) == Standing::Active),
+        credential: credential.map(|c| CredentialView {
+            standing: credential::standing(&c, &chrono::Utc::now().to_rfc3339()),
+            id: c.id,
+            issuer_did: c.issuer_did,
+            issued_at: c.issued_at,
+            expires_at: c.expires_at,
+            authority_scope: c.authority_scope,
+        }),
     }
 }
 
@@ -82,10 +134,9 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_reports_itself_unenrolled() {
-        // Nothing issues a credential yet. Saying otherwise would have the app
-        // claim attestation it cannot perform — the exact distinction receipts
-        // exist to make.
+    fn an_identity_with_no_credential_reports_itself_unenrolled() {
+        // Saying otherwise would have the app claim attestation it cannot
+        // perform — the exact distinction receipts exist to make.
         let id = Identity {
             device_id: "d1".into(),
             did: "did:exo:abc".into(),
