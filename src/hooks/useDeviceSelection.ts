@@ -92,18 +92,32 @@ export function useDeviceSelection(api: DeviceSelectionApi) {
   const { devices, selectedDevice } = data;
 
   /**
-   * The pinned device name when it is not currently connected, otherwise null.
+   * The pinned device when it is not currently connected, otherwise null.
    * Recording falls back to the system default in this state, silently, so the
    * UI needs to say something.
+   *
+   * Matched on id *or* name, because a preference can be either: playback
+   * endpoints are pinned by id, microphones by name, and preferences saved
+   * before ids existed are names too. Comparing only names reported every
+   * id-pinned device as unplugged — while it was selected and working.
    */
+  // The id only counts when there is one. Microphones all carry an empty id,
+  // so comparing it to an empty preference would match the first mic in the
+  // list and pin it at random.
+  const matches = (d: { id?: string; name: string }) =>
+    (!!d.id && d.id === selectedDevice) || d.name === selectedDevice;
+
   const missingDevice =
-    selectedDevice !== null && !devices.some((d) => d.name === selectedDevice)
-      ? selectedDevice
-      : null;
+    selectedDevice !== null && !devices.some(matches) ? selectedDevice : null;
+
+  /** What to show for a device the picker knows only by id. */
+  const selectedLabel =
+    devices.find(matches)?.name ?? selectedDevice ?? null;
 
   return {
     devices,
     selectedDevice,
+    selectedLabel,
     missingDevice,
     loading,
     saving,
