@@ -54,6 +54,7 @@ export function TranscriptHistory({
   const [copied, setCopied] = useState<string | null>(null);
   const [attesting, setAttesting] = useState(false);
   const [outcome, setOutcome] = useState<Attestation | null>(null);
+  const [blocked, setBlocked] = useState<string | null>(null);
 
   // Nothing to show before a transcript exists. A note with no versions is an
   // ordinary state, not something to warn about.
@@ -277,14 +278,17 @@ export function TranscriptHistory({
               onClick={async () => {
                 setAttesting(true);
                 setOutcome(null);
+                setBlocked(null);
                 try {
                   setOutcome(await exochainApi.attestMeeting(noteId));
                   onAttested?.();
                 } catch (e) {
-                  // A thrown error is the app refusing before the node was
-                  // asked — no credential, no transcript. Same shape as
-                  // pending: nothing was attested and nothing changed.
-                  setOutcome({ status: "pending", reason: String(e) });
+                  // The app refused before any request. Kept apart from a
+                  // node that could not be reached: both mean nothing was
+                  // attested, but only one is worth retrying, and saying "the
+                  // node was not reached" about a request never sent points at
+                  // the wrong thing entirely.
+                  setBlocked(String(e));
                 } finally {
                   setAttesting(false);
                 }
@@ -297,6 +301,12 @@ export function TranscriptHistory({
             >
               {attesting ? "Asking the node…" : "Attest this version"}
             </button>
+          )}
+
+          {blocked && (
+            <p className="mt-2 text-xs" style={{ color: "#eab308" }}>
+              Nothing was sent: {blocked}
+            </p>
           )}
 
           {outcome && outcome.status !== "attested" && (

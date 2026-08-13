@@ -132,12 +132,13 @@ pub async fn attest_meeting(
         .map_err(|e| e.to_string())?
         .ok_or("This note has no transcript to attest.")?;
 
-    // Re-read as the node's type. The stored bytes are the issuer's, and this
-    // is the only place they are interpreted as a credential to act under.
-    let parsed = serde_json::to_string(&stored)
-        .ok()
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .ok_or("The stored credential could not be read as a credential.")?;
+    // Parsed from the issuer's own bytes, never from the modelled struct: that
+    // models a subset, so re-serialising it drops intent_id and the objectives
+    // and produces something the node correctly refuses.
+    let raw = credential::load_raw(&dir)
+        .ok_or("The stored credential could not be read from disk.")?;
+    let parsed = serde_json::from_str(&raw)
+        .map_err(|e| format!("The stored credential is not one this node would accept: {e}"))?;
 
     let request = emit::build_request(&parsed, &key, &note_id, emit::now())?;
 

@@ -136,6 +136,17 @@ pub fn install(dir: &Path, our_did: &str, json: &str) -> Result<Credential, Cred
     Ok(credential)
 }
 
+/// The credential exactly as the issuer wrote it.
+///
+/// The only safe input for anything that has to act under it. The struct above
+/// models a subset — enough to check and display — and round-tripping through
+/// it silently drops every field it does not name, including `intent_id` and
+/// the objectives. A credential reassembled that way is not the credential that
+/// was signed, and the node refuses it.
+pub fn load_raw(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(path(dir)).ok()
+}
+
 /// The installed credential, if there is one.
 pub fn load(dir: &Path) -> Option<Credential> {
     let json = std::fs::read_to_string(path(dir)).ok()?;
@@ -348,6 +359,33 @@ mod tests {
         assert_eq!(c.rest.get("schema_version"), Some(&serde_json::json!(1)));
         assert!(c.rest.contains_key("subject_kind"));
         assert!(c.rest.contains_key("policy_refs"));
+    }
+
+    #[test]
+    fn the_raw_bytes_come_back_byte_for_byte() {
+        // What anything acting under the credential must use. The modelled
+        // struct drops every field it does not name — intent_id, the
+        // objectives — and a credential rebuilt from it is not the one that
+        // was signed.
+        let dir = temp();
+        let json = real_credential(OURS, "\"note67.meeting.attest\"", FUTURE);
+        install(&dir, OURS, &json).unwrap();
+        assert_eq!(load_raw(&dir).unwrap(), json);
+    }
+
+    #[test]
+    fn the_modelled_struct_is_lossy_and_must_not_be_re_serialised() {
+        // Pinning the reason `load_raw` exists. If this ever round-trips
+        // cleanly the comment above is wrong, but relying on it would still be
+        // relying on a subset staying complete.
+        let dir = temp();
+        let json = real_credential(OURS, "\"note67.meeting.attest\"", FUTURE);
+        let c = install(&dir, OURS, &json).unwrap();
+        let round_tripped = serde_json::to_value(&c).unwrap();
+        assert!(
+            round_tripped["delegated_intent"].get("intent_id").is_none(),
+            "the modelled struct kept intent_id; check whether load_raw is still needed"
+        );
     }
 
     #[test]
