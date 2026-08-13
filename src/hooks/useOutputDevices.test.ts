@@ -15,8 +15,16 @@ vi.mock("../api", () => ({
 
 const api = vi.mocked(audioApi, true);
 
-const SPEAKERS = { name: "Speakers (Realtek Audio)", isDefault: true };
-const HEADSET = { name: "Headset Earphone (Jabra)", isDefault: false };
+const SPEAKERS = {
+  id: "{0.0.0.00000000}.{realtek}",
+  name: "Speakers (Realtek Audio)",
+  isDefault: true,
+};
+const HEADSET = {
+  id: "{0.0.0.00000000}.{jabra}",
+  name: "Headset Earphone (Jabra)",
+  isDefault: false,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();

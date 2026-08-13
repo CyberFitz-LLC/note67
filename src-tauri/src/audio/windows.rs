@@ -16,7 +16,7 @@ use hound::{WavSpec, WavWriter};
 use wasapi::{Device, DeviceCollection, Direction, SampleType, ShareMode};
 
 use super::system_audio::{SystemAudioCapture, SystemAudioResult};
-use crate::audio::devices::{resolve_device_selection, AudioDevice, DeviceSelection};
+use crate::audio::devices::{disambiguate, find_device, AudioDevice, DeviceEntry};
 use crate::audio::AudioError;
 
 /// Shared state for audio writing, accessible from the capture thread
@@ -77,6 +77,35 @@ fn get_default_render_device() -> Result<Device, AudioError> {
 }
 
 /// Friendly names of every active playback device.
+/// Every playback endpoint, with the id that distinguishes endpoints sharing a
+/// name. Windows presents seven "Speakers (VB-Audio Voicemeeter VAIO)" on a
+/// machine with VoiceMeeter installed, and only one carries the audio an
+/// application is playing.
+fn render_device_entries() -> Result<Vec<DeviceEntry>, AudioError> {
+    ensure_com_initialized();
+
+    let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
+    })?;
+    let count = collection.get_nbr_devices().map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to count playback devices: {}", e))
+    })?;
+
+    let mut entries = Vec::new();
+    for index in 0..count {
+        // A device without an id cannot be selected unambiguously, so it is
+        // skipped rather than listed as something that might open anything.
+        if let Ok(device) = collection.get_device_at_index(index)
+            && let Ok(name) = device.get_friendlyname()
+            && let Ok(id) = device.get_id()
+        {
+            entries.push(DeviceEntry { id, name });
+        }
+    }
+
+    Ok(entries)
+}
+
 fn render_device_names() -> Result<Vec<String>, AudioError> {
     ensure_com_initialized();
 
@@ -106,22 +135,27 @@ fn render_device_names() -> Result<Vec<String>, AudioError> {
 /// Names that collide are deduplicated: WASAPI is asked for a device *by name*,
 /// so a second identically-named entry could never actually be opened.
 pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
-    let default_name = get_default_render_device()
-        .ok()
-        .and_then(|d| d.get_friendlyname().ok());
+    let default_id = get_default_render_device().ok().and_then(|d| d.get_id().ok());
 
-    let mut seen = std::collections::HashSet::new();
-    let mut devices = Vec::new();
+    let entries = render_device_entries()?;
+    // Every endpoint, none collapsed. Deduplicating by name used to hide six of
+    // seven VoiceMeeter endpoints, and the hidden ones included the only one
+    // carrying audio — so picking the visible one captured silence, with
+    // nothing to say why.
+    let labels = disambiguate(&entries);
 
-    for name in render_device_names()? {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let is_default = default_name.as_deref() == Some(name.as_str());
-        devices.push(AudioDevice { name, is_default });
-    }
-
-    Ok(devices)
+    Ok(entries
+        .into_iter()
+        .zip(labels)
+        .map(|(entry, label)| {
+            let is_default = default_id.as_deref() == Some(entry.id.as_str());
+            AudioDevice {
+                id: entry.id,
+                name: label,
+                is_default,
+            }
+        })
+        .collect())
 }
 
 /// Open the playback device to capture from, falling back to the system default.
@@ -130,26 +164,40 @@ pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
 /// pinned-but-absent device falls back rather than failing, because a meeting
 /// that records nothing is worse than one recorded from the wrong speakers.
 fn resolve_render_device(preferred: Option<&str>) -> Result<Device, AudioError> {
-    let available = render_device_names()?;
+    let Some(preferred) = preferred.map(str::trim).filter(|p| !p.is_empty()) else {
+        return get_default_render_device();
+    };
 
-    match resolve_device_selection(&available, preferred) {
-        DeviceSelection::Named(name) => {
-            let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
-                AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
-            })?;
-            collection.get_device_with_name(&name).map_err(|e| {
-                AudioError::PermissionDenied(format!("Failed to open playback device: {}", e))
-            })
+    let entries = render_device_entries()?;
+    let Some(wanted) = find_device(&entries, preferred) else {
+        // A pinned device that has gone away falls back rather than failing: a
+        // meeting recorded from the wrong speakers beats one not recorded.
+        eprintln!(
+            "Saved playback device {:?} is not available; capturing the system default instead",
+            preferred
+        );
+        return get_default_render_device();
+    };
+
+    // Opened by index rather than by name. `get_device_with_name` returns the
+    // first endpoint with a matching name, which on a machine with seven
+    // identically-named endpoints is almost never the one that was chosen.
+    let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
+    })?;
+    let count = collection.get_nbr_devices().map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to count playback devices: {}", e))
+    })?;
+    for index in 0..count {
+        if let Ok(device) = collection.get_device_at_index(index)
+            && let Ok(id) = device.get_id()
+            && id == wanted.id
+        {
+            return Ok(device);
         }
-        DeviceSelection::MissingFallback { requested } => {
-            eprintln!(
-                "Saved playback device {:?} is not available; capturing the system default instead",
-                requested
-            );
-            get_default_render_device()
-        }
-        DeviceSelection::Default => get_default_render_device(),
     }
+
+    get_default_render_device()
 }
 
 /// Downsample audio from source rate to 16kHz mono for Whisper

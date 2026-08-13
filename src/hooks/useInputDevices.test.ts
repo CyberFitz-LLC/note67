@@ -14,8 +14,8 @@ vi.mock("../api", () => ({
 
 const api = vi.mocked(audioApi, true);
 
-const BUILT_IN = { name: "MacBook Pro Microphone", isDefault: true };
-const YETI = { name: "Blue Yeti", isDefault: false };
+const BUILT_IN = { id: "", name: "MacBook Pro Microphone", isDefault: true };
+const YETI = { id: "", name: "Blue Yeti", isDefault: false };
 
 beforeEach(() => {
   vi.clearAllMocks();

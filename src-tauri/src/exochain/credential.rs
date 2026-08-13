@@ -405,4 +405,5 @@ mod tests {
         assert!(load(&dir).is_none());
         assert!(dir.join("identity.key").exists());
     }
+
 }

@@ -156,6 +156,15 @@ export interface AudioSegment {
 // A device that can be picked: a microphone to record from, or (Windows only)
 // a playback device to capture system audio from. Matches Rust AudioDevice.
 export interface AudioDevice {
+  /**
+   * Stable per endpoint, and what a preference should store.
+   *
+   * Empty for microphones, where the platform exposes no id — there the name
+   * is all there is. Playback endpoints do have one, and need it: Windows can
+   * present several under a single name and only one of them carries the
+   * audio an application is playing.
+   */
+  id: string;
   name: string;
   /** Whether this is the OS default for its direction */
   isDefault: boolean;

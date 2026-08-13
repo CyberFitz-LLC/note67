@@ -731,7 +731,10 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
                 : ""}
             </option>
             {outputDevices.map((device) => (
-              <option key={device.name} value={device.name}>
+              <option
+                key={device.id || device.name}
+                value={device.id || device.name}
+              >
                 {device.name}
               </option>
             ))}
