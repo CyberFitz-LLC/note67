@@ -56,10 +56,52 @@ what the PRD picked, and it stays right until a Device variant exists. Bob's
 answer would let it be reconsidered; it does not gate the build.
 
 **[toolkit#2](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/2)
-is answered by the PRD's own design.** Emission is an HTTP `POST` to a node's
-`/api/v1/avc/receipts/emit`, not local signing, so "the sanctioned emit path for
-a native-Rust subject" is a question about a client, and the client is ours to
-write.
+is answered — but not the way I first said.** I claimed the PRD settled it, on
+the strength of the route it names. The PRD's route is not evidence: the node
+answers `401` for *any* path under `/api/v1` before routing, including a
+nonsense one, so a status code says nothing about what exists. The ceremony
+commit the AVC crates are pinned to has **no emit route at all**; the deployed
+node is newer.
+
+Read out of `exo-node/src/avc.rs` on `main`, the contract is:
+
+```
+POST /api/v1/avc/receipts/emit
+{
+  "validation": {
+    "credential": <the installed AVC, verbatim>,
+    "action": {
+      "action_id": <Hash256>,
+      "actor_did": <this install's DID>,
+      "requested_permission": "Write",
+      "tool": "note67.meeting.attest",
+      "data_class": "PersonalData",
+      "requires_human_approval": false,
+      "action_name": "note67.meeting.attest"
+    },
+    "now": <Timestamp>
+  },
+  "subject_signature": <Ed25519 over the payload below>,
+  "subject_public_key": <this install's key>
+}
+```
+
+Two things that are not obvious and would each cost a day:
+
+- **What is signed** is `avc_action_signature_payload(&credential, &action, &now)`
+  from `exo-avc` — not the action alone. Reimplementing it would be exactly the
+  divergence the shared-crate rule exists to prevent, so the app should take the
+  crate. Verified 2026-08-13 that `exo-avc` at the ceremony commit resolves and
+  compiles inside the Tauri dependency tree, given the two pre-release pins.
+- **`subject_public_key` is what routes around
+  [exochain#687](https://github.com/exochain/exochain/issues/687).** The node
+  prefers a registered key and falls back to the supplied one after checking it
+  derives to `actor_did`. Both existing emitters supply it; without it a
+  correctly registered credential still returns `401 subject public key is
+  unresolved`.
+
+Read back with `GET /api/v1/avc/receipts/<hash>`, which is auth-gated and needs
+the node's admin token.
 
 ## Unverified on real hardware
 
