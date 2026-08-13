@@ -10,7 +10,8 @@ import {
   UnlinkedMentionsPanel,
   ActionsTab,
 } from "./index";
-import { exportApi, importApi, notesApi, transcriptionApi } from "../api";
+import { exportApi, importApi, notesApi, tasksApi, transcriptionApi } from "../api";
+import { buildNoteContext, withNoteContext } from "./noteContext";
 import { MergeTranscriptPanel } from "./MergeTranscriptPanel";
 import {
   useSummaries,
@@ -24,7 +25,12 @@ import { useRecordingStore } from "../stores/recordingStore";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
 import { useNoteUiStore } from "../stores/noteUiStore";
-import type { Note, TranscriptSegment, AudioSegment } from "../types";
+import type {
+  ActionItem,
+  Note,
+  TranscriptSegment,
+  AudioSegment,
+} from "../types";
 
 export interface NoteViewProps {
   note: Note;
@@ -179,12 +185,6 @@ export function NoteView({
   );
 
   // Handle AI generation
-  const handleAIGenerate = useCallback(
-    (content: string, action: string) => {
-      generateAI(content, action, descValue);
-    },
-    [generateAI, descValue]
-  );
 
   // Handle after AI insert/replace - switch to notes tab
   const handleAIInserted = useCallback(() => {
@@ -253,6 +253,43 @@ export function NoteView({
 
   const { summaries, isGenerating, streamingContent, deleteSummary } =
     useSummaries(note.id, summariesRefreshKey);
+
+  // Tasks live inside ActionsTab, which is not mounted unless that tab is
+  // open — so they are fetched here too, purely so the assistant can see them.
+  const [contextTasks, setContextTasks] = useState<ActionItem[]>([]);
+  const [taskEdits, setTaskEdits] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    tasksApi
+      .getActionItems(note.id)
+      .then((items) => {
+        if (!cancelled) setContextTasks(items);
+      })
+      .catch(() => {
+        // The assistant works without them; failing the note over it would
+        // be a poor trade.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [note.id, taskEdits]);
+
+  const handleAIGenerate = useCallback(
+    (content: string, action: string) => {
+      // Everything known about the meeting, not just the note body. Chat
+      // previously sent the question alone, so asking what was decided in a
+      // recorded meeting was answered from nothing at all.
+      const context = buildNoteContext({
+        title: note.title,
+        description: descValue,
+        summaries,
+        tasks: contextTasks,
+        transcript,
+      });
+      generateAI(withNoteContext(content, context), action, descValue);
+    },
+    [generateAI, descValue, note.title, summaries, contextTasks, transcript]
+  );
 
   // Re-read the chain whenever the transcript itself changes. Derived rather
   // than triggered from an effect: re-transcription replaces every segment, so
@@ -966,7 +1003,12 @@ export function NoteView({
             <ActionsTab
               noteId={note.id}
               canUseAI={ollamaRunning && hasOllamaModel}
-              onChanged={onTasksChanged}
+              onChanged={() => {
+                onTasksChanged?.();
+                // Refresh the assistant's copy too, or it answers from a task
+                // list the user has already changed.
+                setTaskEdits((n) => n + 1);
+              }}
               focusTaskId={focusTaskId}
             />
           )}
