@@ -13,6 +13,7 @@ import {
 import { exportApi, importApi, notesApi, tasksApi, transcriptionApi } from "../api";
 import { buildNoteContext, withNoteContext } from "./noteContext";
 import { MergeTranscriptPanel } from "./MergeTranscriptPanel";
+import { TranscriptDrawer } from "./TranscriptDrawer";
 import {
   useSummaries,
   useUploadedAudio,
@@ -956,17 +957,34 @@ export function NoteView({
                       onTranscriptChanged?.();
                     }}
                   />
-                  {!isRecording && (
-                    <MergeTranscriptPanel
-                      noteId={note.id}
-                      onMerged={() => onTranscriptChanged?.()}
+                  {/* Both of these live in a drawer now. Below the transcript
+                      they gave the pane a second scrollbar, and neither bar
+                      looked like the one holding the rest. */}
+                  <TranscriptDrawer
+                    label={`History and sources${
+                      transcriptChain && transcriptChain.versions.length > 0
+                        ? ` · ${transcriptChain.versions.length} version${
+                            transcriptChain.versions.length === 1 ? "" : "s"
+                          }`
+                        : ""
+                    }${
+                      transcriptChain && !transcriptChain.intact
+                        ? " · chain broken"
+                        : ""
+                    }`}
+                  >
+                    {!isRecording && (
+                      <MergeTranscriptPanel
+                        noteId={note.id}
+                        onMerged={() => onTranscriptChanged?.()}
+                      />
+                    )}
+                    <TranscriptHistory
+                      chain={transcriptChain}
+                      loading={chainLoading}
+                      error={chainError}
                     />
-                  )}
-                  <TranscriptHistory
-                    chain={transcriptChain}
-                    loading={chainLoading}
-                    error={chainError}
-                  />
+                  </TranscriptDrawer>
                 </>
               ) : (
                 <div
