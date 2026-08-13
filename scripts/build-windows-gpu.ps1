@@ -232,9 +232,18 @@ $bundleConfig = '{"bundle":{"createUpdaterArtifacts":false}}'
 if ($Backend -eq 'cuda') {
     $stage = Join-Path $repo "src-tauri\cuda-runtime"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    $dlls = Get-ChildItem "$env:CUDA_PATH\bin" -Filter *.dll |
-            Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' }
-    if (-not $dlls) { throw "No cudart/cublas DLLs found in $env:CUDA_PATH\bin" }
+    # Searched recursively. CUDA 13 moved the runtime DLLs out of bin\ into a
+    # subdirectory, so a flat listing finds nothing on a perfectly good install
+    # and reports it as a missing toolkit. Recursion is right either way and
+    # does not care which layout this version uses.
+    $dlls = Get-ChildItem "$env:CUDA_PATH\bin" -Filter *.dll -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' } |
+            Group-Object Name | ForEach-Object { $_.Group[0] }
+    if (-not $dlls) {
+        $looked = (Get-ChildItem "$env:CUDA_PATH\bin" -Directory -ErrorAction SilentlyContinue |
+                   ForEach-Object { $_.FullName }) -join ", "
+        throw "No cudart/cublas DLLs under $env:CUDA_PATH\bin (searched recursively; subdirectories: $looked). Check the CUDA install."
+    }
     foreach ($d in $dlls) { Copy-Item $d.FullName $stage -Force; Write-Host "  staged $($d.Name)" }
     $bundleConfig = '{"bundle":{"createUpdaterArtifacts":false,"resources":{"cuda-runtime/*.dll":"./"}}}'
 }
