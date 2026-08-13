@@ -8,6 +8,7 @@ const REASON_LABEL: Record<TranscriptVersion["reason"], string> = {
   retranscribe: "Re-transcribed",
   edit: "Edited",
   import: "Imported",
+  merge: "Merged from another recording",
 };
 
 function formatWhen(iso: string): string {
@@ -198,16 +199,20 @@ export function TranscriptHistory({
                     >
                       {REASON_LABEL[v.reason]}
                     </span>
-                    {v.origin === "imported" && (
+                    {v.origin !== "recorded" && (
                       <span
                         className="px-1.5 py-0.5 text-xs rounded shrink-0"
                         style={{
                           backgroundColor: "rgba(245, 158, 11, 0.15)",
                           color: "#b45309",
                         }}
-                        title="Note67 did not produce this transcript; it was imported"
+                        title={
+                          v.origin === "imported"
+                            ? "Note67 did not produce this transcript; it was imported"
+                            : "Note67 recorded this, but some speaker names came from another tool"
+                        }
                       >
-                        Imported
+                        {v.origin === "imported" ? "Imported" : "Merged"}
                       </span>
                     )}
                     {v.version === latest.version && (
