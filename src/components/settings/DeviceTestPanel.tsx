@@ -150,30 +150,32 @@ export function DeviceTestPanel() {
           style={{ color: "var(--color-text-secondary)" }}
         >
           <p>
-            Note67 captures the other participants by recording what is{" "}
-            <em>played to</em> a device. So the device to pick is the one your
-            meeting app plays into, not the one you listen on.
+            VoiceMeeter <em>consumes</em> what an application plays into it and
+            re-emits the mix on its own <strong>recording</strong> devices. So
+            listening to what is played to its playback endpoint hears nothing,
+            however many of them you try — the audio has already been taken.
           </p>
           <ul className="list-disc ml-5 space-y-1">
             <li>
               <strong>Microphone:</strong> your physical mic, directly.
             </li>
             <li>
-              <strong>System audio:</strong> <code>VoiceMeeter Input</code> — the
-              virtual playback device.
+              <strong>System audio:</strong> one of the{" "}
+              <em>— recording device</em> entries, typically{" "}
+              <code>VoiceMeeter Out B1</code> or <code>B2</code>. These sit at
+              the bottom of the list.
             </li>
             <li>
-              <strong>In Teams or Zoom:</strong> set the speaker to{" "}
-              <code>VoiceMeeter Input</code> and the microphone to{" "}
-              <code>VoiceMeeter Output</code>.
+              <strong>In VoiceMeeter:</strong> route the virtual input carrying
+              the meeting to that bus, and make sure your microphone strip is{" "}
+              <em>not</em> routed to it — that is what keeps your own voice off
+              the other track.
             </li>
           </ul>
           <p>
-            Your voice reaches the meeting through the B1 bus and never enters
-            that virtual input, so the other track hears the participants and
-            not you. If the meeting app is still playing to your headphones
-            directly, the other track will be silent — which is the common
-            cause of a transcript containing only your own speech.
+            Ordinary speakers are different: for those, pick the playback
+            device you actually listen through and the loopback works. The
+            distinction only bites with a virtual mixer in the path.
           </p>
         </div>
       </details>

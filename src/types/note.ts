@@ -166,6 +166,15 @@ export interface AudioDevice {
    */
   id: string;
   name: string;
+  /**
+   * For a system-audio source: captured by loopback on a playback endpoint,
+   * or recorded from directly.
+   *
+   * Virtual mixers make this matter. VoiceMeeter consumes what an application
+   * plays into it and re-emits the mix on its own recording devices, so
+   * loopback on the playback side hears nothing.
+   */
+  isLoopback?: boolean;
   /** Whether this is the OS default for its direction */
   isDefault: boolean;
 }

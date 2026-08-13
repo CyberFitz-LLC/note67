@@ -81,10 +81,10 @@ fn get_default_render_device() -> Result<Device, AudioError> {
 /// name. Windows presents seven "Speakers (VB-Audio Voicemeeter VAIO)" on a
 /// machine with VoiceMeeter installed, and only one carries the audio an
 /// application is playing.
-fn render_device_entries() -> Result<Vec<DeviceEntry>, AudioError> {
+fn device_entries(direction: &Direction) -> Result<Vec<DeviceEntry>, AudioError> {
     ensure_com_initialized();
 
-    let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
+    let collection = DeviceCollection::new(direction).map_err(|e| {
         AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
     })?;
     let count = collection.get_nbr_devices().map_err(|e| {
@@ -104,6 +104,10 @@ fn render_device_entries() -> Result<Vec<DeviceEntry>, AudioError> {
     }
 
     Ok(entries)
+}
+
+fn render_device_entries() -> Result<Vec<DeviceEntry>, AudioError> {
+    device_entries(&Direction::Render)
 }
 
 fn render_device_names() -> Result<Vec<String>, AudioError> {
@@ -134,7 +138,39 @@ fn render_device_names() -> Result<Vec<String>, AudioError> {
 ///
 /// Names that collide are deduplicated: WASAPI is asked for a device *by name*,
 /// so a second identically-named entry could never actually be opened.
+/// Everything the system-audio track can be captured from.
+///
+/// Two kinds, and the distinction is the whole difficulty with virtual mixers.
+/// A **playback** endpoint is captured by loopback — listening to what is
+/// played to it — which is right for ordinary speakers. A **recording**
+/// endpoint is captured directly, which is the only thing that works for
+/// VoiceMeeter: it consumes what an application plays into its virtual input
+/// and re-emits the bus mix on its own recording devices, so loopback on the
+/// playback side hears silence no matter which endpoint is chosen.
 pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
+    let mut devices = list_loopback_devices()?;
+    devices.extend(list_capture_sources()?);
+    Ok(devices)
+}
+
+fn list_capture_sources() -> Result<Vec<AudioDevice>, AudioError> {
+    let entries = device_entries(&Direction::Capture)?;
+    let labels = disambiguate(&entries);
+    Ok(entries
+        .into_iter()
+        .zip(labels)
+        .map(|(entry, label)| AudioDevice {
+            id: entry.id,
+            // Named so the list says what it is. Two devices can otherwise
+            // carry near-identical names on opposite sides of the mixer.
+            name: format!("{label} — recording device"),
+            is_default: false,
+            is_loopback: false,
+        })
+        .collect())
+}
+
+fn list_loopback_devices() -> Result<Vec<AudioDevice>, AudioError> {
     let default_id = get_default_render_device().ok().and_then(|d| d.get_id().ok());
 
     let entries = render_device_entries()?;
@@ -153,6 +189,7 @@ pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
                 id: entry.id,
                 name: label,
                 is_default,
+                is_loopback: true,
             }
         })
         .collect())
@@ -163,6 +200,48 @@ pub fn list_render_devices() -> Result<Vec<AudioDevice>, AudioError> {
 /// Shares its rules with the microphone picker: an exact name match, and a
 /// pinned-but-absent device falls back rather than failing, because a meeting
 /// that records nothing is worse than one recorded from the wrong speakers.
+/// The device to capture the system track from, and whether to do it by
+/// loopback.
+///
+/// A recording device is opened directly: loopback is meaningless there, and
+/// asking for it fails rather than falling back.
+fn resolve_system_device(preferred: Option<&str>) -> Result<(Device, bool), AudioError> {
+    let Some(preferred) = preferred.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Ok((get_default_render_device()?, true));
+    };
+
+    // Recording devices are checked first: their ids are distinct, so this only
+    // matches something the user explicitly chose from that half of the list.
+    if let Ok(captures) = device_entries(&Direction::Capture)
+        && let Some(wanted) = find_device(&captures, preferred)
+        && let Ok(device) = open_by_id(&Direction::Capture, &wanted.id)
+    {
+        return Ok((device, false));
+    }
+
+    Ok((resolve_render_device(Some(preferred))?, true))
+}
+
+fn open_by_id(direction: &Direction, id: &str) -> Result<Device, AudioError> {
+    let collection = DeviceCollection::new(direction).map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to enumerate audio devices: {}", e))
+    })?;
+    let count = collection.get_nbr_devices().map_err(|e| {
+        AudioError::PermissionDenied(format!("Failed to count audio devices: {}", e))
+    })?;
+    for index in 0..count {
+        if let Ok(device) = collection.get_device_at_index(index)
+            && let Ok(found) = device.get_id()
+            && found == id
+        {
+            return Ok(device);
+        }
+    }
+    Err(AudioError::PermissionDenied(format!(
+        "Audio device {id} is no longer present"
+    )))
+}
+
 fn resolve_render_device(preferred: Option<&str>) -> Result<Device, AudioError> {
     let Some(preferred) = preferred.map(str::trim).filter(|p| !p.is_empty()) else {
         return get_default_render_device();
@@ -179,25 +258,10 @@ fn resolve_render_device(preferred: Option<&str>) -> Result<Device, AudioError> 
         return get_default_render_device();
     };
 
-    // Opened by index rather than by name. `get_device_with_name` returns the
+    // Opened by id rather than by name. `get_device_with_name` returns the
     // first endpoint with a matching name, which on a machine with seven
     // identically-named endpoints is almost never the one that was chosen.
-    let collection = DeviceCollection::new(&Direction::Render).map_err(|e| {
-        AudioError::PermissionDenied(format!("Failed to enumerate playback devices: {}", e))
-    })?;
-    let count = collection.get_nbr_devices().map_err(|e| {
-        AudioError::PermissionDenied(format!("Failed to count playback devices: {}", e))
-    })?;
-    for index in 0..count {
-        if let Ok(device) = collection.get_device_at_index(index)
-            && let Ok(id) = device.get_id()
-            && id == wanted.id
-        {
-            return Ok(device);
-        }
-    }
-
-    get_default_render_device()
+    open_by_id(&Direction::Render, &wanted.id).or_else(|_| get_default_render_device())
 }
 
 /// Downsample audio from source rate to 16kHz mono for Whisper
@@ -267,7 +331,7 @@ impl WindowsSystemAudioCapture {
 
         // A wasapi Device is neither Send nor Sync, so it cannot be handed to
         // this thread — only the name crosses, and the device is opened here.
-        let device = resolve_render_device(preferred_device.as_deref())?;
+        let (device, loopback) = resolve_system_device(preferred_device.as_deref())?;
 
         // Get the audio client for loopback capture
         let mut audio_client = device.get_iaudioclient().map_err(|e| {
@@ -295,7 +359,9 @@ impl WindowsSystemAudioCapture {
                 default_period.0 as i64, // Use default period
                 &Direction::Capture, // Need Capture to get capture client
                 &ShareMode::Shared,
-                true, // Enable loopback mode
+                // Loopback only for a playback endpoint. A recording device is
+                // already a capture source; asking for loopback on one fails.
+                loopback,
             )
             .map_err(|e| {
                 AudioError::PermissionDenied(format!("Failed to initialize audio client: {}", e))

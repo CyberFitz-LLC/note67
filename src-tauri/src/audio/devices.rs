@@ -29,6 +29,16 @@ pub struct AudioDevice {
     #[serde(default)]
     pub id: String,
     pub name: String,
+    /// For a system-audio source: whether it is captured by listening to what
+    /// is *played* to it (loopback on a playback endpoint) or by recording
+    /// from it directly.
+    ///
+    /// Virtual mixers make the difference matter. VoiceMeeter consumes what an
+    /// application plays into it and re-emits the mix on its own recording
+    /// devices, so loopback on the playback endpoint hears nothing while the
+    /// recording device carries everything.
+    #[serde(default)]
+    pub is_loopback: bool,
     /// Whether this is the operating system's current default for its direction.
     pub is_default: bool,
 }
@@ -94,6 +104,7 @@ pub fn list_input_devices() -> Result<Vec<AudioDevice>, AudioError> {
             id: String::new(),
             name,
             is_default,
+            is_loopback: false,
         });
     }
 
