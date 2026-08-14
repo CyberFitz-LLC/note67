@@ -36,7 +36,11 @@ param(
     # "a receipt exists for this meeting".
     [string]$NoteId,
 
-    [string]$NodeUrl = "https://exochain-production.up.railway.app"
+    [string]$NodeUrl = "https://exochain-production.up.railway.app",
+
+    # The full JSON. Off by default: an RFC-3161 token is several kilobytes of
+    # base64 and drowns everything worth reading.
+    [switch]$Raw
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,11 +113,42 @@ $signed = $null -ne $receipt.signature -and "$($receipt.signature)" -ne "Empty"
 Write-Host ("  signature       : {0}" -f $(if ($signed) { "present" } else { "MISSING" })) `
     -ForegroundColor $(if ($signed) { 'Green' } else { 'Red' })
 
+# Receipts are hash-chained on the node as well, so a receipt names the one
+# before it. A gap there would mean the node's own history had been edited.
 if ($receipt.previous_receipt_hash) {
     Write-Host ("  previous receipt: {0}" -f (ConvertTo-Hex $receipt.previous_receipt_hash))
 }
-if ($receipt.external_timestamp_proof) {
-    Write-Host ("  timestamp proof : {0}" -f $receipt.external_timestamp_proof.provenance)
+
+# What the node actually attested, in words. The most useful part of the whole
+# object and the easiest to overlook among the byte arrays.
+if ($receipt.action_descriptor) {
+    $d = $receipt.action_descriptor
+    Write-Host "`n--- what was attested ---" -ForegroundColor Cyan
+    Write-Host ("  actor           : {0}" -f $d.actor_did)
+    Write-Host ("  permission      : {0}" -f $d.requested_permission)
+    Write-Host ("  tool            : {0}" -f $d.tool)
+    Write-Host ("  data class      : {0}" -f $d.data_class)
+    Write-Host ("  human approval  : {0}" -f $(if ($d.requires_human_approval) { "required" } else { "not required" }))
+}
+
+# A third party's assertion that the receipt existed at a given moment. Without
+# it the node is the only witness to its own timing.
+if ($receipt.timestamp_provenance) {
+    Write-Host "`n--- independent timestamp ---" -ForegroundColor Cyan
+    Write-Host ("  provenance      : {0}" -f $receipt.timestamp_provenance)
+    $p = $receipt.external_timestamp_proof
+    if ($p) {
+        Write-Host ("  authority       : {0}" -f $p.authority_did)
+        if ($p.issued_at.physical_ms) {
+            $t = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$p.issued_at.physical_ms).UtcDateTime
+            Write-Host ("  stamped at      : {0:yyyy-MM-dd HH:mm:ss} UTC" -f $t)
+        }
+        if ($p.rfc3161) {
+            Write-Host ("  kind            : {0}" -f $p.proof_kind)
+            Write-Host ("  TSA             : {0}" -f ($p.rfc3161.tsa_subject -split ",")[0])
+            Write-Host ("  token           : {0} bytes of DER" -f [math]::Round($p.rfc3161.token_der_base64.Length * 3 / 4))
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -142,5 +177,9 @@ if ($NoteId) {
     }
 }
 
-Write-Host "`n--- raw ---" -ForegroundColor DarkGray
-$receipt | ConvertTo-Json -Depth 12
+if ($Raw) {
+    Write-Host "`n--- raw ---" -ForegroundColor DarkGray
+    $receipt | ConvertTo-Json -Depth 12
+} else {
+    Write-Host "`n(pass -Raw for the full object, including the RFC-3161 token)" -ForegroundColor DarkGray
+}
