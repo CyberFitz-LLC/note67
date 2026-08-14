@@ -10,6 +10,7 @@
 pub mod credential;
 pub mod emit;
 pub mod identity;
+pub mod verify;
 pub mod vtt;
 
 /// The canonical forms, which live in their own crate because the sync service

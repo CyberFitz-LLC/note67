@@ -13,7 +13,35 @@ export type Attestation =
   | { status: "pending"; reason: string }
   | { status: "denied"; reason: string };
 
+/**
+ * The transcript in hand, compared against every version recorded for it.
+ *
+ * Distinct from the chain being intact: a chain can verify perfectly against
+ * itself while the transcript underneath has been altered. This is the check a
+ * receipt exists for, and it needs no node and no network.
+ */
+export type Verification =
+  | { status: "empty" }
+  | { status: "untracked" }
+  | {
+      status: "matches";
+      version: number;
+      attested: boolean;
+      receiptHash?: string;
+      isLatest: boolean;
+    }
+  | {
+      status: "altered";
+      expectedHash: string;
+      actualHash: string;
+      latestVersion: number;
+    };
+
 export const exochainApi = {
+  /** Recompute the transcript's hash and compare it to what was recorded. */
+  verifyTranscript: (noteId: string): Promise<Verification> =>
+    invoke<Verification>("verify_transcript", { noteId }),
+
   /**
    * Ask a node to attest this note's current transcript.
    *

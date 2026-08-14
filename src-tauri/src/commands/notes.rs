@@ -337,6 +337,37 @@ pub fn get_transcript_chain(db: State<Database>, note_id: String) -> Result<Tran
     })
 }
 
+/// Check the transcript in hand against every version recorded for it.
+///
+/// The chain proves its own links; this proves the content still matches one of
+/// them. A chain can verify perfectly while the transcript underneath it has
+/// been altered, and that is precisely the case a receipt exists to catch.
+#[tauri::command]
+pub fn verify_transcript(
+    db: State<Database>,
+    note_id: String,
+) -> Result<crate::exochain::verify::Verification, String> {
+    let segments: Vec<crate::exochain::CanonicalSegment> = db
+        .get_transcript_segments(&note_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|s| {
+            crate::exochain::CanonicalSegment::from_seconds(
+                s.start_time,
+                s.end_time,
+                s.speaker,
+                s.text,
+            )
+        })
+        .collect();
+
+    let versions = db
+        .get_transcript_versions(&note_id)
+        .map_err(|e| e.to_string())?;
+
+    Ok(crate::exochain::verify::verify_current(&segments, &versions))
+}
+
 #[tauri::command]
 pub fn delete_note(
     app_handle: AppHandle,

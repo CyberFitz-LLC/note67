@@ -369,6 +369,7 @@ pub fn run() {
             commands::set_segment_speaker,
             commands::install_exochain_credential,
             commands::remove_exochain_credential,
+            commands::verify_transcript,
             commands::attest_meeting,
             commands::get_exochain_identity,
             commands::create_note,

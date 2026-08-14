@@ -14,6 +14,7 @@ import { exportApi, importApi, notesApi, tasksApi, transcriptionApi } from "../a
 import { buildNoteContext, withNoteContext } from "./noteContext";
 import { MergeTranscriptPanel } from "./MergeTranscriptPanel";
 import { TranscriptDrawer } from "./TranscriptDrawer";
+import { TranscriptVerification } from "./TranscriptVerification";
 import {
   useSummaries,
   useUploadedAudio,
@@ -956,6 +957,14 @@ export function NoteView({
                       }
                       onTranscriptChanged?.();
                     }}
+                  />
+                  {/* Above the drawer, not inside it: a tamper signal behind
+                      a collapsed panel is one nobody sees. */}
+                  <TranscriptVerification
+                    noteId={note.id}
+                    refreshKey={`${transcript.length}:${
+                      transcript[transcript.length - 1]?.id ?? 0
+                    }:${transcriptChain?.versions.length ?? 0}`}
                   />
                   {/* Both of these live in a drawer now. Below the transcript
                       they gave the pane a second scrollbar, and neither bar
