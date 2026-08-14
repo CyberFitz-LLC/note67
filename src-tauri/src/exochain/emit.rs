@@ -244,6 +244,24 @@ mod tests {
     }
 
     #[test]
+    fn the_action_id_is_a_plain_sha256_of_domain_and_note() {
+        // scripts/fetch-receipt.ps1 recomputes this in PowerShell to prove a
+        // receipt is about a given meeting. Two implementations of one hash
+        // will drift unless the value is pinned somewhere both can be checked
+        // against — this is that somewhere.
+        //
+        //   SHA-256("note67.action.v1|meeting-attest|" + "test-note")
+        let mut hasher = Sha256::new();
+        hasher.update(b"note67.action.v1|meeting-attest|test-note");
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(action_id("test-note").as_bytes(), &expected);
+        assert_eq!(
+            hex::encode(action_id("test-note").as_bytes()),
+            "f572fe306a5452c4dd9fdfb2b889c8340f31d4826e74f01cddeeb9d991eddca7"
+        );
+    }
+
+    #[test]
     fn different_notes_get_different_action_ids() {
         assert_ne!(action_id("note-1"), action_id("note-2"));
     }
