@@ -159,3 +159,46 @@ us toward that requirement. R8 stays excluded.
 
 1–2 are independent of any node being reachable, so they can land first and be
 useful on their own.
+
+## Sending audio off the machine for transcription (2026-08-16)
+
+`SCOPING.md` says "govern egress, leave capture local". That was written when
+capture *was* local in every sense: audio went to Whisper in this process and
+never touched a network. A remote recogniser breaks the assumption that sentence
+was resting on, so it is worth writing down rather than left inferred.
+
+**The decision: the recording may be sent, and the setting defaults to Local.**
+
+Local Whisper cannot separate speakers. It hears one voice per track, so a
+ten-person meeting transcribes as "You" and "Others" — and Teams, which used to
+supply the real names, stopped providing transcripts. A diarizing recogniser is
+the only way left to answer "who said that", and it has to see the audio.
+
+What bounds it:
+
+- **Default Local, and every unrecognised setting resolves to Local.** A
+  hand-edited or half-written value must not start shipping recordings. The
+  failure falls towards keeping audio at home.
+- **Uploads only.** Live transcription stays in-process: a remote round trip per
+  three-second chunk would be slower than the meeting, and a network blip would
+  drop words nobody can recover.
+- **No silent substitution.** A remote failure surfaces as a failure rather than
+  quietly falling back to Whisper, because a transcript labelled entirely
+  "Uploaded" looks like the diarizer having a bad day rather than a recogniser
+  that never ran.
+
+**Provenance: `Origin::Recorded`, and nothing about hashing or receipts
+changes.** `Recorded` asserts the pipeline was observed, not that the compute was
+local — the audio is ours, fed to a recogniser we chose, on hardware we own.
+`Merged` is for borrowed *names*, and `Speaker 1` is not a name; `merge::is_generic`
+already classifies that exact shape as a placeholder. Machine labels under
+`Recorded` is existing tested precedent — "You", "Others", "Uploaded".
+
+**What this does NOT cover, and must not be read as covering.** Sending audio to
+the Spark is *egress*, and the credential authorises `note67.meeting.attest`
+with `counterparties: []`. Nothing attests that this content left the machine.
+The LYNK LLM-usage receipt is the mechanism and needs a counterparty DID for the
+endpoint — [exochained-toolkit#4](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/4),
+still open. So the receipts describe the transcript and say nothing about where
+its audio has been. That gap is real, it is the first of its kind in this app,
+and it should close before anyone describes the receipts as covering custody.
