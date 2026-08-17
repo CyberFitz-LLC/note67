@@ -12,6 +12,14 @@ pub struct TranscriptionSegment {
     pub start_time: f64,
     pub end_time: f64,
     pub text: String,
+    /// Who was speaking, when the recogniser could tell.
+    ///
+    /// Always `None` from local Whisper, which hears one voice per track and
+    /// has no diarizer — attribution there comes from which file a segment was
+    /// read out of, and is attached further up. A remote recogniser that
+    /// diarizes fills this in with `Speaker 1..N`: placeholders, not names.
+    #[serde(default)]
+    pub speaker: Option<String>,
 }
 
 /// Result of a transcription
@@ -159,6 +167,10 @@ impl Transcriber {
                     start_time,
                     end_time,
                     text,
+                    // Local Whisper has no diarizer. Attribution comes from
+                    // which track a segment was read out of, and is attached
+                    // further up.
+                    speaker: None,
                 });
             }
         }

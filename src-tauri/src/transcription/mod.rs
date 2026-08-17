@@ -1,5 +1,7 @@
 pub mod live;
 pub mod model;
+pub mod backend;
+pub mod remote;
 pub mod transcriber;
 
 pub use live::{AudioSource, LiveTranscriptionState, TranscriptionUpdateEvent};

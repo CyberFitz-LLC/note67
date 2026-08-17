@@ -582,6 +582,7 @@ fn transcribe_samples(
                 start_time,
                 end_time,
                 text,
+                speaker: None,
             });
         }
     }

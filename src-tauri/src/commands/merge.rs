@@ -179,7 +179,25 @@ pub fn set_segment_speaker(
     // Naming a speaker changes what the transcript says, so it appends to the
     // chain. Without this the chain would have a blind spot exactly where the
     // most human-meaningful edits happen.
-    db.record_transcript_version(&note_id, Origin::Merged, Reason::Edit)
+    //
+    // The origin is CARRIED FORWARD, not forced to Merged. A hand-typed name
+    // came from the person who was in the meeting — the strongest attribution
+    // available, not a borrowed one — so stamping Merged on a recording of your
+    // own would claim some names came from another tool when none did. That
+    // was tolerable while relabelling was an edge case; with a diarizer
+    // emitting `Speaker 1..N` it becomes the main path, and a note would flip
+    // to Merged the moment anyone put a real name to a voice.
+    //
+    // A note that is already Merged stays Merged: editing it does not unborrow
+    // the names it took.
+    let origin = db
+        .latest_transcript_version(&note_id)
+        .ok()
+        .flatten()
+        .map(|v| v.origin)
+        .unwrap_or(Origin::Recorded);
+
+    db.record_transcript_version(&note_id, origin, Reason::Edit)
         .map_err(|e| e.to_string())
 }
 
