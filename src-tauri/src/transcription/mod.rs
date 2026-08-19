@@ -1,3 +1,4 @@
+pub mod live_stream;
 pub mod live;
 pub mod model;
 pub mod backend;

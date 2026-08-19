@@ -32,7 +32,7 @@ fn rms(samples: &[f32]) -> f32 {
 }
 
 /// Peak the mic chunk aims for after normalization.
-const MIC_TARGET_PEAK: f32 = 0.3;
+pub(crate) const MIC_TARGET_PEAK: f32 = 0.3;
 /// Ceiling on the normalization gain. This is the safety property: it stops
 /// near-silence being amplified up to speech level, so the voice-activity gate
 /// downstream still separates the two.
@@ -41,14 +41,14 @@ const MIC_TARGET_PEAK: f32 = 0.3;
 /// to reach the target, so the cap never binds on speech, while the noise floor
 /// would have needed 25–46x and is clamped here. That leaves speech landing at
 /// RMS 0.026–0.033 and noise at most 0.012, with the 0.02 gate between them.
-const MIC_MAX_GAIN: f32 = 8.0;
+pub(crate) const MIC_MAX_GAIN: f32 = 8.0;
 
 /// Scale `samples` up toward `target_peak`, never by more than `max_gain`.
 ///
 /// Whisper (and the RMS gate) expect roughly line-level audio. Some mics sit
 /// tens of dB below full scale, which made both behave as if nothing was said.
 /// Only ever amplifies — already-loud audio is left alone.
-fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+pub(crate) fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     if peak <= f32::EPSILON {
         return;
@@ -601,7 +601,7 @@ fn num_cpus() -> i32 {
         .min(8)
 }
 
-fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+pub(crate) fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     let ratio = to_rate as f64 / from_rate as f64;
     let new_len = (samples.len() as f64 * ratio) as usize;
     let mut result = Vec::with_capacity(new_len);

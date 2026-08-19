@@ -200,3 +200,376 @@ mod tests {
         assert_ne!(mic.seconds(), system.seconds());
     }
 }
+
+// ---------------------------------------------------------------------------
+// The socket
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+
+/// What a session hands back as it recognises.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Recognised {
+    /// Redrawn in place; never persisted.
+    Partial { text: String },
+    /// Persisted, with the span it covers on this track.
+    Final {
+        text: String,
+        start_time: f64,
+        end_time: f64,
+    },
+    /// The socket is gone. The caller must stop recording into it rather than
+    /// carry on with no recogniser attached — a meeting that appears to be
+    /// recording and is not is the worst outcome this feature can produce.
+    Disconnected { reason: String },
+}
+
+/// One track's connection.
+///
+/// Audio goes in through `send`, recognitions come out through the receiver
+/// returned by `connect`. Dropping the session closes the socket.
+pub struct StreamingSession {
+    audio: mpsc::Sender<Vec<u8>>,
+    alive: Arc<AtomicBool>,
+}
+
+impl StreamingSession {
+    /// Whether the socket is still up.
+    ///
+    /// Checked by the capture loop before each send, so a dead connection stops
+    /// the recording rather than being discovered when someone reads the
+    /// transcript afterwards.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Queue a chunk. Returns false once the socket is gone.
+    ///
+    /// Never blocks the capture loop: audio arrives on a real-time thread, and
+    /// waiting on a network send there would drop samples. A full queue means
+    /// the recogniser is behind, which is worth reporting rather than hiding.
+    pub fn send(&self, pcm: Vec<u8>) -> bool {
+        if !self.is_alive() {
+            return false;
+        }
+        self.audio.try_send(pcm).is_ok()
+    }
+}
+
+/// How long to wait after asking for a final before closing the socket.
+///
+/// The recogniser answers a finalize asynchronously, so closing straight away
+/// discards whatever was still being decoded — which is always the end of the
+/// meeting, the part people go back to.
+pub const FINALIZE_GRACE: Duration = Duration::from_millis(1500);
+
+/// How many chunks may queue before the sender gives up.
+///
+/// Three seconds. Enough to ride out a stall; short enough that a recogniser
+/// which has stopped keeping up is noticed while the meeting is still running.
+pub const QUEUE_CHUNKS: usize = 30;
+
+/// Open a session for one track.
+pub async fn connect(
+    ws_url: &str,
+    label: &'static str,
+) -> Result<(StreamingSession, mpsc::Receiver<Recognised>), String> {
+    let (socket, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|e| format!("could not open a {label} stream: {e}"))?;
+    let (mut write, mut read) = socket.split();
+
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(QUEUE_CHUNKS);
+    let (out_tx, out_rx) = mpsc::channel::<Recognised>(64);
+    let alive = Arc::new(AtomicBool::new(true));
+
+    // This track's clock, shared between the writer that advances it and the
+    // reader that stamps finals with it. Per session, never global: two tracks
+    // are gated for silence independently, so a shared counter would timestamp
+    // every segment on whichever track happened to be busier.
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    // Writer: audio out.
+    let writer_alive = Arc::clone(&alive);
+    let writer_sent = Arc::clone(&sent);
+    tokio::spawn(async move {
+        while let Some(pcm) = audio_rx.recv().await {
+            // Two bytes per sample, s16le.
+            let samples = pcm.len() / 2;
+            if write
+                .send(tokio_tungstenite::tungstenite::Message::Binary(pcm))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            // Advanced only after the send succeeds, so the clock never claims
+            // audio the recogniser was not given.
+            writer_sent.fetch_add(samples, Ordering::SeqCst);
+        }
+        // Ask for the last utterance before going. A final that never arrives
+        // is speech the user said and the transcript will not contain.
+        let _ = write
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                finalize_frame(),
+            ))
+            .await;
+
+        // Then give that final time to come back, and only then close.
+        //
+        // Both halves matter. Without the wait, the close races the last
+        // utterance and truncates the end of the meeting. Without the close,
+        // the server holds the connection open and the reader below never
+        // returns — the socket and its task leak for the life of the app, one
+        // pair per recording. The first version of this did exactly that and
+        // hung a live test for ten minutes.
+        tokio::time::sleep(FINALIZE_GRACE).await;
+        let _ = write
+            .send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await;
+        let _ = write.close().await;
+        writer_alive.store(false, Ordering::SeqCst);
+    });
+
+    // Reader: recognitions in, with this track's own clock.
+    let reader_alive = Arc::clone(&alive);
+    let reader_sent = Arc::clone(&sent);
+    tokio::spawn(async move {
+        let mut clock = TrackClock::default();
+        let mut last_final = TrackClock::default();
+
+        while let Some(message) = read.next().await {
+            let Ok(message) = message else { break };
+            let frame = match message {
+                tokio_tungstenite::tungstenite::Message::Text(t) => t,
+                // Binary and control frames carry nothing this client reads.
+                _ => continue,
+            };
+
+            match parse_event(&frame) {
+                ServerEvent::Transcript { text, is_final } if is_final => {
+                    // Empty finals are ordinary — silence, or the finalize that
+                    // ends a session — and persisting them would litter the
+                    // transcript with blank segments.
+                    if !text.trim().is_empty() {
+                        let (start_time, end_time) = clock.span_since(&last_final);
+                        if out_tx
+                            .send(Recognised::Final {
+                                text: text.trim().to_string(),
+                                start_time,
+                                end_time,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    last_final = clock;
+                }
+                ServerEvent::Transcript { text, .. } => {
+                    if out_tx.send(Recognised::Partial { text }).await.is_err() {
+                        break;
+                    }
+                }
+                ServerEvent::Ready | ServerEvent::Unknown => {}
+            }
+
+            // Read from the writer's counter rather than tracked here: the
+            // reader never sees the audio, only what came back from it.
+            clock.samples_sent = reader_sent.load(Ordering::SeqCst);
+        }
+
+        reader_alive.store(false, Ordering::SeqCst);
+        let _ = out_tx
+            .send(Recognised::Disconnected {
+                reason: format!("the {label} stream closed"),
+            })
+            .await;
+    });
+
+    Ok((
+        StreamingSession {
+            audio: audio_tx,
+            alive,
+        },
+        out_rx,
+    ))
+}
+
+/// Tests that open a real socket.
+///
+/// Separate from the protocol tests above, which are pure. One of these stands
+/// up a fake recogniser in-process and runs in the ordinary suite; the other is
+/// `#[ignore]`d and needs the actual service.
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    /// Exercises the real client against a real recogniser, on two concurrent
+    /// sockets — the shape this backend actually runs in.
+    ///
+    /// Ignored by default: it needs the service and two speech clips. The
+    /// clips are deliberately different sentences, so a crossed stream shows up
+    /// as a failed assertion rather than as plausible-looking text.
+    ///
+    ///   espeak-ng -w a.wav "The access code is seven four two nine."
+    ///   espeak-ng -w b.wav "Please send the quarterly report on Monday morning."
+    ///   ffmpeg -i a.wav -ar 16000 -ac 1 -f s16le a.pcm      # and b
+    ///
+    ///   NOTE67_ASR_URL=ws://192.168.32.223:8080 \
+    ///   NOTE67_ASR_CLIP_A=a.pcm NOTE67_ASR_CLIP_B=b.pcm \
+    ///   cargo test --lib two_concurrent_sessions -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs a live recogniser and speech clips"]
+    async fn two_concurrent_sessions_transcribe_without_crossing() {
+        fn pcm_to_f32(bytes: &[u8]) -> Vec<f32> {
+            bytes
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+                .collect()
+        }
+
+        async fn play(url: String, label: &'static str, path: String) -> String {
+            let samples = pcm_to_f32(&std::fs::read(&path).expect("clip"));
+            let (session, mut rx) = connect(&url, label).await.expect("connect");
+
+            tokio::spawn(async move {
+                for frame in samples.chunks(CHUNK_SAMPLES) {
+                    if !session.send(to_s16le(frame)) {
+                        break;
+                    }
+                    // Paced like real time: firing a backlog at a streaming
+                    // recogniser is not the path this runs in.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        CHUNK_MS as u64,
+                    ))
+                    .await;
+                }
+                // Dropping closes the socket, via the finalize-then-close the
+                // writer performs on its way out.
+                drop(session);
+            });
+
+            let mut finals: Vec<String> = Vec::new();
+            let mut partials = 0usize;
+            // A backstop, not a timing assumption: if the session ever stops
+            // ending itself the test says so in seconds instead of hanging.
+            let deadline = std::time::Duration::from_secs(60);
+            while let Ok(Some(item)) = tokio::time::timeout(deadline, rx.recv()).await {
+                match item {
+                    Recognised::Partial { .. } => partials += 1,
+                    Recognised::Final {
+                        text,
+                        start_time,
+                        end_time,
+                    } => {
+                        println!("[{label}] final {start_time:.2}-{end_time:.2}s  {text}");
+                        finals.push(text);
+                    }
+                    Recognised::Disconnected { reason } => {
+                        println!("[{label}] {reason} after {partials} partial(s)");
+                        break;
+                    }
+                }
+            }
+            assert!(partials > 0, "{label} saw no partials");
+            finals.join(" ").to_lowercase()
+        }
+
+        let url = std::env::var("NOTE67_ASR_URL")
+            .unwrap_or_else(|_| "ws://192.168.32.223:8080".into());
+        let a = std::env::var("NOTE67_ASR_CLIP_A").expect("NOTE67_ASR_CLIP_A");
+        let b = std::env::var("NOTE67_ASR_CLIP_B").expect("NOTE67_ASR_CLIP_B");
+
+        let (mic, system) = tokio::join!(
+            play(url.clone(), "mic", a),
+            play(url, "system", b),
+        );
+
+        println!("mic    : {mic}");
+        println!("system : {system}");
+        assert!(mic.contains("access code"), "mic transcript wrong: {mic}");
+        assert!(
+            system.contains("quarterly"),
+            "system transcript wrong: {system}"
+        );
+        // The failure this is really for: two sockets served by one session on
+        // the far side, so both tracks come back with the same words.
+        assert!(!mic.contains("quarterly"), "the tracks crossed: {mic}");
+        assert!(!system.contains("access code"), "the tracks crossed: {system}");
+    }
+
+    /// A recogniser that dies mid-recording must not take finished work with
+    /// it, and must not leave the caller streaming into a socket that is gone.
+    ///
+    /// Uses a fake recogniser in-process rather than the real one, because the
+    /// interesting moment — the far end vanishing part-way through a meeting —
+    /// is not something you can ask a working service to do.
+    #[tokio::test]
+    async fn a_socket_that_dies_keeps_its_finals_and_reports_the_loss() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            use tokio_tungstenite::tungstenite::Message;
+            let _ = ws.send(Message::Text(r#"{"type":"ready"}"#.into())).await;
+            let _ = ws
+                .send(Message::Text(
+                    r#"{"type":"transcript","text":"we agreed on Thursday","is_final":true}"#
+                        .into(),
+                ))
+                .await;
+            // And now the service goes away, mid-recording, without a close
+            // handshake — a container restart, not a polite shutdown.
+            drop(ws);
+        });
+
+        let (session, mut rx) = connect(&format!("ws://{addr}"), "test")
+            .await
+            .expect("connect");
+
+        let mut finals = Vec::new();
+        let mut lost = None;
+        while let Ok(Some(item)) =
+            tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+        {
+            match item {
+                Recognised::Final { text, .. } => finals.push(text),
+                Recognised::Disconnected { reason } => {
+                    lost = Some(reason);
+                    break;
+                }
+                Recognised::Partial { .. } => {}
+            }
+        }
+
+        assert_eq!(
+            finals,
+            vec!["we agreed on Thursday".to_string()],
+            "a final that arrived before the socket died must still be delivered"
+        );
+        assert!(
+            lost.is_some(),
+            "the caller has to be told, or it carries on recording into nothing"
+        );
+
+        // And the session reports itself dead, which is what stops the capture
+        // loop feeding audio nowhere.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!session.is_alive());
+        assert!(!session.send(vec![0, 0]), "a dead session accepts no audio");
+    }
+}

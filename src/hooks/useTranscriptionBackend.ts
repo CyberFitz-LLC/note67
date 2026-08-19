@@ -2,18 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 
 import { settingsApi } from "../api";
 
-export type TranscriptionBackend = "local" | "remote";
+export type TranscriptionBackend = "local" | "remote" | "streaming";
 
 export const BACKEND_KEY = "transcription_backend";
 export const BASE_URL_KEY = "transcription_base_url";
 export const API_KEY_KEY = "transcription_api_key";
 export const MAX_SPEAKERS_KEY = "transcription_max_speakers";
+export const STREAM_URL_KEY = "transcription_stream_url";
 
 export interface TranscriptionConfig {
   backend: TranscriptionBackend;
   baseUrl: string;
   apiKey: string;
   maxSpeakers: string;
+  streamUrl: string;
 }
 
 export const DEFAULT_CONFIG: TranscriptionConfig = {
@@ -21,6 +23,7 @@ export const DEFAULT_CONFIG: TranscriptionConfig = {
   baseUrl: "",
   apiKey: "",
   maxSpeakers: "",
+  streamUrl: "",
 };
 
 /**
@@ -37,6 +40,26 @@ export function willUseRemote(config: TranscriptionConfig): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
+/**
+ * Whether a saved config would actually stream live audio off the device.
+ *
+ * Same purpose as `willUseRemote`, and the same mirror of `resolve` — but this
+ * one is also the honest label for the most sensitive setting in the app, so it
+ * has to be exact. A URL that is nearly right must read as "not streaming",
+ * never as "streaming".
+ */
+export function willStream(config: TranscriptionConfig): boolean {
+  if (config.backend !== "streaming") return false;
+  const url = config.streamUrl.trim();
+  return url.startsWith("ws://") || url.startsWith("wss://");
+}
+
+function readBackend(value: string | null | undefined): TranscriptionBackend {
+  if (value === "remote") return "remote";
+  if (value === "streaming") return "streaming";
+  return "local";
+}
+
 export function useTranscriptionBackend() {
   const [config, setConfig] = useState<TranscriptionConfig | null>(null);
   const [saving, setSaving] = useState(false);
@@ -45,14 +68,24 @@ export function useTranscriptionBackend() {
   useEffect(() => {
     let cancelled = false;
     settingsApi
-      .getMultiple([BACKEND_KEY, BASE_URL_KEY, API_KEY_KEY, MAX_SPEAKERS_KEY])
+      .getMultiple([
+        BACKEND_KEY,
+        BASE_URL_KEY,
+        API_KEY_KEY,
+        MAX_SPEAKERS_KEY,
+        STREAM_URL_KEY,
+      ])
       .then((values) => {
         if (cancelled) return;
         setConfig({
-          backend: values[BACKEND_KEY] === "remote" ? "remote" : "local",
+          // Anything unrecognised reads as local, matching
+          // `BackendKind::from_setting`: a partly-written setting must not
+          // present as one that ships audio off the machine.
+          backend: readBackend(values[BACKEND_KEY]),
           baseUrl: values[BASE_URL_KEY] ?? "",
           apiKey: values[API_KEY_KEY] ?? "",
           maxSpeakers: values[MAX_SPEAKERS_KEY] ?? "",
+          streamUrl: values[STREAM_URL_KEY] ?? "",
         });
       })
       .catch((e) => {
@@ -75,6 +108,7 @@ export function useTranscriptionBackend() {
       await settingsApi.set(BASE_URL_KEY, next.baseUrl.trim());
       await settingsApi.set(API_KEY_KEY, next.apiKey.trim());
       await settingsApi.set(MAX_SPEAKERS_KEY, next.maxSpeakers.trim());
+      await settingsApi.set(STREAM_URL_KEY, next.streamUrl.trim());
       setConfig(next);
       return true;
     } catch (e) {

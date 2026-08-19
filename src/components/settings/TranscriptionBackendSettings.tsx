@@ -2,12 +2,13 @@ import { useState } from "react";
 
 import {
   DEFAULT_CONFIG,
+  willStream,
   willUseRemote,
   type TranscriptionConfig,
 } from "../../hooks/useTranscriptionBackend";
 
 /**
- * Which recogniser transcribes uploaded audio.
+ * Which recogniser transcribes audio.
  *
  * Edits are local until Save, so a half-typed URL is never applied — the same
  * rule the AI provider form follows, and for the same reason.
@@ -27,7 +28,9 @@ export function TranscriptionBackendSettings({
   const [saved, setSaved] = useState(false);
 
   const remote = draft.backend === "remote";
+  const streaming = draft.backend === "streaming";
   const willSend = willUseRemote(draft);
+  const willSendLive = willStream(draft);
 
   const field = (
     label: string,
@@ -68,18 +71,12 @@ export function TranscriptionBackendSettings({
           className="text-sm font-semibold mb-1"
           style={{ color: "var(--color-text)" }}
         >
-          Transcribing uploaded audio
+          Transcription
         </h3>
         <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
           Whisper runs here and hears one voice per track, so a meeting comes
-          back as "You" and "Others". A remote recogniser can separate speakers —
-          at the cost of sending the recording to it.
-        </p>
-        <p
-          className="text-sm mt-2"
-          style={{ color: "var(--color-text-secondary)" }}
-        >
-          Live transcription always runs here, whatever this is set to.
+          back as "You" and "Others". A remote recogniser can do better — at the
+          cost of sending your audio to it.
         </p>
       </div>
 
@@ -93,8 +90,13 @@ export function TranscriptionBackendSettings({
             ],
             [
               "remote",
-              "Send to a recogniser",
-              "Separates speakers into Speaker 1, Speaker 2… which you can then rename.",
+              "Send finished recordings to a recogniser",
+              "Separates speakers into Speaker 1, Speaker 2… which you can then rename. Live transcription still runs here.",
+            ],
+            [
+              "streaming",
+              "Stream live audio to a recogniser",
+              "Better live transcription, but the microphone and meeting audio are sent continuously while you record, and speakers are not identified.",
             ],
           ] as const
         ).map(([value, label, hint]) => (
@@ -180,6 +182,59 @@ export function TranscriptionBackendSettings({
         </div>
       )}
 
+      {streaming && (
+        <div className="space-y-3">
+          {field(
+            "Recogniser address",
+            draft.streamUrl,
+            (streamUrl) => setDraft({ ...draft, streamUrl }),
+            "ws://192.168.32.223:8080",
+          )}
+
+          {!willSendLive && (
+            <p className="text-sm" style={{ color: "#eab308" }}>
+              Not usable yet — an address starting <code>ws://</code> or{" "}
+              <code>wss://</code> is needed. Until then everything is
+              transcribed on this machine.
+            </p>
+          )}
+
+          {/* The most sensitive setting in the app, so it is spelled out rather
+              than implied. Someone turning this on is agreeing to send the room
+              as it is heard, including whatever is said before anyone decides
+              the meeting matters. */}
+          {willSendLive && (
+            <div
+              className="p-3 rounded-lg space-y-2 text-sm"
+              style={{
+                backgroundColor: "var(--color-bg-subtle)",
+                border: "1px solid #eab308",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              <p style={{ color: "var(--color-text)" }}>
+                While you record, your microphone and the meeting audio are sent
+                continuously to this address.
+              </p>
+              <p>
+                That includes anything said before you decide the meeting
+                matters. Nothing attests where the audio went — receipts
+                describe the transcript, not its audio.
+              </p>
+              <p>
+                This recogniser does not identify speakers. Everything you say
+                is labelled "You" and everything from the meeting "Others",
+                which is all the app can tell without a diarizer.
+              </p>
+              <p>
+                <code>ws://</code> is unencrypted. Use it only on a network you
+                trust.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {error && (
         <p className="text-sm" style={{ color: "#ef4444" }}>
           {error}
@@ -203,7 +258,7 @@ export function TranscriptionBackendSettings({
         </button>
         {saved && (
           <span className="text-sm" style={{ color: "#22c55e" }}>
-            Saved — applies to the next upload.
+            Saved — applies to the next recording.
           </span>
         )}
         <button

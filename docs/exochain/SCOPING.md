@@ -43,6 +43,7 @@ decided deliberately rather than discovered late.
 | Summarize via a **remote** model endpoint | **Yes** | Transcript leaves the machine |
 | Export / share a note | **Yes** | Provenance leaves the user's control |
 | Change the configured model endpoint | **Yes** (receipt) | Rare, high-leverage, the moment policy would be subverted |
+| Transcribe via a **remote** recogniser (upload, or live streaming) | **No, for now** | Audio, not a transcript. Receipts attest what a transcript *is*; there is no counterparty DID for a recogniser to attest where audio went, so a receipt here would be evidence-shaped rather than evidence. Bounded in code instead — see [DECISIONS.md](DECISIONS.md), 2026-08-19 |
 
 This became worth doing only recently. Before the AI-provider work
 (`src-tauri/src/ai/provider.rs`), no transcript could leave the device at all.

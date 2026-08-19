@@ -8,7 +8,8 @@ use crate::commands::audio::AudioState;
 use crate::db::models::NewTranscriptSegment;
 use crate::db::Database;
 use crate::transcription::{
-    is_echo_of_system, live, should_skip_segment, LiveTranscriptionState, ModelInfo, ModelManager,
+    is_echo_of_system, live, live_stream, should_skip_segment, LiveTranscriptionState, ModelInfo,
+    ModelManager,
     ModelSize, TranscriptionResult, Transcriber,
 };
 
@@ -428,6 +429,11 @@ pub fn add_transcript_segment(
 }
 
 /// Start live transcription during recording
+///
+/// Routes to the streaming recogniser or to local whisper depending on the
+/// configured backend. The two cannot both run: they drain the same capture
+/// buffers, so whichever ran second would be transcribing the gaps in the
+/// first one's audio.
 #[tauri::command]
 pub async fn start_live_transcription(
     app: AppHandle,
@@ -435,15 +441,44 @@ pub async fn start_live_transcription(
     language: Option<String>,
     state: State<'_, TranscriptionState>,
     audio_state: State<'_, AudioState>,
+    db: State<'_, Database>,
 ) -> Result<(), String> {
-    // Get the whisper context
+    use crate::transcription::backend;
+
+    // Read per start rather than cached, so changing the setting takes effect
+    // on the next recording instead of the next restart.
+    let get = |key: &str| db.get_setting(key).ok().flatten();
+    let resolved = backend::resolve(
+        &get(backend::BACKEND_KEY).unwrap_or_default(),
+        get(backend::BASE_URL_KEY).as_deref(),
+        get(backend::API_KEY_KEY).as_deref(),
+        get(backend::MAX_SPEAKERS_KEY).as_deref(),
+        get(backend::STREAM_URL_KEY).as_deref(),
+    );
+
+    let recording_state = audio_state.recording.clone();
+    let live_state = state.live_state.clone();
+
+    // Streaming needs no local model, so it must not be gated behind one — a
+    // user on this backend may never have downloaded a whisper model at all.
+    if let backend::Backend::Streaming { ws_url } = resolved {
+        return live_stream::start_streaming_transcription(
+            app,
+            note_id,
+            ws_url,
+            recording_state,
+            live_state,
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
+
+    // Anything else transcribes locally. `resolve` already returns Local for a
+    // remote backend that is unusable, so this is also the fall-back path.
     let whisper_ctx = {
         let guard = state.whisper_ctx.lock().map_err(|e| e.to_string())?;
         guard.clone().ok_or("No model loaded. Please load a model first.")?
     };
-
-    let recording_state = audio_state.recording.clone();
-    let live_state = state.live_state.clone();
 
     live::start_live_transcription(app, note_id, language, recording_state, live_state, whisper_ctx)
         .await
