@@ -174,6 +174,10 @@ pub async fn transcribe_uploaded_audio(
             .ok()
             .flatten()
             .as_deref(),
+        // Uploads never stream: this path has a finished file, and the
+        // streaming recogniser has nothing to offer it that the diarizing one
+        // does not do better.
+        None,
     );
 
     if let crate::transcription::backend::Backend::Remote {

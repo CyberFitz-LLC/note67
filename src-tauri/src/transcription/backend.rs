@@ -17,6 +17,7 @@ pub const BACKEND_KEY: &str = "transcription_backend";
 pub const BASE_URL_KEY: &str = "transcription_base_url";
 pub const API_KEY_KEY: &str = "transcription_api_key";
 pub const MAX_SPEAKERS_KEY: &str = "transcription_max_speakers";
+pub const STREAM_URL_KEY: &str = "transcription_stream_url";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +28,11 @@ pub enum BackendKind {
     /// A `note67-asr` service: transcription plus diarization, at the cost of
     /// sending the recording somewhere.
     Remote,
+    /// A streaming recogniser, live over a websocket. Better than local Whisper
+    /// and, unlike `Remote`, works while the meeting is happening — but audio
+    /// leaves the machine continuously rather than as one file afterwards, and
+    /// it does not diarize.
+    Streaming,
 }
 
 impl BackendKind {
@@ -38,6 +44,7 @@ impl BackendKind {
     pub fn from_setting(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "remote" | "note67_asr" | "note67-asr" => BackendKind::Remote,
+            "streaming" | "stream" => BackendKind::Streaming,
             _ => BackendKind::Local,
         }
     }
@@ -46,6 +53,7 @@ impl BackendKind {
         match self {
             BackendKind::Local => "local",
             BackendKind::Remote => "remote",
+            BackendKind::Streaming => "streaming",
         }
     }
 }
@@ -61,6 +69,13 @@ pub enum Backend {
         /// infers the count on its own; this only stops it inventing more.
         max_speakers: Option<u32>,
     },
+    Streaming {
+        /// The websocket endpoint. Two connections are opened against it, one
+        /// per track, because mixing the microphone and system audio into a
+        /// single stream would discard the You/Others distinction that is the
+        /// app's only attribution without a diarizer.
+        ws_url: String,
+    },
 }
 
 /// Decide from settings.
@@ -74,9 +89,21 @@ pub fn resolve(
     base_url: Option<&str>,
     api_key: Option<&str>,
     max_speakers: Option<&str>,
+    stream_url: Option<&str>,
 ) -> Backend {
     match BackendKind::from_setting(kind) {
         BackendKind::Local => Backend::Local,
+        BackendKind::Streaming => {
+            let url = stream_url.map(str::trim).unwrap_or_default();
+            // Same rule as Remote, and for the same reason: a half-written
+            // setting must not start streaming a live meeting off the machine.
+            if url.is_empty() || !(url.starts_with("ws://") || url.starts_with("wss://")) {
+                return Backend::Local;
+            }
+            Backend::Streaming {
+                ws_url: url.trim_end_matches('/').to_string(),
+            }
+        }
         BackendKind::Remote => {
             let url = base_url.map(str::trim).unwrap_or_default();
             if url.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -92,6 +119,43 @@ pub fn resolve(
             }
         }
     }
+}
+
+/// Ask a streaming service whether it is up before relying on it.
+///
+/// Deliberately not part of `resolve`, which is pure and synchronous and whose
+/// tests would otherwise need a network. The setting is validated here, at the
+/// point someone saves it, the way a blank URL is caught today.
+pub async fn stream_health(ws_url: &str) -> Result<(), String> {
+    // The health endpoint is HTTP on the same host and port as the websocket.
+    let http = ws_url
+        .trim()
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let url = format!("{}/health", http.trim_end_matches('/'));
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the recogniser: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("the recogniser returned {}", response.status()));
+    }
+
+    // Up is not the same as ready. A service whose model has not loaded will
+    // accept a socket and transcribe nothing, which looks like a broken
+    // microphone rather than a service still starting.
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("the recogniser's answer could not be read: {e}"))?;
+    if body.get("model_loaded") == Some(&serde_json::Value::Bool(false)) {
+        return Err("the recogniser is running but its model is not loaded".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -133,6 +197,7 @@ mod tests {
             Some("http://192.168.32.223:8010/"),
             Some("secret"),
             Some("8"),
+            None,
         );
         assert_eq!(
             b,
@@ -151,8 +216,8 @@ mod tests {
         // Choosing the backend and not finishing the setting is an ordinary
         // half-done state, and the transcription that has always worked is a
         // better answer than an error.
-        assert_eq!(resolve("remote", None, None, None), Backend::Local);
-        assert_eq!(resolve("remote", Some("   "), None, None), Backend::Local);
+        assert_eq!(resolve("remote", None, None, None, None), Backend::Local);
+        assert_eq!(resolve("remote", Some("   "), None, None, None), Backend::Local);
     }
 
     #[test]
@@ -160,15 +225,40 @@ mod tests {
         // Otherwise the first sign of trouble is a confusing request error
         // rather than a setting that was never valid.
         assert_eq!(
-            resolve("remote", Some("192.168.32.223:8010"), None, None),
+            resolve("remote", Some("192.168.32.223:8010"), None, None, None),
             Backend::Local
         );
     }
 
     #[test]
     fn an_absent_api_key_stays_absent() {
-        let b = resolve("remote", Some("http://x:8010"), Some("  "), None);
+        let b = resolve("remote", Some("http://x:8010"), Some("  "), None, None);
         assert!(matches!(b, Backend::Remote { api_key: None, .. }));
+    }
+
+    #[test]
+    fn streaming_is_recognised_and_resolves() {
+        assert_eq!(BackendKind::from_setting("streaming"), BackendKind::Streaming);
+        assert_eq!(
+            resolve("streaming", None, None, None, Some("ws://192.168.32.223:8080/")),
+            Backend::Streaming {
+                ws_url: "ws://192.168.32.223:8080".into()
+            }
+        );
+    }
+
+    #[test]
+    fn streaming_without_a_usable_url_falls_back_to_local() {
+        // A live meeting must not start streaming off the machine because a
+        // setting was half written. Same rule as Remote, higher stakes: this
+        // one sends audio continuously while recording.
+        for url in [None, Some("  "), Some("192.168.32.223:8080"), Some("http://x:8080")] {
+            assert_eq!(
+                resolve("streaming", None, None, None, url),
+                Backend::Local,
+                "{url:?}"
+            );
+        }
     }
 
     #[test]
@@ -176,7 +266,7 @@ mod tests {
         // The diarizer infers the count. A zero or unparseable cap should
         // leave it to do that rather than constrain it to nothing.
         for v in ["0", "-3", "lots", ""] {
-            let b = resolve("remote", Some("http://x:8010"), None, Some(v));
+            let b = resolve("remote", Some("http://x:8010"), None, Some(v), None);
             assert!(
                 matches!(b, Backend::Remote { max_speakers: None, .. }),
                 "{v:?}"

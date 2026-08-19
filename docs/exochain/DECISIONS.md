@@ -202,3 +202,57 @@ endpoint — [exochained-toolkit#4](https://github.com/apexvelocitycatalyst/exoc
 still open. So the receipts describe the transcript and say nothing about where
 its audio has been. That gap is real, it is the first of its kind in this app,
 and it should close before anyone describes the receipts as covering custody.
+
+## Live audio egress — revising the bound set three days ago (2026-08-19)
+
+The 2026-08-16 entry above allowed audio egress for uploads and bounded it:
+
+> **Uploads only.** Live transcription stays in-process: a remote round trip per
+> three-second chunk would be slower than the meeting, and a network blip would
+> drop words nobody can recover.
+
+**That bound is now lifted, deliberately, and John ruled on it directly.** This
+is a reversal rather than a clarification, and it is written as one so nobody
+later reads the earlier entry as still governing.
+
+**What changed.** The first reason no longer holds: the Spark runs a *streaming*
+recogniser over a websocket, not a round trip per chunk, and it returns partials
+continuously — verified live. The second reason still holds exactly as written,
+and survives as a requirement rather than a prohibition: a dropped socket must
+not leave the app recording into nothing.
+
+**What this class of egress is.** `SCOPING.md`'s table governs "summarize via a
+remote model endpoint" and "export / share a note", and leaves "record /
+transcribe locally" ungoverned. Continuously streaming raw microphone audio is
+none of those. It is the most sensitive egress in the app: `Remote` at least
+ships a recording the user chose to keep, whereas this sends the room as it is
+heard, including whatever is said before anyone decides the meeting matters.
+
+**The ruling: this class is not receipt-governed for now.** The receipts attest
+what a transcript *is*, and there is no counterparty DID for the recogniser to
+attest who it went to — [exochained-toolkit#4](https://github.com/apexvelocitycatalyst/exochained-toolkit/issues/4)
+is still open, and a receipt naming a DID the endpoint cannot prove it holds
+would be evidence-shaped rather than evidence. Minting one would make the
+governance look stronger than it is, which is worse than the gap.
+
+So the honest position, unchanged from the entry above and now more load-bearing:
+**receipts describe the transcript and say nothing about where its audio has
+been.** That should close before anyone describes them as covering custody.
+
+**What bounds it instead, in code:**
+
+- Never the default. `BackendKind::from_setting` returns `Local` for anything
+  unrecognised, and `resolve` returns `Local` for a blank or non-`ws://` URL —
+  the same rule as `Remote`, at higher stakes.
+- Validated before it is relied on: `stream_health` checks the service is up
+  *and* that its model is loaded, because a service that accepts a socket and
+  transcribes nothing looks like a broken microphone rather than one still
+  starting.
+- **Two sockets, one per track.** Mixing microphone and system audio would
+  discard the You/Others distinction, which is the only speaker attribution the
+  app has without a diarizer — and this recogniser does not diarize, so nothing
+  would give it back. Two simultaneous sessions were tested against the running
+  service before the design was settled: both connected, streamed and finalised
+  cleanly.
+- The UI states that audio is sent continuously and that speakers are not
+  identified.
