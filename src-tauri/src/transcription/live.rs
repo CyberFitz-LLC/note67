@@ -107,7 +107,22 @@ pub enum AudioSource {
 pub struct TranscriptionUpdateEvent {
     pub note_id: String,
     pub segments: Vec<TranscriptionSegment>,
+    /// Whether live transcription has finished for this note.
+    ///
+    /// Not the opposite of `partial`. The local path emits complete segments
+    /// and leaves this false throughout; only a stream ending sets it. The UI
+    /// uses it to switch the "transcribing" indicator off, so setting it on
+    /// every settled utterance would report the recording as finished while it
+    /// was still running.
     pub is_final: bool,
+    /// Whether this text is still being revised.
+    ///
+    /// A streaming recogniser sends the same utterance repeatedly as it grows —
+    /// "So", "So I", "So I think" — each one superseding the last. The UI has to
+    /// replace the previous partial for this track rather than append, or a
+    /// sentence arrives as every prefix of itself. Whisper never sets this: its
+    /// segments are complete when they arrive.
+    pub partial: bool,
     /// The source of the audio (mic or system)
     pub audio_source: AudioSource,
 }
@@ -406,6 +421,7 @@ pub async fn start_live_transcription(
                         note_id: note_id_clone.clone(),
                         segments: valid_segments,
                         is_final: false,
+                        partial: false,
                         audio_source: AudioSource::Mic,
                     });
                 }
@@ -436,6 +452,7 @@ pub async fn start_live_transcription(
                     note_id: note_id_clone.clone(),
                     segments: current_system_segments,
                     is_final: false,
+                    partial: false,
                     audio_source: AudioSource::System,
                 });
             }

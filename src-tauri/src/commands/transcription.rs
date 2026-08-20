@@ -502,6 +502,7 @@ pub async fn stop_live_transcription(
         note_id,
         segments: vec![],
         is_final: true,
+        partial: false,
         audio_source: crate::transcription::AudioSource::Mic, // Default for final event
     };
     let _ = app.emit("transcription-update", event);

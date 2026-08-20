@@ -19,6 +19,14 @@ interface TranscriptionUpdateEvent {
     text: string;
   }>;
   is_final: boolean;
+  /**
+   * Whether this text is still being revised.
+   *
+   * Absent from the local Whisper path, whose segments are complete when they
+   * arrive. A streaming recogniser sends the same utterance repeatedly as it
+   * grows, each superseding the last.
+   */
+  partial?: boolean;
   audio_source?: "mic" | "system";
 }
 
@@ -212,6 +220,14 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
   // Monotonic counter for live segment ids — guarantees unique React keys even
   // when multiple transcription passes land in the same millisecond.
   const nextSegmentIdRef = useRef(0);
+  // The id of the unsettled segment currently on screen for each track, or
+  // undefined when that track has nothing in flight.
+  //
+  // A streaming recogniser revises an utterance as it hears it, sending "So",
+  // "So I", "So I think" in turn. Each has to replace the last. Kept per track
+  // because the two sockets revise independently — the microphone's in-flight
+  // sentence must not be overwritten by system audio's.
+  const partialIdRef = useRef<Partial<Record<string, number>>>({});
 
   // Set up event listener
   useEffect(() => {
@@ -225,7 +241,13 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
           // Ignore events if effect was cleaned up (StrictMode double-mount)
           if (cancelled) return;
 
-          const { note_id, segments, is_final, audio_source } = event.payload;
+          const {
+            note_id,
+            segments,
+            is_final,
+            partial,
+            audio_source,
+          } = event.payload;
 
           // Only process events for the current note
           if (note_id !== currentNoteIdRef.current) return;
@@ -249,11 +271,31 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
 
             if (newSegments.length === 0) return prev;
 
-            // Keep each Whisper segment discrete so the UI controls visual
-            // grouping (one paragraph per segment instead of one giant block
-            // when a single speaker talks for a long time). Same-speaker turns
-            // are still grouped under one label/timestamp at render time.
-            return [...prev, ...newSegments];
+            // Missing audio_source means the local path, which is mic-only.
+            const track = audio_source ?? "mic";
+            const inFlight = partialIdRef.current[track];
+
+            if (partial) {
+              // Revised text for this track. Replace what is on screen rather
+              // than adding to it, or the sentence appears as every prefix of
+              // itself.
+              const replacement = newSegments[newSegments.length - 1];
+              partialIdRef.current[track] = replacement.id;
+              if (inFlight === undefined) return [...prev, replacement];
+              return prev.map((s) => (s.id === inFlight ? replacement : s));
+            }
+
+            // Settled text. Whatever was in flight for this track was a draft
+            // of exactly this, so it goes rather than being left above it.
+            partialIdRef.current[track] = undefined;
+            const kept =
+              inFlight === undefined ? prev : prev.filter((s) => s.id !== inFlight);
+
+            // Keep each segment discrete so the UI controls visual grouping
+            // (one paragraph per segment instead of one giant block when a
+            // single speaker talks for a long time). Same-speaker turns are
+            // still grouped under one label/timestamp at render time.
+            return [...kept, ...newSegments];
           });
 
           if (is_final) {
@@ -287,6 +329,7 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
     try {
       setError(null);
       setLiveSegments(initialSegments || []);
+      partialIdRef.current = {};
       currentNoteIdRef.current = noteId;
       speakerNameRef.current = speakerName || "Me";
       // Get language from store - "auto" becomes undefined for backend
@@ -305,6 +348,7 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
       setError(null);
       const result = await transcriptionApi.stopLiveTranscription(noteId);
       setIsLiveTranscribing(false);
+      partialIdRef.current = {};
       currentNoteIdRef.current = null;
       return result;
     } catch (e) {

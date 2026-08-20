@@ -34,12 +34,17 @@ const EVENT = "transcription-update";
 function update(
   noteId: string,
   segments: Array<{ start_time: number; end_time: number; text: string }>,
-  extra: { is_final?: boolean; audio_source?: "mic" | "system" } = {}
+  extra: {
+    is_final?: boolean;
+    partial?: boolean;
+    audio_source?: "mic" | "system";
+  } = {}
 ) {
   return {
     note_id: noteId,
     segments,
     is_final: extra.is_final ?? false,
+    partial: extra.partial,
     audio_source: extra.audio_source,
   };
 }
@@ -333,5 +338,137 @@ describe("useLiveTranscription — start/stop", () => {
 
     expect(returned).toBeNull();
     expect(result.current.error).toBe("busy");
+  });
+});
+
+describe("streaming partials", () => {
+  /** Render the hook with a live session already started for `note`. */
+  async function live(note = "n1") {
+    const hook = renderHook(() => useLiveTranscription());
+    await act(async () => {
+      await hook.result.current.startLiveTranscription(note, "Me");
+    });
+    return hook;
+  }
+
+  it("revises the utterance in place instead of stacking every prefix", async () => {
+    // The bug this exists for, reported from a real recording: saying "So I
+    // think we might have a problem" rendered as
+    // "So So I So I think So I think that we…" — each partial appended rather
+    // than replacing the draft it superseded.
+    const hook = await live();
+
+    for (const text of ["So", "So I", "So I think", "So I think we"]) {
+      await act(async () => {
+        bus.emit(EVENT, update("n1", [seg(text)], { partial: true }));
+      });
+    }
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+    expect(hook.result.current.liveSegments[0].text).toBe("So I think we");
+  });
+
+  it("replaces the draft with the settled text rather than leaving both", async () => {
+    const hook = await live();
+
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("So I think we might")], { partial: true }));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("So I think we might have a problem.")]));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+    expect(hook.result.current.liveSegments[0].text).toBe(
+      "So I think we might have a problem."
+    );
+  });
+
+  it("keeps settled text when the next utterance starts revising", async () => {
+    const hook = await live();
+
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("First sentence.")]));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("Second")], { partial: true }));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(2);
+    });
+    expect(hook.result.current.liveSegments.map((s) => s.text)).toEqual([
+      "First sentence.",
+      "Second",
+    ]);
+  });
+
+  it("revises each track separately", async () => {
+    // Two sockets revise independently. If they shared one slot, the
+    // microphone's half-finished sentence would be overwritten by whatever the
+    // meeting audio was saying at the time.
+    const hook = await live();
+
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("I was going")], { partial: true, audio_source: "mic" }));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("Can you hear")], { partial: true, audio_source: "system" }));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("I was going to say")], { partial: true, audio_source: "mic" }));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(2);
+    });
+    const bySpeaker = Object.fromEntries(
+      hook.result.current.liveSegments.map((s) => [s.speaker, s.text])
+    );
+    expect(bySpeaker["Me"]).toBe("I was going to say");
+    expect(bySpeaker["Others"]).toBe("Can you hear");
+  });
+
+  it("does not carry a draft across recordings", async () => {
+    // A socket dropped mid-sentence leaves a partial on screen. The next
+    // recording must not treat it as something to revise.
+    const hook = await live();
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("half a sen")], { partial: true }));
+    });
+    await act(async () => {
+      await hook.result.current.stopLiveTranscription("n1");
+    });
+    await act(async () => {
+      await hook.result.current.startLiveTranscription("n2", "Me");
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n2", [seg("a new thing")], { partial: true }));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+    expect(hook.result.current.liveSegments[0].text).toBe("a new thing");
+  });
+
+  it("still appends whisper segments, which arrive complete", async () => {
+    // The local path sends no `partial` flag at all. Its segments are discrete
+    // utterances and every one of them has to be kept.
+    const hook = await live();
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("One.")]));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("Two.")]));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(2);
+    });
   });
 });

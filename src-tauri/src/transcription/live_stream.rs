@@ -327,7 +327,11 @@ fn spawn_reader(
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
             match item {
-                Recognised::Partial { text } => {
+                Recognised::Partial {
+                    text,
+                    start_time,
+                    end_time,
+                } => {
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -335,8 +339,8 @@ fn spawn_reader(
                     // the recogniser's current guess, and half of them are
                     // wrong by design.
                     let segment = TranscriptionSegment {
-                        start_time: 0.0,
-                        end_time: 0.0,
+                        start_time,
+                        end_time,
                         text,
                         speaker: Some(speaker_for(source).to_string()),
                     };
@@ -346,6 +350,7 @@ fn spawn_reader(
                             note_id: note_id.clone(),
                             segments: vec![segment],
                             is_final: false,
+                            partial: true,
                             audio_source: source,
                         },
                     );
@@ -386,7 +391,12 @@ fn spawn_reader(
                         TranscriptionUpdateEvent {
                             note_id: note_id.clone(),
                             segments: vec![segment],
-                            is_final: true,
+                            // Not `is_final`: that means the whole stream has
+                            // ended, and the UI switches the recording
+                            // indicator off when it sees it. This is one
+                            // settled utterance in a meeting still running.
+                            is_final: false,
+                            partial: false,
                             audio_source: source,
                         },
                     );

@@ -217,7 +217,16 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Recognised {
     /// Redrawn in place; never persisted.
-    Partial { text: String },
+    ///
+    /// Carries a span for the same reason a final does: the UI groups
+    /// same-speaker turns under one timestamp, and a partial pinned at 0:00
+    /// would break out of the group it belongs to and then jump when the final
+    /// replaced it.
+    Partial {
+        text: String,
+        start_time: f64,
+        end_time: f64,
+    },
     /// Persisted, with the span it covers on this track.
     Final {
         text: String,
@@ -374,7 +383,16 @@ pub async fn connect(
                     last_final = clock;
                 }
                 ServerEvent::Transcript { text, .. } => {
-                    if out_tx.send(Recognised::Partial { text }).await.is_err() {
+                    let (start_time, end_time) = clock.span_since(&last_final);
+                    if out_tx
+                        .send(Recognised::Partial {
+                            text,
+                            start_time,
+                            end_time,
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
