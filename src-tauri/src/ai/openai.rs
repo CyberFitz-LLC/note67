@@ -49,6 +49,35 @@ struct ChatChoice {
 struct ChatResponseMessage {
     #[serde(default)]
     content: Option<String>,
+    /// Where a reasoning model puts its thinking.
+    ///
+    /// Read as a fallback, because a server can be configured so that *all*
+    /// output lands here and `content` is never populated — vLLM with a
+    /// `--reasoning-parser` whose delimiter the model never emits does exactly
+    /// that. The answer is then in this field or nowhere, and reading only
+    /// `content` yields an empty summary that looks like the model had nothing
+    /// to say.
+    ///
+    /// Two spellings are in the wild: vLLM emits `reasoning`, others
+    /// `reasoning_content`.
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+impl ChatResponseMessage {
+    /// The text of the reply, preferring real content.
+    ///
+    /// Reasoning is only ever a stand-in. When a server populates both — the
+    /// normal case for a reasoning model — the thinking is not the answer and
+    /// must not be shown as one.
+    fn text(self) -> Option<String> {
+        let content = self.content.filter(|c| !c.trim().is_empty());
+        content
+            .or_else(|| self.reasoning.filter(|r| !r.trim().is_empty()))
+            .or_else(|| self.reasoning_content.filter(|r| !r.trim().is_empty()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +96,10 @@ struct ChatChunkChoice {
 struct ChatDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 // ===== Server-sent events =====
@@ -130,6 +163,54 @@ pub fn delta_content(payload: &str) -> Option<String> {
         None
     } else {
         Some(content)
+    }
+}
+
+/// Pull the reasoning out of one streamed chunk, if it carries any.
+fn delta_reasoning(payload: &str) -> Option<String> {
+    let chunk: ChatChunk = serde_json::from_str(payload).ok()?;
+    let delta = chunk.choices.into_iter().next()?.delta;
+    delta
+        .reasoning
+        .or(delta.reasoning_content)
+        .filter(|r| !r.is_empty())
+}
+
+/// Lets reasoning stand in for a stream that never produced any content.
+///
+/// The decision cannot be made per chunk: at the time a reasoning delta
+/// arrives, there is no way to know whether content will follow. So reasoning
+/// is held back, and only released once the stream has ended having produced
+/// nothing else. A properly configured reasoning model therefore streams its
+/// answer as usual and its thinking is discarded; a misconfigured one still
+/// yields its answer, arriving at the end rather than progressively.
+#[derive(Debug, Default)]
+pub struct ReasoningFallback {
+    saw_content: bool,
+    held: String,
+}
+
+impl ReasoningFallback {
+    /// Feed one chunk; returns text to emit now, if any.
+    pub fn push(&mut self, payload: &str) -> Option<String> {
+        if let Some(token) = delta_content(payload) {
+            self.saw_content = true;
+            self.held.clear();
+            return Some(token);
+        }
+        if !self.saw_content && let Some(r) = delta_reasoning(payload) {
+            self.held.push_str(&r);
+        }
+        None
+    }
+
+    /// Called once the stream ends; returns the stand-in, if one is needed.
+    pub fn finish(self) -> Option<String> {
+        if self.saw_content {
+            return None;
+        }
+        let held = self.held.trim().to_string();
+        if held.is_empty() { None } else { Some(held) }
     }
 }
 
@@ -257,12 +338,20 @@ impl OpenAiCompatClient {
             .await
             .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
 
-        Ok(parsed
+        // An empty reply is a failure, not a result. Returning "" here is how a
+        // model that said nothing became a summary block with nothing in it.
+        parsed
             .choices
             .into_iter()
             .next()
-            .and_then(|c| c.message.content)
-            .unwrap_or_default())
+            .and_then(|c| c.message.text())
+            .ok_or_else(|| {
+                LlmError::InvalidResponse(format!(
+                    "{model} returned an empty reply. If it is served through vLLM with \
+                     --reasoning-parser, check that the parser matches the model: a mismatched \
+                     one routes the whole answer into `reasoning` and leaves `content` null."
+                ))
+            })
     }
 
     pub async fn generate_stream(
@@ -287,6 +376,7 @@ impl OpenAiCompatClient {
 
         let mut full_response = String::new();
         let mut buffer = SseBuffer::default();
+        let mut fallback = ReasoningFallback::default();
         let mut stream = response.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
@@ -295,15 +385,28 @@ impl OpenAiCompatClient {
 
             for event in buffer.push(&text) {
                 match event {
-                    SseEvent::Done => return Ok(full_response),
+                    SseEvent::Done => {
+                        if let Some(stand_in) = fallback.finish() {
+                            full_response.push_str(&stand_in);
+                            let _ = tx.send(stand_in).await;
+                        }
+                        return Ok(full_response);
+                    }
                     SseEvent::Data(payload) => {
-                        if let Some(token) = delta_content(&payload) {
+                        if let Some(token) = fallback.push(&payload) {
                             full_response.push_str(&token);
                             let _ = tx.send(token).await;
                         }
                     }
                 }
             }
+        }
+
+        // The stream ended without a [DONE], which servers do. The held
+        // reasoning still has to be released, or the reply is lost entirely.
+        if let Some(stand_in) = fallback.finish() {
+            full_response.push_str(&stand_in);
+            let _ = tx.send(stand_in).await;
         }
 
         Ok(full_response)
@@ -440,4 +543,78 @@ mod tests {
         let client = OpenAiCompatClient::new("http://spark:8000/", None);
         assert_eq!(client.v1_root, "http://spark:8000/v1");
     }
+
+    /// The exact reply shape captured from the Spark's vLLM on 2026-08-20,
+    /// serving lightning-30b-nvfp4 with `--reasoning-parser nemotron_v3`.
+    ///
+    /// `content` is null and the whole answer is in `reasoning`. Reading only
+    /// `content` is what produced a summary block with nothing in it.
+    #[test]
+    fn an_answer_that_arrives_only_as_reasoning_is_still_the_answer() {
+        let body = r#"{"choices":[{"index":0,"message":{"role":"assistant","content":null,
+            "refusal":null,"annotations":null,"audio":null,"function_call":null,
+            "tool_calls":[],"reasoning":"Hello!"},"finish_reason":"stop"}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).expect("parses");
+        let text = parsed.choices.into_iter().next().unwrap().message.text();
+        assert_eq!(text, Some("Hello!".to_string()));
+    }
+
+    #[test]
+    fn real_content_always_beats_reasoning() {
+        // A properly configured reasoning model populates both. The thinking is
+        // not the answer and must never be shown as one.
+        let body = r#"{"choices":[{"message":{"content":"The deploy is blocked.",
+            "reasoning":"Let me think about what they said..."}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).expect("parses");
+        let text = parsed.choices.into_iter().next().unwrap().message.text();
+        assert_eq!(text, Some("The deploy is blocked.".to_string()));
+    }
+
+    #[test]
+    fn the_other_spelling_is_read_too() {
+        let body = r#"{"choices":[{"message":{"content":"","reasoning_content":"An answer."}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).expect("parses");
+        let text = parsed.choices.into_iter().next().unwrap().message.text();
+        assert_eq!(text, Some("An answer.".to_string()));
+    }
+
+    #[test]
+    fn a_reply_with_nothing_in_it_is_nothing() {
+        // Must stay None so the caller can raise an error rather than save an
+        // empty summary.
+        let body = r#"{"choices":[{"message":{"content":null,"reasoning":"   "}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).expect("parses");
+        assert_eq!(parsed.choices.into_iter().next().unwrap().message.text(), None);
+    }
+
+    #[test]
+    fn streamed_reasoning_is_held_back_until_the_stream_proves_barren() {
+        let mut f = ReasoningFallback::default();
+        // Reasoning arrives first and must not be emitted — content may follow.
+        assert_eq!(f.push(r#"{"choices":[{"delta":{"reasoning":"thinking..."}}]}"#), None);
+        assert_eq!(
+            f.push(r#"{"choices":[{"delta":{"content":"The answer."}}]}"#),
+            Some("The answer.".to_string())
+        );
+        // Content arrived, so the thinking is discarded rather than appended.
+        assert_eq!(f.finish(), None);
+    }
+
+    #[test]
+    fn streamed_reasoning_is_released_when_no_content_ever_comes() {
+        let mut f = ReasoningFallback::default();
+        assert_eq!(f.push(r#"{"choices":[{"delta":{"reasoning":"Hel"}}]}"#), None);
+        assert_eq!(f.push(r#"{"choices":[{"delta":{"reasoning":"lo!"}}]}"#), None);
+        // Otherwise this stream yields an empty string and the user sees a
+        // blank summary.
+        assert_eq!(f.finish(), Some("Hello!".to_string()));
+    }
+
+    #[test]
+    fn a_stream_of_nothing_stays_nothing() {
+        let mut f = ReasoningFallback::default();
+        assert_eq!(f.push(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#), None);
+        assert_eq!(f.finish(), None);
+    }
+
 }

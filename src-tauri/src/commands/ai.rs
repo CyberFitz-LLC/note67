@@ -495,6 +495,19 @@ pub async fn generate_summary(
     // Strip thinking tags from response
     let clean_response = strip_thinking_tags(&response);
 
+    // A summary block with nothing in it is worse than an error: it reads as
+    // "the meeting had nothing worth recording" rather than "this did not
+    // work". Two ways to arrive here, both seen in the wild — a model whose
+    // whole reply was a thinking block, and a server that routed the answer
+    // into `reasoning` and left `content` null.
+    if clean_response.trim().is_empty() {
+        return Err(format!(
+            "{model} returned nothing usable, so no summary was saved. If the reply was all \
+             thinking, the model needs a prompt that asks for an answer outside <think>; if the \
+             endpoint is vLLM, check that --reasoning-parser matches the model."
+        ));
+    }
+
     // Save to database
     let summary_id = db
         .add_summary(&note_id, &stype, &clean_response)
@@ -737,6 +750,19 @@ pub async fn generate_summary_stream(
 
     // Strip thinking tags from response
     let clean_response = strip_thinking_tags(&response);
+
+    // A summary block with nothing in it is worse than an error: it reads as
+    // "the meeting had nothing worth recording" rather than "this did not
+    // work". Two ways to arrive here, both seen in the wild — a model whose
+    // whole reply was a thinking block, and a server that routed the answer
+    // into `reasoning` and left `content` null.
+    if clean_response.trim().is_empty() {
+        return Err(format!(
+            "{model} returned nothing usable, so no summary was saved. If the reply was all \
+             thinking, the model needs a prompt that asks for an answer outside <think>; if the \
+             endpoint is vLLM, check that --reasoning-parser matches the model."
+        ));
+    }
 
     // Save to database
     let summary_id = db
