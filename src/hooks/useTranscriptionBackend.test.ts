@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  shouldAutoRetranscribe,
   willStream,
   willUseRemote,
   DEFAULT_CONFIG,
@@ -110,5 +111,38 @@ describe("willStream", () => {
         config({ backend: "streaming", streamUrl: "ws://192.168.32.223:8080" }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("shouldAutoRetranscribe", () => {
+  it("does not re-run Whisper over a transcript a remote recogniser produced", () => {
+    // The whole point of the streaming backend is a better transcript.
+    // Retranscribing replaces it with the weaker one a minute after the
+    // meeting ends, which reads as the app losing the transcript.
+    expect(shouldAutoRetranscribe("streaming", true)).toBe(false);
+  });
+
+  it("still retranscribes for the remote backend, which does not do live", () => {
+    // `remote` governs uploads; live transcription there is local Whisper, so
+    // a second pass over the recording is the improvement it claims to be.
+    expect(shouldAutoRetranscribe("remote", true)).toBe(true);
+  });
+
+  it("retranscribes for local, which is the case it was written for", () => {
+    expect(shouldAutoRetranscribe("local", true)).toBe(true);
+    expect(shouldAutoRetranscribe(null, true)).toBe(true);
+    expect(shouldAutoRetranscribe(undefined, true)).toBe(true);
+  });
+
+  it("never retranscribes without a model loaded", () => {
+    expect(shouldAutoRetranscribe("local", false)).toBe(false);
+    expect(shouldAutoRetranscribe("streaming", false)).toBe(false);
+  });
+
+  it("treats an unrecognised setting as local", () => {
+    // Same rule as everywhere else: a half-written setting falls back to the
+    // local path rather than silently changing behaviour.
+    expect(shouldAutoRetranscribe("STREAMING", true)).toBe(true);
+    expect(shouldAutoRetranscribe("", true)).toBe(true);
   });
 });

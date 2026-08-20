@@ -24,7 +24,11 @@ import {
   ContextMenu,
 } from "./components";
 import type { SettingsTab } from "./components";
-import { exportApi, aiApi, transcriptionApi, tagsApi, importApi } from "./api";
+import { exportApi, aiApi, transcriptionApi, tagsApi, importApi, settingsApi } from "./api";
+import {
+  BACKEND_KEY,
+  shouldAutoRetranscribe,
+} from "./hooks/useTranscriptionBackend";
 import { getTagColor } from "./utils/tagColors";
 import { useTagsStore } from "./stores/tagsStore";
 import {
@@ -626,8 +630,12 @@ function App() {
       // Always refresh notes to update ended_at
       await refreshNotes();
 
-      // Auto-retranscribe for better quality (runs in background)
-      if (loadedModel) {
+      // Auto-retranscribe for better quality (runs in background), unless a
+      // remote recogniser produced this transcript — see shouldAutoRetranscribe.
+      const transcriptionBackend = await settingsApi
+        .get(BACKEND_KEY)
+        .catch(() => null);
+      if (shouldAutoRetranscribe(transcriptionBackend, Boolean(loadedModel))) {
         console.log(
           "[handleStopRecording] Starting auto-retranscribe for better quality"
         );

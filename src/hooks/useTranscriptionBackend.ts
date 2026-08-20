@@ -60,6 +60,27 @@ function readBackend(value: string | null | undefined): TranscriptionBackend {
   return "local";
 }
 
+/**
+ * Whether to re-run local Whisper over the recording once it stops.
+ *
+ * The app does this by default "for better quality", replacing the transcript
+ * it just built. That is right when the live transcript came from local
+ * Whisper, and wrong when a remote recogniser produced it: re-running the
+ * weaker recogniser over the same audio would quietly overwrite the better
+ * transcript a minute after the meeting ended.
+ *
+ * Only the streaming backend transcribes live. With `remote`, live
+ * transcription is still local Whisper — `remote` governs uploads — so
+ * retranscribing there is the improvement it claims to be.
+ */
+export function shouldAutoRetranscribe(
+  backend: string | null | undefined,
+  hasLocalModel: boolean,
+): boolean {
+  if (!hasLocalModel) return false;
+  return readBackend(backend ?? undefined) !== "streaming";
+}
+
 export function useTranscriptionBackend() {
   const [config, setConfig] = useState<TranscriptionConfig | null>(null);
   const [saving, setSaving] = useState(false);
