@@ -794,6 +794,51 @@ impl Database {
         Ok(segments)
     }
 
+    /// Every uploaded audio file in the library.
+    pub fn all_uploaded_audio(&self) -> anyhow::Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt =
+            conn.prepare("SELECT id, file_path FROM uploaded_audio ORDER BY id ASC")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Point an upload at where its audio now lives.
+    pub fn update_uploaded_audio_path(&self, id: i64, path: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE uploaded_audio SET file_path = ?1 WHERE id = ?2",
+            params![path, id],
+        )?;
+        Ok(())
+    }
+
+    /// Every note that has a built playback track, and where it is.
+    pub fn all_note_audio_paths(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, audio_path FROM notes WHERE audio_path IS NOT NULL AND audio_path != ''",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Point a note's playback track at where it now lives.
+    pub fn update_note_audio_path(&self, note_id: &str, path: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE notes SET audio_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![path, Utc::now().to_rfc3339(), note_id],
+        )?;
+        Ok(())
+    }
+
     /// Get the next segment index for a note
     pub fn get_next_segment_index(&self, note_id: &str) -> anyhow::Result<i32> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;

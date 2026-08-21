@@ -577,6 +577,15 @@ pub struct CompactionReport {
     pub files_failed: usize,
     pub bytes_before: u64,
     pub bytes_after: u64,
+    /// What went wrong, and where. A count alone leaves the only explanation in
+    /// a console the user cannot see.
+    pub failures: Vec<CompactionFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompactionFailure {
+    pub path: String,
+    pub reason: String,
 }
 
 /// Rewrite every recording in the library as 16 kHz mono FLAC.
@@ -592,60 +601,93 @@ pub struct CompactionReport {
 /// recording should not block recovering the rest.
 #[tauri::command]
 pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, String> {
-    let segments = db.all_audio_segments().map_err(|e| e.to_string())?;
-
     let mut report = CompactionReport {
         files_examined: 0,
         files_compacted: 0,
         files_failed: 0,
         bytes_before: 0,
         bytes_after: 0,
+        failures: Vec::new(),
     };
 
-    {
-        for segment in segments {
-            let mic = segment.mic_path.as_ref().map(std::path::PathBuf::from);
-            let system = segment.system_path.as_ref().map(std::path::PathBuf::from);
-
-            let mut new_mic = mic.clone();
-            let mut new_system = system.clone();
-            let mut changed = false;
-
-            for (path, out) in [(mic.as_ref(), &mut new_mic), (system.as_ref(), &mut new_system)] {
-                let Some(path) = path else { continue };
-                if !path.exists() {
-                    // A row naming a file that is gone is a pre-existing
-                    // problem, not one to fix by failing here.
-                    continue;
-                }
-                report.files_examined += 1;
-                match audio::codec::compact(path) {
-                    Ok(done) => {
-                        report.bytes_before += done.before_bytes;
-                        report.bytes_after += done.after_bytes;
-                        if done.path != *path {
-                            report.files_compacted += 1;
-                            *out = Some(done.path);
-                            changed = true;
-                        }
-                    }
-                    Err(e) => {
-                        report.files_failed += 1;
-                        eprintln!("[compact] skipped {} — {e}", path.display());
-                    }
+    // Convert one file, accounting for it either way. Returns the path it
+    // should now be known by — unchanged if anything went wrong.
+    let mut convert = |path: &std::path::Path, report: &mut CompactionReport| -> Option<std::path::PathBuf> {
+        if !path.exists() {
+            // A row naming a file that is gone is a pre-existing problem, not
+            // one to report as a compaction failure.
+            return None;
+        }
+        report.files_examined += 1;
+        match audio::codec::compact(path) {
+            Ok(done) => {
+                report.bytes_before += done.before_bytes;
+                report.bytes_after += done.after_bytes;
+                if done.path != *path {
+                    report.files_compacted += 1;
+                    Some(done.path)
+                } else {
+                    None
                 }
             }
-
-            if changed && segment.id > 0 {
-                let sys = new_system.as_ref().map(|p| p.to_string_lossy().to_string());
-                let mic_str = new_mic
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys.as_deref()) {
-                    eprintln!("[compact] converted {} but could not record it: {e}", segment.id);
-                }
+            Err(e) => {
+                report.files_failed += 1;
+                report.failures.push(CompactionFailure {
+                    path: path.display().to_string(),
+                    reason: e.to_string(),
+                });
+                eprintln!("[compact] skipped {} — {e}", path.display());
+                None
             }
+        }
+    };
+
+    // 1. Recording segments: the mic and system tracks of each recording.
+    for segment in db.all_audio_segments().map_err(|e| e.to_string())? {
+        let mic = segment.mic_path.as_ref().map(std::path::PathBuf::from);
+        let system = segment.system_path.as_ref().map(std::path::PathBuf::from);
+
+        let new_mic = mic.as_ref().and_then(|p| convert(p, &mut report));
+        let new_system = system.as_ref().and_then(|p| convert(p, &mut report));
+
+        if (new_mic.is_some() || new_system.is_some()) && segment.id > 0 {
+            let mic_str = new_mic
+                .or(mic)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let sys_str = new_system
+                .or(system)
+                .map(|p| p.to_string_lossy().to_string());
+            if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys_str.as_deref()) {
+                eprintln!("[compact] converted segment {} but could not record it: {e}", segment.id);
+            }
+        }
+    }
+
+    // 2. Uploaded audio.
+    for (id, path) in db.all_uploaded_audio().map_err(|e| e.to_string())? {
+        let path = std::path::PathBuf::from(&path);
+        if let Some(new_path) = convert(&path, &mut report)
+            && let Err(e) = db.update_uploaded_audio_path(id, &new_path.to_string_lossy())
+        {
+            eprintln!("[compact] converted upload {id} but could not record it: {e}");
+        }
+    }
+
+    // 3. Playback mixes — `{note_id}.wav`, one per note.
+    //
+    // These were the ones missed on the first pass, and they are the largest
+    // single category: each is the whole note mixed down again, so a library
+    // carries roughly a second copy of every meeting in them. They are derived
+    // and would be rebuilt on demand, but converting is cheaper than
+    // regenerating and keeps playback working for notes that are never
+    // recorded into again.
+    for (note_id, path) in db.all_note_audio_paths().map_err(|e| e.to_string())? {
+        let path = std::path::PathBuf::from(&path);
+        if let Some(new_path) = convert(&path, &mut report)
+            && let Err(e) = db.update_note_audio_path(&note_id, &new_path.to_string_lossy())
+        {
+            eprintln!("[compact] converted the playback track for {note_id} but could not record it: {e}");
         }
     }
 
@@ -699,7 +741,17 @@ fn build_note_playback(app: &AppHandle, db: &Database, note_id: &str) -> Option<
 
     let playback_file = recordings_dir.join(format!("{}.wav", note_id));
     match build_playback_track(&inputs, &playback_file) {
-        Ok(()) => Some(playback_file.to_string_lossy().to_string()),
+        // Compacted straight away. The mix is a whole note written out again,
+        // so leaving it as WAV would quietly put a second full-size copy of
+        // every meeting on disk — which is exactly what the first compaction
+        // pass missed. A failure here keeps the WAV, which still plays.
+        Ok(()) => match audio::codec::compact(&playback_file) {
+            Ok(done) => Some(done.path.to_string_lossy().to_string()),
+            Err(e) => {
+                eprintln!("Playback: kept the uncompressed mix ({e})");
+                Some(playback_file.to_string_lossy().to_string())
+            }
+        },
         Err(e) => {
             eprintln!("Playback: failed to build track from {} segment(s): {}", inputs.len(), e);
             None

@@ -1,12 +1,18 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+interface CompactionFailure {
+  path: string;
+  reason: string;
+}
+
 interface CompactionReport {
   files_examined: number;
   files_compacted: number;
   files_failed: number;
   bytes_before: number;
   bytes_after: number;
+  failures: CompactionFailure[];
 }
 
 function gb(bytes: number): string {
@@ -84,23 +90,50 @@ export function StorageSettings() {
       )}
 
       {report && (
-        <div className="text-sm" style={{ color: "var(--color-text)" }}>
-          {report.files_compacted > 0 ? (
+        <div className="text-sm space-y-2" style={{ color: "var(--color-text)" }}>
+          {report.files_compacted > 0 && (
             <p>
               Compacted {report.files_compacted} of {report.files_examined}{" "}
               recordings — <strong>{gb(saved)} recovered</strong> ({gb(report.bytes_before)}{" "}
               → {gb(report.bytes_after)}).
             </p>
-          ) : (
+          )}
+          {/* Said only when it is true. Reporting "all already compressed"
+              while also reporting failures is a claim the numbers contradict,
+              and it is the failures that need attention. */}
+          {report.files_compacted === 0 && report.files_failed === 0 && (
             <p>
               Nothing to do — all {report.files_examined} recordings were already
               compressed.
             </p>
           )}
-          {report.files_failed > 0 && (
-            <p className="mt-1" style={{ color: "#eab308" }}>
-              {report.files_failed} could not be read and were left untouched.
+          {report.files_compacted === 0 && report.files_failed > 0 && (
+            <p>
+              Nothing was compacted. {report.files_examined - report.files_failed}{" "}
+              of {report.files_examined} were already compressed.
             </p>
+          )}
+
+          {report.files_failed > 0 && (
+            <details
+              className="rounded-lg p-2"
+              style={{
+                backgroundColor: "var(--color-bg-subtle)",
+                border: "1px solid #eab308",
+              }}
+            >
+              <summary style={{ color: "#eab308", cursor: "pointer" }}>
+                {report.files_failed} could not be read and were left untouched
+              </summary>
+              <ul className="mt-2 space-y-1">
+                {report.failures.map((f) => (
+                  <li key={f.path} style={{ color: "var(--color-text-secondary)" }}>
+                    <code className="text-xs">{f.path.split(/[\\/]/).pop()}</code>
+                    <div className="text-xs">{f.reason}</div>
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
         </div>
       )}
