@@ -1,3 +1,4 @@
+pub mod codec;
 pub mod converter;
 pub mod devices;
 pub mod levels;
