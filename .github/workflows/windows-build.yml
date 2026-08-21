@@ -148,7 +148,10 @@ jobs:
           # Installation Guide for Windows, silent-install subpackage table).
           # An invalid name does not warn — the installer aborts, and its exit
           # code says nothing about which entry it disliked.
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          # `crt` is separate from `cudart` and is not optional: cuda_runtime.h
+          # includes crt/host_config.h on its 82nd line, so without it nothing
+          # that includes the runtime header compiles at all.
+          sub-packages: '["nvcc", "crt", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
 
       # The toolkit ships the MSBuild integration but does not register it with
       # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
