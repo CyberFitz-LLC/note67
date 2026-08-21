@@ -182,53 +182,17 @@ impl Transcriber {
         })
     }
 
-    /// Load audio file and convert to 16kHz mono f32 samples
+    /// Load an audio file as the 16 kHz mono Whisper needs.
+    ///
+    /// Delegated to `audio::codec` rather than opening the file here, so that
+    /// recordings stored as FLAC transcribe as readily as the WAVs that came
+    /// before them, and so there is one resampler rather than two that could
+    /// drift apart and put the transcript and the playback track on different
+    /// clocks.
     fn load_audio(&self, audio_path: &Path) -> Result<Vec<f32>, TranscriptionError> {
-        let reader = hound::WavReader::open(audio_path)
-            .map_err(|e| TranscriptionError::TranscriptionFailed(format!("Failed to open WAV: {}", e)))?;
-
-        let spec = reader.spec();
-        let sample_rate = spec.sample_rate;
-        let channels = spec.channels as usize;
-
-        // Read samples based on format
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader
-                    .into_samples::<f32>()
-                    .filter_map(|s| s.ok())
-                    .collect()
-            }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let max_val = (1 << (bits - 1)) as f32;
-                reader
-                    .into_samples::<i32>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| s as f32 / max_val)
-                    .collect()
-            }
-        };
-
-        // Convert to mono if stereo
-        let mono_samples: Vec<f32> = if channels > 1 {
-            samples
-                .chunks(channels)
-                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-                .collect()
-        } else {
-            samples
-        };
-
-        // Resample to 16kHz if needed (Whisper requires 16kHz)
-        let target_rate = 16000;
-        let resampled = if sample_rate != target_rate {
-            resample(&mono_samples, sample_rate, target_rate)
-        } else {
-            mono_samples
-        };
-
-        Ok(resampled)
+        crate::audio::codec::decode_to_16k_mono(audio_path).map_err(|e| {
+            TranscriptionError::TranscriptionFailed(format!("could not read the audio: {e}"))
+        })
     }
 }
 

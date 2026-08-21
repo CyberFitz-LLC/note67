@@ -36,23 +36,24 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 }
 
 /// Read a WAV into normalized f32 samples (interleaved), whatever its format.
+/// Read a recording, whatever it is stored as.
+///
+/// Routed through `codec::decode` rather than `hound` so that a note recorded
+/// after the move to FLAC still plays back, and — more to the point — so that a
+/// note holding *both* (segments recorded either side of the change, or a
+/// library part-way through compaction) mixes without noticing.
+///
+/// The returned spec keeps this function's old shape, since everything below
+/// works in channels and sample rate.
 fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, WavSpec), AudioError> {
-    let mut reader = WavReader::open(path)?;
-    let spec = reader.spec();
-
-    let samples: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => reader.samples::<f32>().filter_map(|s| s.ok()).collect(),
-        SampleFormat::Int => {
-            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .filter_map(|s| s.ok())
-                .map(|s| s as f32 / scale)
-                .collect()
-        }
+    let decoded = crate::audio::codec::decode(path)?;
+    let spec = WavSpec {
+        channels: decoded.channels,
+        sample_rate: decoded.sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
     };
-
-    Ok((samples, spec))
+    Ok((decoded.samples, spec))
 }
 
 /// Build one playback track for a whole note: mix each recording segment's mic
