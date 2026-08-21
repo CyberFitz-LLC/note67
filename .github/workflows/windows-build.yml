@@ -140,10 +140,15 @@ jobs:
         with:
           cuda: '13.2.2'
           method: 'network'
-          # Only what ggml needs to compile and link; the full toolkit is a
-          # multi-gigabyte download for no gain. `thrust` is not a separate
-          # sub-package in 13.x — it ships inside `cccl`.
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "cccl", "visual_studio_integration"]'
+          # Only what ggml needs to compile and link. Restricting this is not
+          # only about download size: a full install includes the display
+          # driver, which cannot install on a runner with no NVIDIA hardware.
+          #
+          # These names are the ones the Windows installer accepts (CUDA
+          # Installation Guide for Windows, silent-install subpackage table).
+          # An invalid name does not warn — the installer aborts, and its exit
+          # code says nothing about which entry it disliked.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
 
       # The toolkit ships the MSBuild integration but does not register it with
       # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
