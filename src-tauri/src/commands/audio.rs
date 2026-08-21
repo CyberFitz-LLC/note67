@@ -433,6 +433,12 @@ pub fn stop_dual_recording(
         *sys_path = None;
     }
 
+    // Compacted here too. This path predates segment tracking and has no row to
+    // update, but the files it leaves behind are the same size as any other.
+    let segment_id = state.recording.current_segment_db_id.load(Ordering::SeqCst);
+    let (mic_path, system_path) =
+        compact_segment_audio(&db, segment_id, &mic_path, system_path.as_deref());
+
     // Same whole-note rebuild as the segment-aware stop below. Routing both
     // through one builder is deliberate: this path used to merge only the file
     // it had just closed, which is exactly how playback lost earlier segments.
@@ -443,6 +449,66 @@ pub fn stop_dual_recording(
         system_path: system_path.map(|p| p.to_string_lossy().to_string()),
         playback_path,
     })
+}
+
+
+/// Shrink a just-finished segment's audio and point the database at it.
+///
+/// Recordings are kept as 16 kHz mono FLAC — see `audio::codec` for why that
+/// is the right shape and what it gives up. Conversion happens here, when the
+/// segment closes, rather than in the capture callbacks: the real-time path
+/// stays exactly as it was, and one piece of code serves both new recordings
+/// and compaction of the existing library.
+///
+/// **A failure here never fails the stop.** The meeting has been recorded; the
+/// files are on disk and the database points at them. Losing that because a
+/// compressor did not like something would turn a disk-space feature into the
+/// worst bug this app could have. Anything that goes wrong leaves the original
+/// WAV in place and says so.
+fn compact_segment_audio(
+    db: &Database,
+    segment_id: i64,
+    mic: &std::path::Path,
+    system: Option<&std::path::Path>,
+) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+    let compact_one = |path: &std::path::Path| -> std::path::PathBuf {
+        match audio::codec::compact(path) {
+            Ok(done) => {
+                let saved = done.before_bytes.saturating_sub(done.after_bytes);
+                println!(
+                    "[audio] compacted {} — {} KB saved",
+                    path.display(),
+                    saved / 1024
+                );
+                done.path
+            }
+            Err(e) => {
+                eprintln!(
+                    "[audio] could not compact {} ({e}); keeping the original",
+                    path.display()
+                );
+                path.to_path_buf()
+            }
+        }
+    };
+
+    let mic_out = compact_one(mic);
+    let system_out = system.map(compact_one);
+
+    // Only recorded once the files are actually in place. A row naming a file
+    // that does not exist is worse than a row naming a large one.
+    if segment_id > 0 {
+        let sys = system_out.as_ref().map(|p| p.to_string_lossy().to_string());
+        if let Err(e) = db.update_segment_paths(
+            segment_id,
+            &mic_out.to_string_lossy(),
+            sys.as_deref(),
+        ) {
+            eprintln!("[audio] compacted the audio but could not record where it went: {e}");
+        }
+    }
+
+    (mic_out, system_out)
 }
 
 /// Stop dual recording with segment tracking - updates segment duration in database
@@ -484,6 +550,12 @@ pub fn stop_dual_recording_with_segments(
         let _ = db.update_segment_duration(segment_id, duration_ms);
     }
 
+    // Shrink what was just recorded, before playback is rebuilt — so the mix
+    // reads the files the database now names rather than ones about to be
+    // replaced underneath it.
+    let (mic_path, system_path) =
+        compact_segment_audio(&db, segment_id, &mic_path, system_path.as_deref());
+
     // Rebuild playback from every segment in the note, not just the one that
     // just stopped — otherwise continuing a recording throws away the audio of
     // everything before it.
@@ -494,6 +566,99 @@ pub fn stop_dual_recording_with_segments(
         system_path: system_path.map(|p| p.to_string_lossy().to_string()),
         playback_path,
     })
+}
+
+
+/// What a pass over the library recovered.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompactionReport {
+    pub files_examined: usize,
+    pub files_compacted: usize,
+    pub files_failed: usize,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+}
+
+/// Rewrite every recording in the library as 16 kHz mono FLAC.
+///
+/// This is where the space already spent actually comes back — new recordings
+/// are compacted as they finish, but nothing touches what is already on disk
+/// until this runs.
+///
+/// Safe to interrupt and safe to re-run: each file is converted, verified
+/// readable and only then does the original go, and a file already in the
+/// target format is skipped rather than rewritten. A file that fails is
+/// counted, left exactly as it was, and does not stop the pass — one unreadable
+/// recording should not block recovering the rest.
+#[tauri::command]
+pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, String> {
+    let segments = db.all_audio_segments().map_err(|e| e.to_string())?;
+
+    let mut report = CompactionReport {
+        files_examined: 0,
+        files_compacted: 0,
+        files_failed: 0,
+        bytes_before: 0,
+        bytes_after: 0,
+    };
+
+    {
+        for segment in segments {
+            let mic = segment.mic_path.as_ref().map(std::path::PathBuf::from);
+            let system = segment.system_path.as_ref().map(std::path::PathBuf::from);
+
+            let mut new_mic = mic.clone();
+            let mut new_system = system.clone();
+            let mut changed = false;
+
+            for (path, out) in [(mic.as_ref(), &mut new_mic), (system.as_ref(), &mut new_system)] {
+                let Some(path) = path else { continue };
+                if !path.exists() {
+                    // A row naming a file that is gone is a pre-existing
+                    // problem, not one to fix by failing here.
+                    continue;
+                }
+                report.files_examined += 1;
+                match audio::codec::compact(path) {
+                    Ok(done) => {
+                        report.bytes_before += done.before_bytes;
+                        report.bytes_after += done.after_bytes;
+                        if done.path != *path {
+                            report.files_compacted += 1;
+                            *out = Some(done.path);
+                            changed = true;
+                        }
+                    }
+                    Err(e) => {
+                        report.files_failed += 1;
+                        eprintln!("[compact] skipped {} — {e}", path.display());
+                    }
+                }
+            }
+
+            if changed && segment.id > 0 {
+                let sys = new_system.as_ref().map(|p| p.to_string_lossy().to_string());
+                let mic_str = new_mic
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys.as_deref()) {
+                    eprintln!("[compact] converted {} but could not record it: {e}", segment.id);
+                }
+            }
+        }
+    }
+
+    println!(
+        "[compact] {} of {} files, {} MB -> {} MB, {} failed",
+        report.files_compacted,
+        report.files_examined,
+        report.bytes_before / 1_048_576,
+        report.bytes_after / 1_048_576,
+        report.files_failed
+    );
+
+    Ok(report)
 }
 
 /// Rebuild `{note_id}.wav` from all of the note's recording segments, in order.

@@ -711,6 +711,25 @@ impl Database {
     }
 
     /// Update segment duration when recording stops
+    /// Point a segment at where its audio now lives.
+    ///
+    /// Used after compaction rewrites a recording in a smaller format. The
+    /// paths are updated only once the new files are on disk and verified
+    /// readable, so a row never names a file that does not exist.
+    pub fn update_segment_paths(
+        &self,
+        segment_id: i64,
+        mic_path: &str,
+        system_path: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE audio_segments SET mic_path = ?1, system_path = ?2 WHERE id = ?3",
+            params![mic_path, system_path, segment_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_segment_duration(&self, segment_id: i64, duration_ms: i64) -> anyhow::Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
         conn.execute(
@@ -747,6 +766,28 @@ impl Database {
 
         let segments = stmt
             .query_map([note_id], map_audio_segment)?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(segments)
+    }
+
+    /// Every recording segment in the library, oldest first.
+    ///
+    /// For maintenance passes over all stored audio. Ordered by id so an
+    /// interrupted run resumes over roughly the same ground rather than
+    /// jumping about.
+    pub fn all_audio_segments(&self) -> anyhow::Result<Vec<AudioSegment>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, note_id, segment_index, mic_path, system_path, start_offset_ms, duration_ms, display_order, created_at
+             FROM audio_segments
+             ORDER BY id ASC",
+        )?;
+
+        let segments = stmt
+            .query_map([], map_audio_segment)?
             .filter_map(|r| r.ok())
             .collect();
 

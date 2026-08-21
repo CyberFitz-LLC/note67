@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { StorageSettings } from "./StorageSettings";
 import { invoke } from "@tauri-apps/api/core";
 
 import { useInputDevices, useOutputDevices } from "../../hooks";
@@ -785,6 +786,13 @@ export function SystemTab({ onPermissionChange }: SystemTabProps) {
 
       {/* Restarts the test whenever either selection changes. */}
       <DeviceTestPanel boundTo={`${selectedDevice ?? ""}|${selectedOutputDevice ?? ""}`} />
+
+      <div
+        className="pt-4"
+        style={{ borderTop: "1px solid var(--color-border)" }}
+      >
+        <StorageSettings />
+      </div>
 
       <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
         System settings are stored locally on this device.

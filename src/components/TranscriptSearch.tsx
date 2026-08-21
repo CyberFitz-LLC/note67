@@ -2,7 +2,27 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import type { TranscriptSegment, AudioSegment, UploadedAudio } from "../types";
 import { groupTranscriptsBySource } from "./transcriptGrouping";
 
-type SpeakerFilter = "all" | "you" | "others";
+/// Either every speaker, or one speaker's exact label.
+///
+/// This used to be `"all" | "you" | "others"`, which held only while a
+/// recording had two tracks. A diarized upload comes back as `Speaker 1..N`,
+/// so the choices have to come from the transcript rather than be fixed.
+type SpeakerFilter = "all" | { speaker: string };
+
+const ALL: SpeakerFilter = "all";
+
+function isSameFilter(a: SpeakerFilter, b: SpeakerFilter): boolean {
+  if (a === "all" || b === "all") return a === b;
+  return a.speaker === b.speaker;
+}
+
+/// A diarizer's placeholder, not a person.
+///
+/// Mirrors `merge::is_generic` in Rust, which the receipt chain relies on to
+/// avoid claiming a machine label is somebody's name.
+export function isPlaceholderSpeaker(speaker: string): boolean {
+  return /^speaker\s*\d+$/i.test(speaker.trim());
+}
 
 // Common abbreviations that end in "." but don't end a sentence. Kept
 // collision-free (no "no"/"co" etc. which are also ordinary words).
@@ -121,8 +141,11 @@ function SpeakerLabel({
 
   if (!speaker) return null;
 
-  // "Me" or profile name are considered "you"
-  const isYou = speaker !== "Others";
+  // Your own voice gets the accent: the mic track, whether it is labelled
+  // "You", "Me" or your profile name. "Others" is the far track, and
+  // "Speaker 1..N" are a diarizer's guesses — neither is you, and neither
+  // should be coloured as though the app knows who it is.
+  const isYou = speaker !== "Others" && !isPlaceholderSpeaker(speaker);
 
   if (editing && onRename) {
     return (
@@ -191,7 +214,7 @@ export function TranscriptSearch({
   onRenameSpeaker,
 }: TranscriptSearchProps) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [speakerFilter, setSpeakerFilter] = useState<SpeakerFilter>("all");
+  const [speakerFilter, setSpeakerFilter] = useState<SpeakerFilter>(ALL);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   // Signature that changes whenever transcript content grows — captures both
   // new segments and text appended to the last segment, so auto-scroll keeps
@@ -203,6 +226,19 @@ export function TranscriptSearch({
   // Check if we have speaker data in any segment
   const hasSpeakerData = useMemo(() => {
     return segments.some((s) => s.speaker !== null);
+  }, [segments]);
+
+  // Every speaker actually present, in the order they first speak. Ordering by
+  // first appearance rather than alphabetically keeps `Speaker 10` from sorting
+  // between `Speaker 1` and `Speaker 2`, and puts whoever opened the meeting first.
+  const speakers = useMemo(() => {
+    const seen: string[] = [];
+    for (const segment of segments) {
+      if (segment.speaker && !seen.includes(segment.speaker)) {
+        seen.push(segment.speaker);
+      }
+    }
+    return seen;
   }, [segments]);
 
   // Auto-scroll to bottom when transcript content grows (only in live mode)
@@ -219,15 +255,8 @@ export function TranscriptSearch({
 
     // Filter by speaker
     if (speakerFilter !== "all") {
-      result = result.filter((s) => {
-        if (speakerFilter === "you") {
-          // "You" includes any speaker that isn't "Others"
-          return s.speaker !== null && s.speaker !== "Others";
-        } else {
-          // "Others" is specifically the "Others" speaker
-          return s.speaker === "Others";
-        }
-      });
+      const wanted = speakerFilter.speaker;
+      result = result.filter((s) => s.speaker === wanted);
     }
 
     // Filter by search query
@@ -331,42 +360,33 @@ export function TranscriptSearch({
           <span className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
             Speaker:
           </span>
-          <div className="flex gap-1">
-            {(["all", "you", "others"] as SpeakerFilter[]).map((filter) => (
-              <button
-                key={filter}
-                onClick={() => setSpeakerFilter(filter)}
-                className="px-3 py-1 text-xs font-medium rounded-full transition-colors"
-                style={{
-                  backgroundColor:
-                    speakerFilter === filter
-                      ? filter === "you"
+          <div className="flex gap-1 flex-wrap">
+            {([ALL, ...speakers.map((s) => ({ speaker: s }))] as SpeakerFilter[]).map(
+              (filter) => {
+                const label = filter === "all" ? "All" : filter.speaker;
+                const selected = isSameFilter(speakerFilter, filter);
+                return (
+                  <button
+                    key={label}
+                    onClick={() => setSpeakerFilter(filter)}
+                    className="px-3 py-1 text-xs font-medium rounded-full transition-colors"
+                    style={{
+                      backgroundColor: selected
                         ? "var(--color-accent-light)"
-                        : filter === "others"
-                        ? "rgba(100, 116, 139, 0.15)"
-                        : "var(--color-bg-elevated)"
-                      : "var(--color-bg-subtle)",
-                  color:
-                    speakerFilter === filter
-                      ? filter === "you"
+                        : "var(--color-bg-subtle)",
+                      color: selected
                         ? "var(--color-accent)"
-                        : filter === "others"
-                        ? "var(--color-text-secondary)"
-                        : "var(--color-text)"
-                      : "var(--color-text-tertiary)",
-                  border:
-                    speakerFilter === filter
-                      ? filter === "you"
+                        : "var(--color-text-tertiary)",
+                      border: selected
                         ? "1px solid var(--color-accent)"
-                        : filter === "others"
-                        ? "1px solid var(--color-text-secondary)"
-                        : "1px solid var(--color-border)"
-                      : "1px solid transparent",
-                }}
-              >
-                {filter === "all" ? "All" : filter === "you" ? "You" : "Others"}
-              </button>
-            ))}
+                        : "1px solid transparent",
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              }
+            )}
           </div>
         </div>
       )}
@@ -375,7 +395,7 @@ export function TranscriptSearch({
       {(searchQuery || speakerFilter !== "all") && (
         <p className="text-sm mt-4" style={{ color: "var(--color-text-secondary)" }}>
           {filteredSegments.length} of {segments.length} segments
-          {speakerFilter !== "all" && ` (${speakerFilter === "you" ? "You" : "Others"})`}
+          {speakerFilter !== "all" && ` (${speakerFilter.speaker})`}
         </p>
       )}
 

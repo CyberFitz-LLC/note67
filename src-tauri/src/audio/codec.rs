@@ -216,6 +216,81 @@ pub fn encode_flac_16k_mono(samples: &[f32], path: &Path) -> Result<(), AudioErr
     Ok(())
 }
 
+/// What compacting one recording achieved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Compacted {
+    pub path: std::path::PathBuf,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+}
+
+/// Rewrite a recording as 16 kHz mono FLAC and remove the original.
+///
+/// The order here is the whole point, because this deletes the only copy of
+/// something that cannot be recorded again:
+///
+/// 1. decode the original — a failure here leaves it untouched;
+/// 2. encode beside it under a temporary name, so a crash cannot leave a
+///    half-written file sitting at the name everything will look for;
+/// 3. **decode what was just written**, and require it to hold the samples it
+///    should. An encoder that silently produced an unreadable file is exactly
+///    the failure this feature could cause, and it is cheap to rule out;
+/// 4. only then move it into place and delete the source.
+///
+/// A file that is already FLAC is left alone and reported as unchanged, so this
+/// is safe to run repeatedly over a whole library.
+pub fn compact(src: &Path) -> Result<Compacted, AudioError> {
+    let before_bytes = std::fs::metadata(src)?.len();
+
+    if src.extension().and_then(|e| e.to_str()) == Some("flac") {
+        return Ok(Compacted {
+            path: src.to_path_buf(),
+            before_bytes,
+            after_bytes: before_bytes,
+        });
+    }
+
+    let samples = decode_to_16k_mono(src)?;
+    let expected = samples.len();
+
+    let final_path = src.with_extension("flac");
+    let temp_path = src.with_extension("flac.partial");
+    encode_flac_16k_mono(&samples, &temp_path)?;
+
+    match decode_to_16k_mono(&temp_path) {
+        Ok(back) if back.len() >= expected => {}
+        Ok(back) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(AudioError::IoError(std::io::Error::other(format!(
+                "compaction would have lost audio: {} samples in, {} back",
+                expected,
+                back.len()
+            ))));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(AudioError::IoError(std::io::Error::other(format!(
+                "compacted file was not readable, original kept: {e}"
+            ))));
+        }
+    }
+
+    std::fs::rename(&temp_path, &final_path)?;
+    let after_bytes = std::fs::metadata(&final_path)?.len();
+
+    // Only now. And only if the FLAC took a different name, or this would
+    // delete what was just written.
+    if final_path != src {
+        std::fs::remove_file(src)?;
+    }
+
+    Ok(Compacted {
+        path: final_path,
+        before_bytes,
+        after_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +480,78 @@ mod tests {
         let back = decode_to_16k_mono(&path).expect("decode");
         assert!(back[0] > 0.9, "positive peak wrapped: {}", back[0]);
         assert!(back[1] < -0.9, "negative peak wrapped: {}", back[1]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn compaction_shrinks_a_recording_and_replaces_it() {
+        let wav = tmp("compact-me.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).expect("wav");
+        for s in signal(48_000 * 2) {
+            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            w.write_sample(v).expect("l");
+            w.write_sample(v).expect("r");
+        }
+        w.finalize().expect("finalize");
+
+        let result = compact(&wav).expect("compact");
+        assert!(!wav.exists(), "the original should be gone");
+        assert!(result.path.exists(), "the FLAC should be in its place");
+        assert_eq!(result.path.extension().unwrap(), "flac");
+        assert!(
+            result.after_bytes * 4 < result.before_bytes,
+            "expected a large saving: {} -> {}",
+            result.before_bytes,
+            result.after_bytes
+        );
+        // And it is still audio.
+        let back = decode_to_16k_mono(&result.path).expect("decode");
+        assert!(back.iter().any(|s| s.abs() > 0.05));
+        let _ = std::fs::remove_file(&result.path);
+    }
+
+    #[test]
+    fn compacting_an_unreadable_file_leaves_it_alone() {
+        // The rule that matters: a recording is never deleted on the strength
+        // of a conversion that did not work.
+        let path = tmp("not-audio.wav");
+        std::fs::write(&path, b"this is not a wav file").expect("write");
+        assert!(compact(&path).is_err());
+        assert!(path.exists(), "the original was destroyed on a failed convert");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn compacting_twice_is_harmless() {
+        // Migration over a whole library has to be re-runnable — it will be
+        // interrupted at some point.
+        let path = tmp("twice.flac");
+        encode_flac_16k_mono(&signal(8192), &path).expect("encode");
+        let size = std::fs::metadata(&path).unwrap().len();
+
+        let result = compact(&path).expect("compact an existing flac");
+        assert_eq!(result.before_bytes, result.after_bytes);
+        assert!(path.exists());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size, "it was rewritten");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failed_conversion_leaves_no_partial_file_behind() {
+        let path = tmp("partial-check.wav");
+        std::fs::write(&path, b"garbage").expect("write");
+        let _ = compact(&path);
+        assert!(
+            !path.with_extension("flac.partial").exists(),
+            "a partial file was left where a later run could mistake it for audio"
+        );
+        assert!(!path.with_extension("flac").exists());
         let _ = std::fs::remove_file(&path);
     }
 

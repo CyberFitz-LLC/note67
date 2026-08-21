@@ -263,8 +263,10 @@ Notes on doing it properly:
 - **Chunking is tuned for a 4096 context.** `MAX_CONTENT_LENGTH` and
   `split_into_chunks` predate configurable providers, so a long-context model
   gets more round-trips than it needs. Works, wastes time.
-- **Recordings are never pruned.** Uncompressed WAV at roughly 10 MB per minute
-  per track, two tracks per meeting, nothing cleans up.
+- **Recordings are never pruned.** Still true, but much less pressing since
+  2026-08-21: recordings are stored as 16 kHz mono FLAC, about an eighth of
+  what they took, and Settings → System will compact an existing library. What
+  remains is that nothing ever deletes anything.
 - **DOCX transcript import.** VTT covers Teams; DOCX is the other export and
   yields poorer structure.
 

@@ -403,6 +403,7 @@ pub fn run() {
             commands::playback_needs_rebuild,
             commands::rebuild_note_playback,
             commands::stop_dual_recording_with_segments,
+            commands::compact_recordings,
             commands::is_dual_recording,
             // Pause/Resume/Continue recording commands
             commands::get_recording_phase,
