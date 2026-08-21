@@ -259,7 +259,12 @@ jobs:
           # to unexpected compilation errors" and a quietly miscompiled CUDA
           # kernel is worse than a red build. CUDAFLAGS is CMake's own
           # environment variable for seeding CMAKE_CUDA_FLAGS.
-          CUDAFLAGS: "-Xcompiler=/Zc:preprocessor"
+          # `-std=c++17` because CUB — CCCL's other half — hard-#errors below
+          # it, and nothing in whisper.cpp's CMake sets a CUDA standard, so
+          # nvcc was defaulting to C++14. CCCL offers
+          # CCCL_IGNORE_DEPRECATED_CPP_DIALECT to silence that too; compiling
+          # a library in the dialect it asks for is the actual fix.
+          CUDAFLAGS: "-std=c++17 -Xcompiler=/Zc:preprocessor"
         run: |
           if [ "${{ matrix.variant }}" = "cuda" ]; then
             # Resource paths are relative to src-tauri; "./" puts them next to
