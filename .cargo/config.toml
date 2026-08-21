@@ -1,0 +1,12 @@
+# Applies to local builds as well as CI, so a developer's own Windows build is
+# as portable as the released one. See src-tauri/cmake/portable-cpu.cmake for why.
+#
+# Deliberately at the repo root, not in src-tauri/: cargo discovers config.toml
+# from the *current directory* upward, and this repo invokes cargo from both
+# places — `npm run tauri build` runs it in src-tauri/, while the test step uses
+# `--manifest-path` from the root. Only a root-level config covers both.
+#
+# `relative = true` resolves against this file's parent directory (the repo
+# root), so it holds wherever cargo is invoked from.
+[env]
+CMAKE_TOOLCHAIN_FILE = { value = "src-tauri/cmake/portable-cpu.cmake", relative = true, force = false }

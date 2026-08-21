@@ -2,7 +2,10 @@ mod ai;
 mod audio;
 mod commands;
 mod db;
+mod exochain;
 mod meeting_detection;
+pub mod merge;
+mod sync;
 mod transcription;
 
 use commands::{init_transcription_state, AiState, AudioState};
@@ -164,8 +167,21 @@ pub fn run() {
             // Clean up orphaned temp files from interrupted uploads
             cleanup_temp_files(app.handle());
 
-            app.manage(AudioState::default());
-            app.manage(AiState::default());
+            let audio_state = AudioState::default();
+            // Restore the pinned microphone before any recording can start.
+            if let Some(db) = app.try_state::<Database>() {
+                commands::restore_preferred_input_device(&audio_state, &db);
+                commands::restore_preferred_output_device(&audio_state, &db);
+            }
+            app.manage(audio_state);
+            app.manage(commands::device_test::DeviceTestState::default());
+
+            let ai_state = AiState::default();
+            // Restore the saved model backend before the UI queries its status.
+            if let Some(db) = app.try_state::<Database>() {
+                tauri::async_runtime::block_on(commands::restore_provider_config(&ai_state, &db));
+            }
+            app.manage(ai_state);
             let transcription_state = init_transcription_state(app.handle());
             app.manage(transcription_state);
 
@@ -346,6 +362,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             show_main_window,
+            commands::start_device_test,
+            commands::stop_device_test,
+            commands::get_device_test_levels,
+            commands::merge_transcript_into_note,
+            commands::set_segment_speaker,
+            commands::install_exochain_credential,
+            commands::remove_exochain_credential,
+            commands::verify_transcript,
+            commands::attest_meeting,
+            commands::get_exochain_identity,
             commands::create_note,
             commands::get_note,
             commands::list_notes,
@@ -364,6 +390,13 @@ pub fn run() {
             commands::has_microphone_permission,
             commands::get_microphone_auth_status,
             commands::request_microphone_permission,
+            commands::list_audio_input_devices,
+            commands::is_output_device_selectable,
+            commands::list_audio_output_devices,
+            commands::get_preferred_output_device,
+            commands::set_preferred_output_device,
+            commands::get_preferred_input_device,
+            commands::set_preferred_input_device,
             commands::start_dual_recording,
             commands::stop_dual_recording,
             commands::get_segment_playback_path,
@@ -408,6 +441,9 @@ pub fn run() {
             commands::retranscribe_note,
             // AI commands
             commands::get_ollama_status,
+            commands::get_ai_provider_config,
+            commands::set_ai_provider_config,
+            commands::test_ai_connection,
             commands::list_ollama_models,
             commands::select_ollama_model,
             commands::get_selected_model,
@@ -442,6 +478,8 @@ pub fn run() {
             // Settings commands
             commands::get_theme_preference,
             commands::set_theme_preference,
+            commands::get_transcript_chain,
+            commands::import_vtt_transcript,
             commands::get_setting,
             commands::set_setting,
             commands::get_settings,

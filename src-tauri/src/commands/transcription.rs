@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-use whisper_rs::{WhisperContext, WhisperContextParameters};
+use whisper_rs::WhisperContext;
 
 use crate::commands::audio::AudioState;
 use crate::db::models::NewTranscriptSegment;
 use crate::db::Database;
 use crate::transcription::{
-    is_echo_of_system, live, should_skip_segment, LiveTranscriptionState, ModelInfo, ModelManager,
+    is_echo_of_system, live, live_stream, should_skip_segment, LiveTranscriptionState, ModelInfo,
+    ModelManager,
     ModelSize, TranscriptionResult, Transcriber,
 };
 
@@ -186,15 +187,13 @@ pub fn load_model(size: String, state: State<TranscriptionState>) -> Result<(), 
         return Err(format!("Model {} is not downloaded", size));
     }
 
-    // Load the model
-    let transcriber = Transcriber::new(&model_path).map_err(|e| e.to_string())?;
-
-    // Also load WhisperContext for live transcription
-    let whisper_ctx = WhisperContext::new_with_params(
-        model_path.to_str().unwrap(),
-        WhisperContextParameters::default(),
-    )
-    .map_err(|e| format!("Failed to load whisper context: {}", e))?;
+    // Load the model once. This used to load it twice — once inside the
+    // transcriber and again for live transcription — leaving two copies of the
+    // weights resident (~900MB each for large-v3-turbo-q8). Whisper keeps the
+    // weights on the context and per-run scratch on the states created from it,
+    // so a single context serves both callers.
+    let whisper_ctx = Arc::new(Transcriber::load_context(&model_path).map_err(|e| e.to_string())?);
+    let transcriber = Transcriber::from_context(Arc::clone(&whisper_ctx));
 
     // Store the transcriber
     {
@@ -205,7 +204,7 @@ pub fn load_model(size: String, state: State<TranscriptionState>) -> Result<(), 
     // Store the whisper context
     {
         let mut ctx = state.whisper_ctx.lock().map_err(|e| e.to_string())?;
-        *ctx = Some(Arc::new(whisper_ctx));
+        *ctx = Some(whisper_ctx);
     }
 
     // Update current model
@@ -430,6 +429,11 @@ pub fn add_transcript_segment(
 }
 
 /// Start live transcription during recording
+///
+/// Routes to the streaming recogniser or to local whisper depending on the
+/// configured backend. The two cannot both run: they drain the same capture
+/// buffers, so whichever ran second would be transcribing the gaps in the
+/// first one's audio.
 #[tauri::command]
 pub async fn start_live_transcription(
     app: AppHandle,
@@ -437,15 +441,44 @@ pub async fn start_live_transcription(
     language: Option<String>,
     state: State<'_, TranscriptionState>,
     audio_state: State<'_, AudioState>,
+    db: State<'_, Database>,
 ) -> Result<(), String> {
-    // Get the whisper context
+    use crate::transcription::backend;
+
+    // Read per start rather than cached, so changing the setting takes effect
+    // on the next recording instead of the next restart.
+    let get = |key: &str| db.get_setting(key).ok().flatten();
+    let resolved = backend::resolve(
+        &get(backend::BACKEND_KEY).unwrap_or_default(),
+        get(backend::BASE_URL_KEY).as_deref(),
+        get(backend::API_KEY_KEY).as_deref(),
+        get(backend::MAX_SPEAKERS_KEY).as_deref(),
+        get(backend::STREAM_URL_KEY).as_deref(),
+    );
+
+    let recording_state = audio_state.recording.clone();
+    let live_state = state.live_state.clone();
+
+    // Streaming needs no local model, so it must not be gated behind one — a
+    // user on this backend may never have downloaded a whisper model at all.
+    if let backend::Backend::Streaming { ws_url } = resolved {
+        return live_stream::start_streaming_transcription(
+            app,
+            note_id,
+            ws_url,
+            recording_state,
+            live_state,
+        )
+        .await
+        .map_err(|e| e.to_string());
+    }
+
+    // Anything else transcribes locally. `resolve` already returns Local for a
+    // remote backend that is unusable, so this is also the fall-back path.
     let whisper_ctx = {
         let guard = state.whisper_ctx.lock().map_err(|e| e.to_string())?;
         guard.clone().ok_or("No model loaded. Please load a model first.")?
     };
-
-    let recording_state = audio_state.recording.clone();
-    let live_state = state.live_state.clone();
 
     live::start_live_transcription(app, note_id, language, recording_state, live_state, whisper_ctx)
         .await
@@ -469,6 +502,7 @@ pub async fn stop_live_transcription(
         note_id,
         segments: vec![],
         is_final: true,
+        partial: false,
         audio_source: crate::transcription::AudioSource::Mic, // Default for final event
     };
     let _ = app.emit("transcription-update", event);
@@ -889,6 +923,23 @@ pub async fn retranscribe_note(
     }
 
     state.is_transcribing.store(false, Ordering::SeqCst);
+
+    // Extend the chain. Re-transcription that lands on identical text records
+    // nothing — that is not a new state — so this is a no-op more often than
+    // not. Logged rather than propagated: the transcript was replaced
+    // successfully, and failing here would report the whole pass as failed.
+    match db.record_transcript_version(
+        &note_id,
+        crate::exochain::Origin::Recorded,
+        crate::exochain::Reason::Retranscribe,
+    ) {
+        Ok(Some(v)) => println!(
+            "[retranscribe] transcript v{} recorded for {} ({})",
+            v.version, note_id, v.content_hash
+        ),
+        Ok(None) => println!("[retranscribe] transcript unchanged for {note_id}; no new version"),
+        Err(e) => eprintln!("Failed to record the transcript version for {note_id}: {e}"),
+    }
 
     // Emit final progress
     let _ = app.emit("retranscribe-progress", serde_json::json!({

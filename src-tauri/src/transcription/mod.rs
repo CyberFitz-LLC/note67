@@ -1,10 +1,40 @@
+pub mod live_stream;
 pub mod live;
 pub mod model;
+pub mod backend;
+pub mod remote;
+pub mod streaming;
 pub mod transcriber;
 
 pub use live::{AudioSource, LiveTranscriptionState, TranscriptionUpdateEvent};
 pub use model::{ModelInfo, ModelManager, ModelSize};
 pub use transcriber::{TranscriptionResult, TranscriptionSegment, Transcriber};
+
+/// Serialises Whisper inference across the whole process.
+///
+/// Whisper states are independent of each other, but a GPU backend keeps
+/// device, queue and buffer state on the *context*, and running two graph
+/// computations against one context at the same time crashes the process.
+///
+/// Live transcription drives mic and system audio concurrently through one
+/// shared context, which was harmless while every build was CPU-only and is
+/// not once a Vulkan or CUDA backend is compiled in. The GPU serialises the
+/// work at the device anyway, so holding this costs far less than it looks.
+///
+/// Held only inside blocking transcription calls, never across an await.
+pub fn inference_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Take the inference lock, recovering from poisoning.
+///
+/// The guard protects ordering, not data, so a thread that panicked mid-run
+/// leaves nothing inconsistent behind — refusing to transcribe ever again
+/// would be the worse outcome.
+pub fn lock_inference() -> std::sync::MutexGuard<'static, ()> {
+    inference_lock().lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Whether a transcript segment should be dropped rather than saved/displayed.
 ///

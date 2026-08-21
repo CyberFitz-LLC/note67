@@ -27,6 +27,13 @@ export const defaultCommands: CommandMap = {
   set_theme_preference: null,
 
   // settings
+  get_transcript_chain: { versions: [], intact: true },
+  import_vtt_transcript: {
+    noteId: "note-imported",
+    title: "Imported transcript",
+    segmentCount: 0,
+    speakers: [],
+  },
   get_settings: {},
   get_setting: null,
   set_setting: null,
@@ -48,6 +55,16 @@ export const defaultCommands: CommandMap = {
   get_microphone_auth_status: 3, // Authorized
   request_microphone_permission: true,
   open_microphone_settings: null,
+  list_audio_input_devices: [
+    { name: "Built-in Microphone", isDefault: true },
+    { name: "Blue Yeti", isDefault: false },
+  ],
+  get_preferred_input_device: null, // follows the system default
+  set_preferred_input_device: null,
+  is_output_device_selectable: false, // Windows-only; off in the mocked env
+  list_audio_output_devices: [],
+  get_preferred_output_device: null,
+  set_preferred_output_device: null,
   is_system_audio_supported: true,
   has_system_audio_permission: true,
   request_system_audio_permission: true,
@@ -56,16 +73,32 @@ export const defaultCommands: CommandMap = {
   set_autostart_enabled: null,
   is_meeting_detection_enabled: false,
 
-  // Ollama (running + model selected)
+  // Model backend (running + model selected)
   get_ollama_status: {
     running: true,
     models: [{ name: "gemma3:4b" }],
     selected_model: "gemma3:4b",
+    provider: "ollama",
   },
   list_ollama_models: [{ name: "gemma3:4b" }],
   get_selected_model: "gemma3:4b",
   select_ollama_model: null,
   is_ai_generating: false,
+  get_ai_provider_config: {
+    provider: "ollama",
+    baseUrl: "http://localhost:11434",
+    hasApiKey: false,
+  },
+  set_ai_provider_config: {
+    provider: "ollama",
+    baseUrl: "http://localhost:11434",
+    hasApiKey: false,
+  },
+  test_ai_connection: {
+    ok: true,
+    message: "Connected. 1 model(s) available.",
+    modelCount: 1,
+  },
 
   // Whisper (a model is downloaded + loaded)
   list_models: [{ size: "large-v3-turbo", downloaded: true }],

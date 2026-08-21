@@ -32,7 +32,7 @@ fn rms(samples: &[f32]) -> f32 {
 }
 
 /// Peak the mic chunk aims for after normalization.
-const MIC_TARGET_PEAK: f32 = 0.3;
+pub(crate) const MIC_TARGET_PEAK: f32 = 0.3;
 /// Ceiling on the normalization gain. This is the safety property: it stops
 /// near-silence being amplified up to speech level, so the voice-activity gate
 /// downstream still separates the two.
@@ -41,14 +41,14 @@ const MIC_TARGET_PEAK: f32 = 0.3;
 /// to reach the target, so the cap never binds on speech, while the noise floor
 /// would have needed 25–46x and is clamped here. That leaves speech landing at
 /// RMS 0.026–0.033 and noise at most 0.012, with the 0.02 gate between them.
-const MIC_MAX_GAIN: f32 = 8.0;
+pub(crate) const MIC_MAX_GAIN: f32 = 8.0;
 
 /// Scale `samples` up toward `target_peak`, never by more than `max_gain`.
 ///
 /// Whisper (and the RMS gate) expect roughly line-level audio. Some mics sit
 /// tens of dB below full scale, which made both behave as if nothing was said.
 /// Only ever amplifies — already-loud audio is left alone.
-fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
+pub(crate) fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f32) {
     let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     if peak <= f32::EPSILON {
         return;
@@ -107,7 +107,22 @@ pub enum AudioSource {
 pub struct TranscriptionUpdateEvent {
     pub note_id: String,
     pub segments: Vec<TranscriptionSegment>,
+    /// Whether live transcription has finished for this note.
+    ///
+    /// Not the opposite of `partial`. The local path emits complete segments
+    /// and leaves this false throughout; only a stream ending sets it. The UI
+    /// uses it to switch the "transcribing" indicator off, so setting it on
+    /// every settled utterance would report the recording as finished while it
+    /// was still running.
     pub is_final: bool,
+    /// Whether this text is still being revised.
+    ///
+    /// A streaming recogniser sends the same utterance repeatedly as it grows —
+    /// "So", "So I", "So I think" — each one superseding the last. The UI has to
+    /// replace the previous partial for this track rather than append, or a
+    /// sentence arrives as every prefix of itself. Whisper never sets this: its
+    /// segments are complete when they arrive.
+    pub partial: bool,
     /// The source of the audio (mic or system)
     pub audio_source: AudioSource,
 }
@@ -406,6 +421,7 @@ pub async fn start_live_transcription(
                         note_id: note_id_clone.clone(),
                         segments: valid_segments,
                         is_final: false,
+                        partial: false,
                         audio_source: AudioSource::Mic,
                     });
                 }
@@ -436,6 +452,7 @@ pub async fn start_live_transcription(
                     note_id: note_id_clone.clone(),
                     segments: current_system_segments,
                     is_final: false,
+                    partial: false,
                     audio_source: AudioSource::System,
                 });
             }
@@ -500,6 +517,11 @@ fn transcribe_samples(
     time_offset: f64,
     language: Option<&str>,
 ) -> Result<TranscriptionResult, TranscriptionError> {
+    // One inference at a time: mic and system audio are transcribed
+    // concurrently against a shared context, which a GPU backend cannot take.
+    // See transcription::inference_lock.
+    let _inference = crate::transcription::lock_inference();
+
     // Convert to mono if needed
     let mono_samples: Vec<f32> = if channels > 1 {
         samples
@@ -577,6 +599,7 @@ fn transcribe_samples(
                 start_time,
                 end_time,
                 text,
+                speaker: None,
             });
         }
     }
@@ -595,7 +618,7 @@ fn num_cpus() -> i32 {
         .min(8)
 }
 
-fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+pub(crate) fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     let ratio = to_rate as f64 / from_rate as f64;
     let new_len = (samples.len() as f64 * ratio) as usize;
     let mut result = Vec::with_capacity(new_len);

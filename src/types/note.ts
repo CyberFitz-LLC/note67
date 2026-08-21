@@ -43,10 +43,7 @@ export interface Summary {
 }
 
 export type SummaryType =
-  | "overview"
-  | "action_items"
-  | "key_decisions"
-  | "custom";
+  "overview" | "action_items" | "key_decisions" | "custom";
 
 // #3: Action items — structured rows (the action_items table is the source of
 // truth), edited in the note's Actions tab and surfaced in the global Tasks view.
@@ -111,18 +108,35 @@ export interface TranscriptionResult {
   language: string | null;
 }
 
-// Ollama types for AI summaries
+// Which kind of model server the app talks to
+export type AiProvider = "ollama" | "openai_compat";
+
+// A model offered by the configured backend.
 export interface OllamaModel {
   name: string;
-  size: number;
-  modified_at: string;
-  digest: string;
+  /** Bytes on disk. Ollama reports this; OpenAI-compatible servers do not. */
+  size?: number;
+  modified_at?: string;
 }
 
 export interface OllamaStatus {
   running: boolean;
   models: OllamaModel[];
   selected_model: string | null;
+  provider: AiProvider;
+}
+
+// Provider settings. The API key is never returned, only whether one is set.
+export interface AiProviderConfig {
+  provider: AiProvider;
+  baseUrl: string;
+  hasApiKey: boolean;
+}
+
+export interface AiConnectionTest {
+  ok: boolean;
+  message: string;
+  modelCount: number;
 }
 
 // Audio segment for pause/resume/continue recording
@@ -137,6 +151,54 @@ export interface AudioSegment {
   duration_ms: number | null;
   display_order: number;
   created_at: string;
+}
+
+// A device that can be picked: a microphone to record from, or (Windows only)
+// a playback device to capture system audio from. Matches Rust AudioDevice.
+export interface AudioDevice {
+  /**
+   * Stable per endpoint, and what a preference should store.
+   *
+   * Empty for microphones, where the platform exposes no id — there the name
+   * is all there is. Playback endpoints do have one, and need it: Windows can
+   * present several under a single name and only one of them carries the
+   * audio an application is playing.
+   */
+  id: string;
+  name: string;
+  /**
+   * For a system-audio source: captured by loopback on a playback endpoint,
+   * or recorded from directly.
+   *
+   * Virtual mixers make this matter. VoiceMeeter consumes what an application
+   * plays into it and re-emits the mix on its own recording devices, so
+   * loopback on the playback side hears nothing.
+   */
+  isLoopback?: boolean;
+  /** Whether this is the OS default for its direction */
+  isDefault: boolean;
+}
+
+// A link in a note's transcript version chain (matches Rust TranscriptVersion)
+export interface TranscriptVersion {
+  version: number;
+  contentHash: string;
+  parentHash: string | null;
+  serialization: string;
+  /** "recorded" = Note67 captured and produced it; "imported" = it arrived from elsewhere */
+  origin: "recorded" | "imported" | "merged";
+  reason: "initial" | "retranscribe" | "edit" | "import" | "merge";
+  segmentCount: number;
+  createdAt: string;
+  /** Present once a node has signed this version */
+  receiptHash?: string;
+}
+
+export interface TranscriptChain {
+  versions: TranscriptVersion[];
+  /** False when a version was removed, reordered or substituted */
+  intact: boolean;
+  brokenReason?: string;
 }
 
 // Recording phase enum (matches Rust RecordingPhase)

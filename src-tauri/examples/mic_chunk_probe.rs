@@ -11,6 +11,15 @@ use std::path::Path;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+// ggml's CPU backend reads the registry to detect CPU features, so linking it
+// needs advapi32. The library and binary pick that up from the crate's build
+// script; an example does not, which is why this file alone has failed to link
+// on Windows — and why CI produced no installer at all between 2026-08-09 and
+// now, since `build` is gated on `checks`.
+#[cfg(windows)]
+#[link(name = "advapi32")]
+unsafe extern "C" {}
+
 const TARGET_PEAK: f32 = 0.3;
 const MAX_GAIN: f32 = 8.0;
 const GATE: f32 = 0.02;

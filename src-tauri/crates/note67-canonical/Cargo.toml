@@ -1,0 +1,17 @@
+[package]
+name = "note67-canonical"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Byte-exact formats Note67 and its sync service must agree on"
+
+# Deliberately minimal. Anything that must produce identical bytes on both the
+# desktop app and the sync service belongs here; anything else does not. Extra
+# dependencies here become dependencies of both.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+blake3 = "1"
+bs58 = "0.5"
+hex = "0.4"
+thiserror = "2"

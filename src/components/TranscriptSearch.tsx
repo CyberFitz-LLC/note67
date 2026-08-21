@@ -107,14 +107,62 @@ function groupConsecutiveSegments(segments: TranscriptSegment[]): GroupedSegment
   return groups;
 }
 
-function SpeakerLabel({ speaker }: { speaker: string | null }) {
+function SpeakerLabel({
+  speaker,
+  segmentIds,
+  onRename,
+}: {
+  speaker: string | null;
+  segmentIds: number[];
+  onRename?: (segmentIds: number[], speaker: string | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(speaker ?? "");
+
   if (!speaker) return null;
 
   // "Me" or profile name are considered "you"
   const isYou = speaker !== "Others";
+
+  if (editing && onRename) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => setEditing(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            // Applies to this turn only. "Others" is several people, so
+            // renaming every segment that shares the label would put one
+            // name on all of them.
+            onRename(segmentIds, draft);
+            setEditing(false);
+          }
+          if (e.key === "Escape") {
+            setDraft(speaker);
+            setEditing(false);
+          }
+        }}
+        className="text-xs font-medium px-1 rounded"
+        style={{
+          color: "var(--color-text)",
+          backgroundColor: "var(--color-bg-subtle)",
+          width: `${Math.max(draft.length, 6)}ch`,
+        }}
+      />
+    );
+  }
+
   return (
     <span
-      className="text-xs font-medium"
+      className={`text-xs font-medium ${onRename ? "cursor-pointer hover:underline" : ""}`}
+      title={onRename ? "Click to name this speaker" : undefined}
+      onClick={() => {
+        if (!onRename) return;
+        setDraft(speaker);
+        setEditing(true);
+      }}
       style={{
         color: isYou ? "var(--color-accent)" : "var(--color-text-secondary)",
       }}
@@ -130,6 +178,8 @@ interface TranscriptSearchProps {
   uploads?: UploadedAudio[];
   onSegmentClick?: (segment: TranscriptSegment) => void;
   isLive?: boolean;
+  /** Supplied only where renaming makes sense — absent, labels are read-only. */
+  onRenameSpeaker?: (segmentIds: number[], speaker: string | null) => void;
 }
 
 export function TranscriptSearch({
@@ -138,6 +188,7 @@ export function TranscriptSearch({
   uploads = [],
   onSegmentClick,
   isLive = false,
+  onRenameSpeaker,
 }: TranscriptSearchProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [speakerFilter, setSpeakerFilter] = useState<SpeakerFilter>("all");
@@ -360,7 +411,11 @@ export function TranscriptSearch({
                     {group.speaker && (
                       <div className="flex gap-4 mb-1">
                         <span className="w-14 shrink-0" aria-hidden="true" />
-                        <SpeakerLabel speaker={group.speaker} />
+                        <SpeakerLabel
+                          speaker={group.speaker}
+                          segmentIds={group.ids}
+                          onRename={onRenameSpeaker}
+                        />
                       </div>
                     )}
                     {/* One line per sentence (reads as prose); a timestamp is

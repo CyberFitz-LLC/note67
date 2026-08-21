@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
 use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,17 @@ pub struct RecordingState {
     pub sample_rate: AtomicU32,
     /// Number of channels (set when recording starts)
     pub channels: AtomicU32,
+    /// Input device the user pinned, by cpal device name. `None` follows the
+    /// system default. Read when a segment starts, so changing it mid-recording
+    /// takes effect on the next segment rather than cutting the current one.
+    pub preferred_input_device: std::sync::Mutex<Option<String>>,
+    /// The device the current stream actually opened.
+    ///
+    /// Distinct from the preference: a pinned device that has gone away falls
+    /// back to the default silently, so the preference alone does not say what
+    /// is being recorded. Without this the only way to tell which device a
+    /// meter is reading is to guess.
+    pub opened_input_device: std::sync::Mutex<Option<String>>,
 
     // === Pause/Resume/Continue fields ===
     /// Current recording phase (Idle, Recording, Paused)
@@ -71,6 +82,8 @@ impl RecordingState {
             audio_buffer: std::sync::Mutex::new(Vec::new()),
             sample_rate: AtomicU32::new(0),
             channels: AtomicU32::new(0),
+            preferred_input_device: std::sync::Mutex::new(None),
+            opened_input_device: std::sync::Mutex::new(None),
             // Pause/Resume/Continue fields
             phase: AtomicU8::new(RecordingPhase::Idle as u8),
             current_segment_index: AtomicU32::new(0),
@@ -81,6 +94,30 @@ impl RecordingState {
             // Nothing has been recorded yet, so there is nothing to wait for.
             file_finalized: AtomicBool::new(true),
         }
+    }
+
+    /// Get the pinned input device name, if any.
+    ///
+    /// A poisoned lock falls back to the system default rather than failing the
+    /// recording — losing the device preference is a far smaller problem than
+    /// losing the meeting.
+    pub fn get_preferred_input_device(&self) -> Option<String> {
+        self.preferred_input_device
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Pin an input device by name. `None` follows the system default.
+    pub fn set_preferred_input_device(&self, name: Option<String>) -> Result<(), AudioError> {
+        let mut guard = self
+            .preferred_input_device
+            .lock()
+            .map_err(|_| AudioError::LockError)?;
+        // Normalise "" to None so the resolver has one representation of
+        // "follow the system" to reason about.
+        *guard = name.filter(|n| !n.trim().is_empty());
+        Ok(())
     }
 
     /// Get the current recording phase
@@ -267,10 +304,11 @@ pub fn stop_recording_preserving_state(state: &RecordingState) -> Result<(Option
 }
 
 fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(), AudioError> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or(AudioError::NoInputDevice)?;
+    let preferred = state.get_preferred_input_device();
+    let device = crate::audio::devices::open_input_device(preferred.as_deref())?;
+    if let Ok(mut opened) = state.opened_input_device.lock() {
+        *opened = device.name().ok();
+    }
 
     let config = device.default_input_config()?;
     let sample_rate = config.sample_rate().0;
@@ -392,6 +430,65 @@ fn process_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_state_pins_no_input_device() {
+        assert_eq!(RecordingState::new().get_preferred_input_device(), None);
+    }
+
+    #[test]
+    fn the_pinned_input_device_round_trips() {
+        let state = RecordingState::new();
+        state
+            .set_preferred_input_device(Some("Blue Yeti".to_string()))
+            .unwrap();
+        assert_eq!(
+            state.get_preferred_input_device(),
+            Some("Blue Yeti".to_string())
+        );
+    }
+
+    #[test]
+    fn a_blank_device_name_means_follow_the_system_default() {
+        // The settings store round-trips strings, so clearing the preference in
+        // the UI can arrive here as "" rather than as None.
+        let state = RecordingState::new();
+        state
+            .set_preferred_input_device(Some("Blue Yeti".to_string()))
+            .unwrap();
+
+        state.set_preferred_input_device(Some("".to_string())).unwrap();
+        assert_eq!(state.get_preferred_input_device(), None);
+
+        state
+            .set_preferred_input_device(Some("Blue Yeti".to_string()))
+            .unwrap();
+        state.set_preferred_input_device(Some("  ".to_string())).unwrap();
+        assert_eq!(state.get_preferred_input_device(), None);
+
+        state
+            .set_preferred_input_device(Some("Blue Yeti".to_string()))
+            .unwrap();
+        state.set_preferred_input_device(None).unwrap();
+        assert_eq!(state.get_preferred_input_device(), None);
+    }
+
+    #[test]
+    fn starting_a_new_session_keeps_the_pinned_device() {
+        // Segment bookkeeping resets between recordings; the user's microphone
+        // choice must not.
+        let state = RecordingState::new();
+        state
+            .set_preferred_input_device(Some("Blue Yeti".to_string()))
+            .unwrap();
+
+        state.reset_for_new_session();
+
+        assert_eq!(
+            state.get_preferred_input_device(),
+            Some("Blue Yeti".to_string())
+        );
+    }
 
     #[test]
     fn fresh_state_does_not_wait_for_a_finalize_that_will_never_come() {

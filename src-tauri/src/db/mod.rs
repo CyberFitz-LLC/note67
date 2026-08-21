@@ -205,6 +205,158 @@ impl Database {
         Ok(segments)
     }
 
+    // ===== Transcript version chain =====
+
+    /// Every version for a note, oldest first.
+    pub fn get_transcript_versions(
+        &self,
+        note_id: &str,
+    ) -> anyhow::Result<Vec<crate::exochain::TranscriptVersion>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT version, content_hash, parent_hash, serialization, origin, reason,
+                    segment_count, created_at, receipt_hash, source_tool, source_filename
+             FROM transcript_versions WHERE note_id = ?1 ORDER BY version ASC",
+        )?;
+        let rows = stmt
+            .query_map([note_id], |row| {
+                Ok(crate::exochain::TranscriptVersion {
+                    version: row.get::<_, i64>(0)? as u32,
+                    content_hash: row.get(1)?,
+                    parent_hash: row.get(2)?,
+                    serialization: row.get(3)?,
+                    origin: crate::exochain::Origin::from_db(&row.get::<_, String>(4)?),
+                    reason: crate::exochain::Reason::from_db(&row.get::<_, String>(5)?),
+                    segment_count: row.get::<_, i64>(6)? as usize,
+                    created_at: row.get(7)?,
+                    receipt_hash: row.get(8)?,
+                    source_tool: row.get(9)?,
+                    source_filename: row.get(10)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// The current tip of a note's chain.
+    /// Record the receipt a node minted for a transcript version.
+    ///
+    /// Written against a specific version, not the note: a receipt attests one
+    /// content hash, and attaching it to the note would leave it pointing at
+    /// whatever the transcript later became.
+    pub fn record_receipt(
+        &self,
+        note_id: &str,
+        version: i64,
+        receipt_hash: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE transcript_versions
+             SET receipt_hash = ?1, attested_at = ?2
+             WHERE note_id = ?3 AND version = ?4",
+            rusqlite::params![
+                receipt_hash,
+                chrono::Utc::now().to_rfc3339(),
+                note_id,
+                version
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_transcript_version(
+        &self,
+        note_id: &str,
+    ) -> anyhow::Result<Option<crate::exochain::TranscriptVersion>> {
+        Ok(self.get_transcript_versions(note_id)?.pop())
+    }
+
+    /// Append a version to a note's chain.
+    ///
+    /// The `UNIQUE(note_id, version)` constraint is the guard against two
+    /// callers appending the same version number concurrently — a second writer
+    /// fails rather than forking the chain.
+    pub fn insert_transcript_version(
+        &self,
+        note_id: &str,
+        v: &crate::exochain::TranscriptVersion,
+    ) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "INSERT INTO transcript_versions
+               (note_id, version, content_hash, parent_hash, serialization, origin, reason,
+                segment_count, created_at, receipt_hash, source_tool, source_filename)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                note_id,
+                v.version as i64,
+                v.content_hash,
+                v.parent_hash,
+                v.serialization,
+                v.origin.as_str(),
+                v.reason.as_str(),
+                v.segment_count as i64,
+                v.created_at,
+                v.receipt_hash,
+                v.source_tool,
+                v.source_filename,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Record the note's current transcript as a new version, if it changed.
+    ///
+    /// Returns `None` when the content matches the tip — re-running a
+    /// transcription that produces identical text is not a new state.
+    pub fn record_transcript_version(
+        &self,
+        note_id: &str,
+        origin: crate::exochain::Origin,
+        reason: crate::exochain::Reason,
+    ) -> anyhow::Result<Option<crate::exochain::TranscriptVersion>> {
+        self.record_transcript_version_from(note_id, origin, reason, None)
+    }
+
+    /// As above, naming where an imported transcript came from.
+    pub fn record_transcript_version_from(
+        &self,
+        note_id: &str,
+        origin: crate::exochain::Origin,
+        reason: crate::exochain::Reason,
+        source: Option<crate::exochain::ImportSource>,
+    ) -> anyhow::Result<Option<crate::exochain::TranscriptVersion>> {
+        let segments: Vec<crate::exochain::CanonicalSegment> = self
+            .get_transcript_segments(note_id)?
+            .into_iter()
+            .map(|s| {
+                crate::exochain::CanonicalSegment::from_seconds(
+                    s.start_time,
+                    s.end_time,
+                    s.speaker,
+                    s.text,
+                )
+            })
+            .collect();
+
+        let previous = self.latest_transcript_version(note_id)?;
+        let Some(version) = crate::exochain::transcript::next_version(
+            previous.as_ref(),
+            &segments,
+            origin,
+            reason,
+            Utc::now().to_rfc3339(),
+        ) else {
+            return Ok(None);
+        };
+
+        let version = version.with_source(source);
+        self.insert_transcript_version(note_id, &version)?;
+        Ok(Some(version))
+    }
+
     /// Delete transcript segments by source (e.g., when deleting an uploaded audio)
     pub fn delete_transcript_segments_by_source(
         &self,

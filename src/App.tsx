@@ -23,7 +23,12 @@ import {
   ConfirmDialog,
   ContextMenu,
 } from "./components";
-import { exportApi, aiApi, transcriptionApi, tagsApi } from "./api";
+import type { SettingsTab } from "./components";
+import { exportApi, aiApi, transcriptionApi, tagsApi, importApi, settingsApi } from "./api";
+import {
+  BACKEND_KEY,
+  shouldAutoRetranscribe,
+} from "./hooks/useTranscriptionBackend";
 import { getTagColor } from "./utils/tagColors";
 import { useTagsStore } from "./stores/tagsStore";
 import {
@@ -113,7 +118,8 @@ function App() {
   // Only evaluate setup once every source has actually reported, so a
   // fully-configured user never sees the wizard flash while status loads:
   // Whisper models refreshed, Ollama status fetched, permissions checked.
-  const setupChecked = whisperChecked && ollamaStatus !== null && !systemLoading;
+  const setupChecked =
+    whisperChecked && ollamaStatus !== null && !systemLoading;
   const showOnboarding =
     onboardingDismissed === false && setupChecked && setupIncomplete;
 
@@ -121,7 +127,8 @@ function App() {
   const theme = useThemeStore((state) => state.theme);
   const loadTheme = useThemeStore((state) => state.loadTheme);
   const toggleTheme = useThemeStore((state) => state.toggleTheme);
-  const { tags, selectedTag, fetchTags, selectTag, getTagsForNote } = useTagsStore();
+  const { tags, selectedTag, fetchTags, selectTag, getTagsForNote } =
+    useTagsStore();
 
   // Load theme from database on mount
   useEffect(() => {
@@ -163,19 +170,8 @@ function App() {
   const setFocusTaskId = useNoteUiStore((s) => s.setFocusTaskId);
   const [showSettings, setShowSettings] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<
-    | "profile"
-    | "appearance"
-    | "system"
-    | "whisper"
-    | "ollama"
-    | "privacy"
-    | "shortcuts"
-    | "about"
-    | "updates"
-    | "disclaimer"
-    | "guide"
-  >("about");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("about");
   const [noteTranscripts, setNoteTranscripts] = useState<
     Record<string, TranscriptSegment[]>
   >({});
@@ -197,7 +193,9 @@ function App() {
   const setRetranscribingNoteId = useLiveTranscriptionStore(
     (s) => s.setRetranscribingNoteId
   );
-  const isGeneratingSummaryTitle = useSummaryUiStore((s) => s.isGeneratingTitle);
+  const isGeneratingSummaryTitle = useSummaryUiStore(
+    (s) => s.isGeneratingTitle
+  );
   const setIsGeneratingSummaryTitle = useSummaryUiStore(
     (s) => s.setGeneratingTitle
   );
@@ -214,7 +212,9 @@ function App() {
 
   // Search and tag filtering state
   const [searchQuery, setSearchQuery] = useState("");
-  const [filteredNotesByTag, setFilteredNotesByTag] = useState<Note[] | null>(null);
+  const [filteredNotesByTag, setFilteredNotesByTag] = useState<Note[] | null>(
+    null
+  );
 
   const selectedNote = notes.find((n) => n.id === selectedNoteId) || null;
   const recordingNote = notes.find((n) => n.id === recordingNoteId) || null;
@@ -241,20 +241,23 @@ function App() {
   }, [notes, filteredNotesByTag, searchQuery]);
 
   // Handle tag selection
-  const handleTagSelect = useCallback(async (tagName: string | null) => {
-    selectTag(tagName);
-    if (tagName) {
-      try {
-        const filtered = await tagsApi.getNotesByTag(tagName);
-        setFilteredNotesByTag(filtered);
-      } catch (error) {
-        console.error("Failed to filter notes by tag:", error);
+  const handleTagSelect = useCallback(
+    async (tagName: string | null) => {
+      selectTag(tagName);
+      if (tagName) {
+        try {
+          const filtered = await tagsApi.getNotesByTag(tagName);
+          setFilteredNotesByTag(filtered);
+        } catch (error) {
+          console.error("Failed to filter notes by tag:", error);
+          setFilteredNotesByTag(null);
+        }
+      } else {
         setFilteredNotesByTag(null);
       }
-    } else {
-      setFilteredNotesByTag(null);
-    }
-  }, [selectTag]);
+    },
+    [selectTag]
+  );
   // Show live segments during recording or when paused, otherwise show saved transcript
   const currentTranscript = selectedNoteId
     ? (isLiveTranscribing || isPaused) && recordingNoteId === selectedNoteId
@@ -381,6 +384,22 @@ function App() {
     ollamaModel,
     handleStartRecording,
   ]);
+
+  // Import a transcript produced elsewhere. It lands as its own note, marked
+  // Imported in the version chain — Note67 did not produce it, and the history
+  // has to say so.
+  const handleImportTranscript = useCallback(async () => {
+    setImportError(null);
+    try {
+      const result = await importApi.selectAndImportVtt();
+      if (!result) return; // picker dismissed
+      await refreshNotes();
+      setSelectedNoteId(result.noteId);
+      setActiveTab("transcript");
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : String(err));
+    }
+  }, [refreshNotes, setActiveTab]);
 
   // Listen for tray "New Note" event
   useEffect(() => {
@@ -525,7 +544,10 @@ function App() {
       e.preventDefault();
       // Check if clicking on a note item or task row (handled separately)
       const target = e.target as HTMLElement;
-      if (target.closest("[data-note-id]") || target.closest("[data-task-context]")) {
+      if (
+        target.closest("[data-note-id]") ||
+        target.closest("[data-task-context]")
+      ) {
         return; // Let the item-specific handler deal with it
       }
       // Show general context menu
@@ -608,9 +630,15 @@ function App() {
       // Always refresh notes to update ended_at
       await refreshNotes();
 
-      // Auto-retranscribe for better quality (runs in background)
-      if (loadedModel) {
-        console.log("[handleStopRecording] Starting auto-retranscribe for better quality");
+      // Auto-retranscribe for better quality (runs in background), unless a
+      // remote recogniser produced this transcript — see shouldAutoRetranscribe.
+      const transcriptionBackend = await settingsApi
+        .get(BACKEND_KEY)
+        .catch(() => null);
+      if (shouldAutoRetranscribe(transcriptionBackend, Boolean(loadedModel))) {
+        console.log(
+          "[handleStopRecording] Starting auto-retranscribe for better quality"
+        );
         setRetranscribingNoteId(noteId);
         try {
           await transcriptionApi.retranscribeNote(noteId);
@@ -623,7 +651,10 @@ function App() {
               [noteId]: improvedSegments,
             }));
           }
-          console.log("[handleStopRecording] Auto-retranscribe complete, segments:", improvedSegments.length);
+          console.log(
+            "[handleStopRecording] Auto-retranscribe complete, segments:",
+            improvedSegments.length
+          );
         } catch (error) {
           console.error("Auto-retranscribe failed:", error);
           // Continue with live transcript if retranscribe fails
@@ -794,10 +825,46 @@ function App() {
                 <circle cx="18" cy="6" r="2.5" strokeWidth="1.5" />
                 <circle cx="6" cy="18" r="2.5" strokeWidth="1.5" />
                 <circle cx="18" cy="18" r="2.5" strokeWidth="1.5" />
-                <path strokeWidth="1.5" d="M8.5 6h7M6 8.5v7M18 8.5v7M8.5 18h7" />
+                <path
+                  strokeWidth="1.5"
+                  d="M8.5 6h7M6 8.5v7M18 8.5v7M8.5 18h7"
+                />
               </svg>
             </button>
           </div>
+          {importError && (
+            <div
+              className="absolute top-12 left-3 right-3 z-20 p-2 rounded-lg text-xs"
+              style={{
+                backgroundColor: "rgba(239, 68, 68, 0.1)",
+                color: "#dc2626",
+              }}
+              onClick={() => setImportError(null)}
+              role="alert"
+            >
+              {importError}
+            </div>
+          )}
+          <button
+            onClick={handleImportTranscript}
+            className="p-2 rounded-lg hover:bg-black/5 transition-colors"
+            title="Import a transcript (.vtt) from Teams or another tool"
+          >
+            <svg
+              className="w-4 h-4"
+              style={{ color: "var(--color-text-secondary)" }}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16"
+              />
+            </svg>
+          </button>
           <button
             onClick={handleNewNote}
             className="p-2 rounded-lg hover:bg-black/5 transition-colors"
@@ -914,22 +981,24 @@ function App() {
                     </div>
                     {getTagsForNote(note.id).length > 0 && (
                       <div className="flex items-center gap-1 mt-1 flex-wrap">
-                        {getTagsForNote(note.id).slice(0, 4).map((tag) => {
-                          const tagColor = getTagColor(tag.name);
-                          return (
-                            <span
-                              key={tag.id}
-                              className="flex items-center gap-1 text-[10px]"
-                              style={{ color: "var(--color-text-tertiary)" }}
-                            >
+                        {getTagsForNote(note.id)
+                          .slice(0, 4)
+                          .map((tag) => {
+                            const tagColor = getTagColor(tag.name);
+                            return (
                               <span
-                                className="w-1.5 h-1.5 rounded-full"
-                                style={{ backgroundColor: tagColor }}
-                              />
-                              {tag.name}
-                            </span>
-                          );
-                        })}
+                                key={tag.id}
+                                className="flex items-center gap-1 text-[10px]"
+                                style={{ color: "var(--color-text-tertiary)" }}
+                              >
+                                <span
+                                  className="w-1.5 h-1.5 rounded-full"
+                                  style={{ backgroundColor: tagColor }}
+                                />
+                                {tag.name}
+                              </span>
+                            );
+                          })}
                         {getTagsForNote(note.id).length > 4 && (
                           <span
                             className="text-[10px]"
@@ -1099,7 +1168,10 @@ function App() {
                 if (!noteTranscripts[target.id]) {
                   loadTranscript(target.id).then((segs) => {
                     if (segs.length > 0) {
-                      setNoteTranscripts((prev) => ({ ...prev, [target.id]: segs }));
+                      setNoteTranscripts((prev) => ({
+                        ...prev,
+                        [target.id]: segs,
+                      }));
                     }
                   });
                 }
@@ -1112,6 +1184,13 @@ function App() {
             key={selectedNote.id}
             note={selectedNote}
             transcript={currentTranscript}
+            onTranscriptChanged={async () => {
+              const refreshed = await loadTranscript(selectedNote.id);
+              setNoteTranscripts((prev) => ({
+                ...prev,
+                [selectedNote.id]: refreshed,
+              }));
+            }}
             onUpdateTitle={handleUpdateTitle}
             onUpdateDescription={handleUpdateDescription}
             onStopRecording={handleStopRecording}
@@ -1126,8 +1205,7 @@ function App() {
               try {
                 // At least one audio input (mic or system audio) must be available.
                 const status = await refreshSystemStatus();
-                const canMic =
-                  status.micAvailable && status.micPermission;
+                const canMic = status.micAvailable && status.micPermission;
                 const canSystem =
                   status.systemAudioSupported && status.systemAudioPermission;
                 if (!canMic && !canSystem) {
@@ -1152,8 +1230,7 @@ function App() {
               try {
                 // At least one audio input (mic or system audio) must be available.
                 const status = await refreshSystemStatus();
-                const canMic =
-                  status.micAvailable && status.micPermission;
+                const canMic = status.micAvailable && status.micPermission;
                 const canSystem =
                   status.systemAudioSupported && status.systemAudioPermission;
                 if (!canMic && !canSystem) {
@@ -1199,15 +1276,15 @@ function App() {
               }
             }}
             onNavigateToNote={(noteId) => {
-              const targetNote = notes.find(n => n.id === noteId);
+              const targetNote = notes.find((n) => n.id === noteId);
               if (targetNote) {
                 setSelectedNoteId(targetNote.id);
                 setActiveTab("note");
               }
             }}
             onWikiLinkClick={(title) => {
-              const targetNote = notes.find(n =>
-                n.title.toLowerCase() === title.toLowerCase()
+              const targetNote = notes.find(
+                (n) => n.title.toLowerCase() === title.toLowerCase()
               );
               if (targetNote) {
                 setSelectedNoteId(targetNote.id);
@@ -1232,117 +1309,118 @@ function App() {
 
         {/* Start Listening Button, Recording Indicator, or Generating Indicator */}
         {/* Hide when viewing a note (unless recording or generating) or in graph view */}
-        {currentView === "notes" && !(selectedNote && !isRecording && !isGeneratingSummaryTitle) && (
-          <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
-            {isGeneratingSummaryTitle ? (
-              <div
-                className="flex items-center gap-3 px-4 py-2 rounded-full shadow-lg"
-                style={{
-                  backgroundColor: "var(--color-bg-elevated)",
-                  border: "1px solid var(--color-border)",
-                }}
-              >
+        {currentView === "notes" &&
+          !(selectedNote && !isRecording && !isGeneratingSummaryTitle) && (
+            <div className="absolute bottom-8 left-1/2 -translate-x-1/2">
+              {isGeneratingSummaryTitle ? (
                 <div
-                  className="w-4 h-4 border-2 border-t-transparent rounded-full animate-spin"
+                  className="flex items-center gap-3 px-4 py-2 rounded-full shadow-lg"
                   style={{
-                    borderColor: "var(--color-accent)",
-                    borderTopColor: "transparent",
+                    backgroundColor: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border)",
                   }}
-                />
-                <span
-                  className="text-sm font-medium"
-                  style={{ color: "var(--color-text)" }}
                 >
-                  Generating Summary
-                </span>
-              </div>
-            ) : isPaused && recordingNote ? (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={async () => {
-                    try {
-                      if (recordingNoteId) {
-                        await resumeRecording(recordingNoteId);
-                        await startLiveTranscription(recordingNoteId);
+                  <div
+                    className="w-4 h-4 border-2 border-t-transparent rounded-full animate-spin"
+                    style={{
+                      borderColor: "var(--color-accent)",
+                      borderTopColor: "transparent",
+                    }}
+                  />
+                  <span
+                    className="text-sm font-medium"
+                    style={{ color: "var(--color-text)" }}
+                  >
+                    Generating Summary
+                  </span>
+                </div>
+              ) : isPaused && recordingNote ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      try {
+                        if (recordingNoteId) {
+                          await resumeRecording(recordingNoteId);
+                          await startLiveTranscription(recordingNoteId);
+                        }
+                      } catch (error) {
+                        console.error("Resume recording failed:", error);
                       }
-                    } catch (error) {
-                      console.error("Resume recording failed:", error);
-                    }
+                    }}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform hover:scale-105"
+                    style={{
+                      backgroundColor: "var(--color-accent)",
+                      color: "white",
+                    }}
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                    Resume
+                  </button>
+                  <button
+                    onClick={handleStopRecording}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform hover:scale-105"
+                    style={{
+                      backgroundColor: "var(--color-bg-elevated)",
+                      border: "1px solid var(--color-border)",
+                      color: "var(--color-text)",
+                    }}
+                  >
+                    Stop
+                  </button>
+                </div>
+              ) : isRecording && recordingNote ? (
+                <button
+                  onClick={handleStopRecording}
+                  className="flex items-center gap-3 px-4 py-2 rounded-full shadow-lg transition-transform hover:scale-105"
+                  style={{
+                    backgroundColor: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border)",
                   }}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform hover:scale-105"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full animate-pulse"
+                    style={{ backgroundColor: "var(--color-accent)" }}
+                  />
+                  <span
+                    className="text-sm"
+                    style={{ color: "var(--color-text-secondary)" }}
+                  >
+                    <kbd
+                      className="font-medium"
+                      style={{ color: "var(--color-text)" }}
+                    >
+                      {navigator.platform.includes("Mac") ? "⌘" : "Ctrl"} + S
+                    </kbd>{" "}
+                    to stop
+                  </span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleStartRecording}
+                  disabled={!loadedModel || !ollamaRunning || !ollamaModel}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 hover:scale-105"
                   style={{
                     backgroundColor: "var(--color-accent)",
                     color: "white",
                   }}
+                  title={
+                    !loadedModel || !ollamaRunning || !ollamaModel
+                      ? "Complete setup in Settings first"
+                      : undefined
+                  }
                 >
-                  <svg
-                    className="w-3.5 h-3.5"
-                    fill="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                  Resume
+                  <span className="w-2 h-2 rounded-full bg-white" />
+                  Start listening
                 </button>
-                <button
-                  onClick={handleStopRecording}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform hover:scale-105"
-                  style={{
-                    backgroundColor: "var(--color-bg-elevated)",
-                    border: "1px solid var(--color-border)",
-                    color: "var(--color-text)",
-                  }}
-                >
-                  Stop
-                </button>
-              </div>
-            ) : isRecording && recordingNote ? (
-              <button
-                onClick={handleStopRecording}
-                className="flex items-center gap-3 px-4 py-2 rounded-full shadow-lg transition-transform hover:scale-105"
-                style={{
-                  backgroundColor: "var(--color-bg-elevated)",
-                  border: "1px solid var(--color-border)",
-                }}
-              >
-                <span
-                  className="w-2 h-2 rounded-full animate-pulse"
-                  style={{ backgroundColor: "var(--color-accent)" }}
-                />
-                <span
-                  className="text-sm"
-                  style={{ color: "var(--color-text-secondary)" }}
-                >
-                  <kbd
-                    className="font-medium"
-                    style={{ color: "var(--color-text)" }}
-                  >
-                    {navigator.platform.includes("Mac") ? "⌘" : "Ctrl"} + S
-                  </kbd>{" "}
-                  to stop
-                </span>
-              </button>
-            ) : (
-              <button
-                onClick={handleStartRecording}
-                disabled={!loadedModel || !ollamaRunning || !ollamaModel}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm shadow-md transition-transform disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 hover:scale-105"
-                style={{
-                  backgroundColor: "var(--color-accent)",
-                  color: "white",
-                }}
-                title={
-                  !loadedModel || !ollamaRunning || !ollamaModel
-                    ? "Complete setup in Settings first"
-                    : undefined
-                }
-              >
-                <span className="w-2 h-2 rounded-full bg-white" />
-                Start listening
-              </button>
-            )}
-          </div>
-        )}
+              )}
+            </div>
+          )}
       </main>
 
       {/* Modals */}
@@ -1362,7 +1440,7 @@ function App() {
         isOpen={showSearchModal}
         onClose={() => setShowSearchModal(false)}
         onSelectNote={(noteId) => {
-          const note = notes.find(n => n.id === noteId);
+          const note = notes.find((n) => n.id === noteId);
           if (note) {
             setSelectedNoteId(noteId);
             setActiveTab("summary");
@@ -1424,7 +1502,5 @@ function App() {
     </div>
   );
 }
-
-
 
 export default App;

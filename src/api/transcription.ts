@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  TranscriptChain,
   ModelInfo,
   ModelSize,
   TranscriptSegment,
@@ -18,6 +19,11 @@ export interface DualTranscriptionResult {
 }
 
 export const transcriptionApi = {
+  /** The note's transcript version chain, with whether it verifies */
+  getTranscriptChain: (noteId: string): Promise<TranscriptChain> => {
+    return invoke("get_transcript_chain", { noteId });
+  },
+
   // Model management
   listModels: (): Promise<ModelInfo[]> => {
     return invoke("list_models");
@@ -96,7 +102,10 @@ export const transcriptionApi = {
   },
 
   // Live transcription
-  startLiveTranscription: (noteId: string, language?: string): Promise<void> => {
+  startLiveTranscription: (
+    noteId: string,
+    language?: string
+  ): Promise<void> => {
     return invoke("start_live_transcription", { noteId, language });
   },
 

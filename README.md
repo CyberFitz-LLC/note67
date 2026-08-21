@@ -207,6 +207,10 @@ npm run tauri dev
 npm run tauri build
 ```
 
+Windows installers with GPU acceleration are built by CI on every push and can
+be downloaded instead of built locally — see [docs/BUILD.md](docs/BUILD.md),
+which also records what the CUDA toolchain requires.
+
 ## Scripts
 
 | Command | Description |

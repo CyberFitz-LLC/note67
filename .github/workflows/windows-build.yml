@@ -1,0 +1,350 @@
+name: Windows Build
+
+# Produces unsigned Windows installers for testing fork changes.
+#
+# The upstream Release workflow is tag-driven and needs Apple/Tauri signing
+# secrets this fork does not have, so this is a separate, secret-free build that
+# publishes installers as workflow artifacts instead of a GitHub release.
+#
+# Two GPU variants are built. Whisper on CPU runs at roughly real-time on a
+# mobile Xeon, and Note67 transcribes the mic and system tracks separately, so a
+# meeting costs about twice its own length to process. Offloading to a GPU is
+# the difference between usable and not.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: >-
+          Runner label to build on. Defaults to GitHub-hosted. Point at a
+          self-hosted Windows runner (e.g. "win-gpu") when GitHub Actions is
+          degraded or hosted capacity is unavailable.
+        required: false
+        default: windows-latest
+  push:
+    branches:
+      - main
+      - 'feat/**'
+
+env:
+  # Also set in .cargo/config.toml for local builds. Duplicated here with an
+  # absolute path so CI does not depend on cargo's cwd-based config discovery,
+  # which varies between the test step and the tauri build.
+  CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/src-tauri/cmake/portable-cpu.cmake
+
+jobs:
+  # Runs once. No point paying for it per GPU variant.
+  checks:
+    # `inputs` is empty for push events, so this falls back to hosted.
+    runs-on: ${{ inputs.runner || 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: checks-portable-cpu-v1
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test
+      # --workspace, not --lib: the canonical-form crate is a workspace member
+      # and its tests are the ones guarding byte parity with the sync service.
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace
+
+  build:
+    needs: checks
+    runs-on: ${{ inputs.runner || 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Portable: one binary drives NVIDIA, AMD and Intel, and falls back to
+          # CPU when no Vulkan device is present.
+          - variant: vulkan
+            features: gpu-vulkan
+          # Faster on NVIDIA, but the binary is NVIDIA-only and has to ship the
+          # CUDA runtime DLLs.
+          - variant: cuda
+            features: gpu-cuda
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # Separate cache per variant: the CMake cache bakes in the backend.
+          key: ${{ matrix.variant }}-portable-cpu-v1
+
+      # A self-hosted runner keeps its SDKs between jobs; a hosted one never
+      # has them. Detect rather than reinstall, so the same workflow is
+      # efficient on both.
+      - name: Detect pre-installed SDKs
+        id: sdk
+        shell: pwsh
+        run: |
+          $vk = $env:VULKAN_SDK
+          if (-not $vk) {
+            $found = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                     Sort-Object Name -Descending | Select-Object -First 1
+            if ($found) { $vk = $found.FullName }
+          }
+          if ($vk) {
+            Write-Host "Vulkan SDK already present: $vk"
+            "VULKAN_SDK=$vk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          "vulkan=$([bool]$vk)".ToLower() | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $cuda = $env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")
+          if ($cuda) { Write-Host "CUDA Toolkit already present: $env:CUDA_PATH" }
+          "cuda=$($cuda.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install Vulkan SDK
+        if: matrix.variant == 'vulkan' && steps.sdk.outputs.vulkan != 'true'
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          # The package does not reliably export VULKAN_SDK, and
+          # whisper-rs-sys reads that variable to find the headers and libs.
+          $root = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue |
+                  Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $root) { throw "Vulkan SDK not found under C:\VulkanSDK after install." }
+          Write-Host "VULKAN_SDK=$($root.FullName)"
+          "VULKAN_SDK=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Third-party action. Pin to a SHA if that matters more than convenience.
+      #
+      # CUDA 13, matching what builds locally. 12.5 used to work and stopped
+      # when the hosted image moved to Visual Studio 18 / MSVC 14.51: nvcc
+      # refuses a host compiler that far ahead of it and exits with code 5
+      # while compiling CMake's own compiler-identification file, so the build
+      # died before any of our code was touched. `-allow-unsupported-compiler`
+      # does not rescue it. Keep this in step with the toolkit the local script
+      # expects, or CI and the desk disagree about what "builds" means.
+      - name: Install CUDA Toolkit
+        if: matrix.variant == 'cuda' && steps.sdk.outputs.cuda != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '13.2.2'
+          method: 'network'
+          # Only what ggml needs to compile and link. Restricting this is not
+          # only about download size: a full install includes the display
+          # driver, which cannot install on a runner with no NVIDIA hardware.
+          #
+          # These names are the ones the Windows installer accepts (CUDA
+          # Installation Guide for Windows, silent-install subpackage table).
+          # An invalid name does not warn — the installer aborts, and its exit
+          # code says nothing about which entry it disliked.
+          # 13.x splits things 12.x bundled into `nvcc`/`cudart`, and each
+          # omission fails late and obscurely rather than at install time:
+          #
+          #   crt      — cuda_runtime.h includes crt/host_config.h on line 82,
+          #              so without it nothing that includes the runtime header
+          #              compiles. Presents as C1083 on a missing header.
+          #   nvvm     — holds `cicc`, the device-side compiler nvcc shells out
+          #              to. Without it nvcc reports only "The system cannot
+          #              find the path specified" and exits 1.
+          #   nvjitlink — cuBLAS links against it from 12.4 onward.
+          sub-packages: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvjitlink", "thrust", "visual_studio_integration"]'
+
+      # Each missing piece of the toolkit fails somewhere later and says
+      # nothing useful about what is absent, so state up front what actually
+      # landed. Three CI cycles went on discovering omissions one at a time
+      # that this would have shown at a glance.
+      - name: Show what the CUDA install provided
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          foreach ($tool in @("bin\nvcc.exe", "nvvm\bin\cicc.exe", "bin\ptxas.exe",
+                              "bin\fatbinary.exe", "bin\nvlink.exe",
+                              "include\crt\host_config.h", "include\cuda_runtime.h",
+                              "include\thrust\version.h")) {
+            $p = Join-Path $env:CUDA_PATH $tool
+            $mark = if (Test-Path $p) { "ok  " } else { "MISSING" }
+            Write-Host "$mark $tool"
+          }
+
+      # The toolkit ships the MSBuild integration but does not register it with
+      # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
+      # toolset found". Copying the props/targets into every VC
+      # BuildCustomizations directory is the standard fix.
+      - name: Register CUDA with Visual Studio
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+          if (-not (Test-Path $src)) { throw "CUDA VS integration not found at $src" }
+          # Build Tools commonly installs under "Program Files (x86)" while a
+          # full Visual Studio lands under "Program Files". Searching only one
+          # finds nothing, silently.
+          $roots = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio")
+          $targets = $roots | Where-Object { Test-Path $_ } | ForEach-Object {
+                       Get-ChildItem $_ -Recurse -Directory -Filter BuildCustomizations -ErrorAction SilentlyContinue
+                     } | Sort-Object FullName -Unique
+          if (-not $targets) { throw "No VC BuildCustomizations directory found under: $($roots -join '; ')" }
+          foreach ($t in $targets) {
+            Copy-Item "$src\*" $t.FullName -Force
+            Write-Host "registered CUDA into $($t.FullName)"
+          }
+
+      - run: npm ci
+
+      # CUDA links its runtime dynamically, so these DLLs must ship beside the
+      # exe or the app dies at startup on any machine without the toolkit.
+      # Staged before the build so the bundler can pick them up as resources —
+      # copying them afterwards leaves them outside the installer entirely.
+      - name: Stage CUDA runtime DLLs
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          $bin = "$env:CUDA_PATH\bin"
+          if (-not (Test-Path $bin)) { throw "CUDA_PATH not set or missing bin/: '$env:CUDA_PATH'" }
+          # Searched recursively, and deduplicated by name. CUDA 13 moved the
+          # runtime DLLs out of bin\ into a subdirectory, so a flat listing
+          # finds nothing on a perfectly good toolkit and reports it as a
+          # missing install. The local build script learned this first.
+          $want = Get-ChildItem $bin -Filter *.dll -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' } |
+                  Group-Object Name | ForEach-Object { $_.Group[0] }
+          if (-not $want) {
+            $subdirs = (Get-ChildItem $bin -Directory -ErrorAction SilentlyContinue |
+                        ForEach-Object { $_.Name }) -join ", "
+            throw "No cudart/cublas DLLs under $bin (searched recursively; subdirectories: $subdirs)"
+          }
+          New-Item -ItemType Directory -Force -Path src-tauri/cuda-runtime | Out-Null
+          foreach ($dll in $want) {
+            Copy-Item $dll.FullName -Destination src-tauri/cuda-runtime -Force
+            Write-Host "staged $($dll.Name)"
+          }
+
+      - name: Build Windows installer (${{ matrix.variant }})
+        shell: bash
+        env:
+          # The GPU counterpart of portable-cpu.cmake below.
+          #
+          # ggml leaves the CUDA architecture to CMake, and CMake asks the
+          # machine. A runner has no NVIDIA card, so it falls back to a default
+          # that CUDA 13 does not support at all — nvcc refuses compute_52
+          # outright and the build dies compiling a two-line test program.
+          #
+          # Naming the targets explicitly also fixes a quieter version of the
+          # same problem: where a GPU *is* present the detected value is that
+          # one card, so an installer built at a desk is accelerated only on
+          # the desk it was built on. CUDAARCHS is CMake's own environment
+          # variable for this and ggml honours it.
+          #
+          # Real code for the three generations most people have — Turing,
+          # Ampere, Ada — plus PTX, so anything newer JIT-compiles on first run
+          # instead of silently falling back to the CPU.
+          CUDAARCHS: "75-real;86-real;89-real;90-virtual"
+          # CCCL — the CUDA 13 standard library that thrust now lives inside —
+          # refuses to compile under MSVC's traditional preprocessor and says
+          # so as a hard #error. It offers
+          # CCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING to silence it;
+          # that is not taken, because the text it silences is "this may lead
+          # to unexpected compilation errors" and a quietly miscompiled CUDA
+          # kernel is worse than a red build. CUDAFLAGS is CMake's own
+          # environment variable for seeding CMAKE_CUDA_FLAGS.
+          # `-std=c++17` because CUB — CCCL's other half — hard-#errors below
+          # it, and nothing in whisper.cpp's CMake sets a CUDA standard, so
+          # nvcc was defaulting to C++14. CCCL offers
+          # CCCL_IGNORE_DEPRECATED_CPP_DIALECT to silence that too; compiling
+          # a library in the dialect it asks for is the actual fix.
+          CUDAFLAGS: "-std=c++17 -Xcompiler=/Zc:preprocessor"
+        run: |
+          if [ "${{ matrix.variant }}" = "cuda" ]; then
+            # Resource paths are relative to src-tauri; "./" puts them next to
+            # the exe, which is where the loader looks.
+            BUNDLE='{"bundle":{"createUpdaterArtifacts":false,"resources":{"cuda-runtime/*.dll":"./"}}}'
+          else
+            BUNDLE='{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+          npm run tauri build -- --features ${{ matrix.features }} --config "$BUNDLE"
+
+      # ggml probes the *build* machine's CPU and bakes in whatever it finds, so
+      # an AVX-512 runner produces an installer that dies with
+      # STATUS_ILLEGAL_INSTRUCTION on ordinary consumer CPUs.
+      # src-tauri/cmake/portable-cpu.cmake pins the baseline. This proves both
+      # that it took effect and that the GPU backend really was compiled in,
+      # from the build tree rather than from the configuration we intended.
+      - name: Verify CPU baseline and GPU backend
+        shell: pwsh
+        run: |
+          $caches = Get-ChildItem -Path src-tauri/target -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -like "*whisper-rs-sys*" }
+          if (-not $caches) { throw "No whisper-rs-sys CMakeCache.txt found; cannot verify the build." }
+
+          $failed = $false
+          $sawBackend = $false
+          $backend = if ("${{ matrix.variant }}" -eq "vulkan") { "GGML_VULKAN" } else { "GGML_CUDA" }
+
+          foreach ($cache in $caches) {
+            Write-Host "--- $($cache.FullName)"
+            $lines = Get-Content $cache.FullName
+
+            # GGML_NATIVE=OFF is the load-bearing CPU assertion: it is what stops
+            # FindSIMD.cmake running. Checking GGML_AVX512 would be unsound —
+            # FindSIMD sets it as a plain variable that shadows the cache entry,
+            # so the cache can read OFF while the compile used /arch:AVX512.
+            $native = $lines | Select-String -Pattern '^GGML_NATIVE:BOOL=' | Select-Object -First 1
+            if ($native) {
+              Write-Host "    $($native.Line)"
+              if ($native.Line -notmatch '=OFF$') {
+                Write-Host "    FAIL: GGML_NATIVE is not OFF; this build probed the runner's CPU."
+                $failed = $true
+              }
+            }
+
+            $found = $lines | Select-String -Pattern '^AVX512_FOUND:'
+            if ($found -match '^AVX512_FOUND:BOOL=(TRUE|ON|1)') {
+              Write-Host "    FAIL: FindSIMD detected AVX-512 on the builder and enabled it."
+              $failed = $true
+            }
+
+            # A silent fallback to CPU is the failure this catches: the installer
+            # would work, just slowly, and nobody would notice until a user did.
+            $gpu = $lines | Select-String -Pattern "^$($backend):BOOL=" | Select-Object -First 1
+            if ($gpu) {
+              Write-Host "    $($gpu.Line)"
+              if ($gpu.Line -match '=ON$') { $sawBackend = $true }
+            }
+          }
+
+          $avx512 = Get-ChildItem -Path src-tauri/target -Recurse -Include *.vcxproj,build.ninja,flags.make -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -like "*whisper-rs-sys*" } |
+                    Select-String -Pattern '/arch:AVX512' -List
+          if ($avx512) {
+            Write-Host "FAIL: /arch:AVX512 present in generated build files."
+            $failed = $true
+          }
+
+          if (-not $sawBackend) {
+            Write-Host "FAIL: $backend was never ON; this build would silently run on CPU."
+            $failed = $true
+          }
+
+          if ($failed) { throw "Build verification failed." }
+          Write-Host "OK: portable CPU baseline (AVX2, no AVX-512) with $backend enabled."
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: note67-windows-${{ matrix.variant }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe

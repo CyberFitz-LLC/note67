@@ -155,6 +155,78 @@ pub async fn transcribe_uploaded_audio(
             e.to_string()
         })?;
 
+    // Which recogniser. Read here rather than cached, so changing the setting
+    // takes effect on the next upload instead of the next restart.
+    let backend = crate::transcription::backend::resolve(
+        &db.get_setting(crate::transcription::backend::BACKEND_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        db.get_setting(crate::transcription::backend::BASE_URL_KEY)
+            .ok()
+            .flatten()
+            .as_deref(),
+        db.get_setting(crate::transcription::backend::API_KEY_KEY)
+            .ok()
+            .flatten()
+            .as_deref(),
+        db.get_setting(crate::transcription::backend::MAX_SPEAKERS_KEY)
+            .ok()
+            .flatten()
+            .as_deref(),
+        // Uploads never stream: this path has a finished file, and the
+        // streaming recogniser has nothing to offer it that the diarizing one
+        // does not do better.
+        None,
+    );
+
+    if let crate::transcription::backend::Backend::Remote {
+        base_url,
+        api_key,
+        max_speakers,
+    } = &backend
+    {
+        let path = PathBuf::from(&info.file_path);
+        let wav = std::fs::read(&path).map_err(|e| {
+            state.is_transcribing.store(false, Ordering::SeqCst);
+            let _ = db.update_uploaded_audio_status(upload_id, "failed");
+            e.to_string()
+        })?;
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "upload.wav".to_string());
+
+        let remote = crate::transcription::remote::transcribe(
+            &reqwest::Client::new(),
+            base_url,
+            api_key.as_deref(),
+            wav,
+            &filename,
+            *max_speakers,
+        )
+        .await;
+
+        match remote {
+            Ok(result) => {
+                let saved = save_segments(&db, &info, upload_id, &result)?;
+                state.is_transcribing.store(false, Ordering::SeqCst);
+                db.update_uploaded_audio_status(upload_id, "completed")
+                    .map_err(|e| e.to_string())?;
+                return Ok(saved);
+            }
+            // Not a silent fall back to local. The user chose a recogniser that
+            // separates speakers; quietly substituting one that cannot would
+            // hand back a transcript labelled entirely "Uploaded" and look like
+            // the diarizer having a bad day.
+            Err(e) => {
+                state.is_transcribing.store(false, Ordering::SeqCst);
+                let _ = db.update_uploaded_audio_status(upload_id, "failed");
+                return Err(e.to_string());
+            }
+        }
+    }
+
     // Get the transcriber
     let transcriber = {
         let guard = state.transcriber.lock().map_err(|e| {
@@ -183,32 +255,7 @@ pub async fn transcribe_uploaded_audio(
         })?;
 
     // Save transcript segments with the speaker label
-    let mut saved_count = 0;
-    for segment in &result.segments {
-        // Skip blank/noise segments
-        let text_lower = segment.text.to_lowercase();
-        if text_lower.contains("[blank_audio]")
-            || text_lower.contains("[inaudible]")
-            || text_lower.contains("[silence]")
-            || text_lower.contains("[music]")
-            || segment.text.trim().is_empty()
-        {
-            continue;
-        }
-
-        db.add_transcript_segment(
-            &NewTranscriptSegment::new(
-                &info.note_id,
-                segment.start_time,
-                segment.end_time,
-                &segment.text,
-            )
-            .with_speaker(Some(info.speaker_label.clone()))
-            .with_source("upload", upload_id),
-        )
-        .map_err(|e| e.to_string())?;
-        saved_count += 1;
-    }
+    let saved_count = save_segments(&db, &info, upload_id, &result)?;
 
     // Update status to completed
     db.update_uploaded_audio_status(upload_id, "completed")
@@ -251,3 +298,50 @@ pub fn reorder_audio_items(
     db.reorder_audio_items(&tuples).map_err(|e| e.to_string())
 }
 
+
+/// Write a recogniser's segments to the note.
+///
+/// Shared so both recognisers apply the same rules. The only difference is
+/// attribution: a diarizing recogniser names the speaker per segment, and the
+/// upload's own label is the fallback for one that cannot.
+fn save_segments(
+    db: &Database,
+    info: &crate::db::models::UploadedAudio,
+    upload_id: i64,
+    result: &crate::transcription::transcriber::TranscriptionResult,
+) -> Result<usize, String> {
+    let mut saved = 0;
+    for segment in &result.segments {
+        let text_lower = segment.text.to_lowercase();
+        if text_lower.contains("[blank_audio]")
+            || text_lower.contains("[inaudible]")
+            || text_lower.contains("[silence]")
+            || text_lower.contains("[music]")
+            || segment.text.trim().is_empty()
+        {
+            continue;
+        }
+
+        db.add_transcript_segment(
+            &NewTranscriptSegment::new(
+                &info.note_id,
+                segment.start_time,
+                segment.end_time,
+                &segment.text,
+            )
+            // `Speaker 1..N` where the recogniser separated voices, otherwise
+            // the label the upload was given. Both are placeholders; only one
+            // of them distinguishes people.
+            .with_speaker(Some(
+                segment
+                    .speaker
+                    .clone()
+                    .unwrap_or_else(|| info.speaker_label.clone()),
+            ))
+            .with_source("upload", upload_id),
+        )
+        .map_err(|e| e.to_string())?;
+        saved += 1;
+    }
+    Ok(saved)
+}

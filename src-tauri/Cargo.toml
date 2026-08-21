@@ -1,6 +1,6 @@
 [package]
 name = "note67"
-version = "0.1.25"
+version = "0.1.31"
 description = "A private, local notes assistant"
 authors = ["you"]
 license = "AGPL-3.0-or-later"
@@ -12,6 +12,25 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# GPU backends for Whisper. Off by default so a plain `cargo build` stays
+# CPU-only and needs no SDK; CI builds one artifact per backend.
+#
+# Vulkan is the portable choice: one binary drives NVIDIA, AMD and Intel GPUs
+# and falls back to CPU when no device is present. CUDA is faster on NVIDIA but
+# produces an NVIDIA-only binary that must ship the CUDA runtime DLLs.
+#
+# Mutually exclusive in practice — pick one per build.
+# The workspace root stays here rather than at the repo root so cargo keeps
+# building into src-tauri/target — the CI verification steps and the local build
+# script both look there.
+[workspace]
+members = ["crates/note67-canonical"]
+
+[features]
+default = []
+gpu-vulkan = ["whisper-rs/vulkan"]
+gpu-cuda = ["whisper-rs/cuda"]
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
@@ -34,10 +53,53 @@ symphonia = { version = "0.5", features = ["mp3", "aac", "alac", "flac", "ogg", 
 ringbuf = "0.4"
 whisper-rs = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "macros"] }
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.12", features = ["stream", "json", "multipart"] }
 futures-util = "0.3"
+
+# Streaming ASR. rustls rather than native-tls to match reqwest and avoid a
+# second TLS stack in the bundle; `connect` brings the client half only.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots", "connect"] }
 scopeguard = "1.2"
 regex = "1"
+
+# ExoChain. Native crates rather than the WASM adapter (DECISIONS.md D1):
+# exochain is Apache-2.0, which is a permitted direction into AGPL-3.0, and
+# exo-avc already exposes in Rust what the wasm bindings wrap for TypeScript
+# callers. Pinned exactly so the enforcement surface cannot move underneath us.
+# exochain-core 0.2.3 does not currently build (ml-dsa pins a pre-release
+# pkcs8), so the DID derivation is implemented against its specification and
+# guarded by a known-answer test. Swap to the crates once upstream is fixed;
+# the DIDs must not change. See src/exochain/identity.rs and DECISIONS.md D1.
+# Formats the sync service must reproduce byte for byte live in their own
+# crate, so there is one definition rather than two implementations of a
+# written spec. See docs/sync/DESIGN.md section 2.
+note67-canonical = { path = "crates/note67-canonical" }
+ed25519-dalek = "2"
+getrandom = "0.2"
+hex = "0.4"
+sha2 = "0.10"
+
+# EXOCHAIN, for emitting meeting receipts.
+#
+# Pinned to `main`, NOT to the ceremony commit the App Registry mints against.
+# The two are different revisions on purpose: the ceremony commit has no
+# `avc_action_signature_payload` — the function that says what a subject signs —
+# and the deployed node runs the newer crate. A credential minted at the
+# ceremony commit deserializes into these types and its payload builds, which
+# is verified rather than assumed.
+#
+# The crates were renamed (exo-avc -> exochain-avc) between the two, hence the
+# `package` keys.
+exochain-avc = { package = "exochain-avc", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
+exochain-core = { package = "exochain-core", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
+exochain-authority = { package = "exochain-authority", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
+
+# ml-dsa 0.1.0-rc.7 was written against the pre-release RustCrypto stack, and
+# cargo will not select a pre-release on its own. Without these the released
+# pkcs8 0.11.0 is chosen and the build fails on trait impls that exist only in
+# the -rc line. This is what the AVC workspace's committed lock encodes.
+pkcs8 = "=0.11.0-rc.11"
+spki = "=0.8.0-rc.4"
 
 # macOS-specific dependencies for system audio capture via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]

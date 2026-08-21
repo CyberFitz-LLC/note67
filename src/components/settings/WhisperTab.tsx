@@ -1,4 +1,6 @@
 import { useModels } from "../../hooks";
+import { useTranscriptionBackend } from "../../hooks/useTranscriptionBackend";
+import { TranscriptionBackendSettings } from "./TranscriptionBackendSettings";
 import {
   useWhisperStore,
   WHISPER_LANGUAGES,
@@ -18,6 +20,12 @@ export function WhisperTab() {
     deleteModel,
     loadModel,
   } = useModels();
+  const {
+    config: transcriptionConfig,
+    save: saveTranscription,
+    saving: savingTranscription,
+    error: transcriptionError,
+  } = useTranscriptionBackend();
 
   const language = useWhisperStore((state) => state.language);
   const setLanguage = useWhisperStore((state) => state.setLanguage);
@@ -123,6 +131,26 @@ export function WhisperTab() {
           {loadedModel ? `Active model: ${loadedModel}` : "No model loaded"}
         </p>
       </div>
+      {/* Which recogniser handles uploads. Here rather than in its own tab:
+          it is the same question this tab already answers — how audio becomes
+          text — and splitting it would hide the choice from anyone who came
+          looking for transcription settings. */}
+      {transcriptionConfig && (
+        <div
+          className="mt-6 pt-6"
+          style={{ borderTop: "1px solid var(--color-border)" }}
+        >
+          <TranscriptionBackendSettings
+            // Remounted when the saved config changes, so the form seeds from
+            // it once and needs no effect to stay in step.
+            key={`${transcriptionConfig.backend}:${transcriptionConfig.baseUrl}`}
+            config={transcriptionConfig}
+            onSave={saveTranscription}
+            saving={savingTranscription}
+            error={transcriptionError}
+          />
+        </div>
+      )}
     </div>
   );
 }

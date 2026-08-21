@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { AudioDevice } from "../types";
 
 /** Result of dual recording containing paths to all recorded files */
 export interface DualRecordingResult {
@@ -120,6 +121,45 @@ export const audioApi = {
   /** Check if the app has permission to use the microphone */
   hasMicrophonePermission: (): Promise<boolean> => {
     return invoke("has_microphone_permission");
+  },
+
+  // ========== Input device selection ==========
+
+  /** List the input devices available for recording */
+  listInputDevices: (): Promise<AudioDevice[]> => {
+    return invoke("list_audio_input_devices");
+  },
+
+  /** Get the pinned input device name (null follows the system default) */
+  getPreferredInputDevice: (): Promise<string | null> => {
+    return invoke("get_preferred_input_device");
+  },
+
+  /** Pin an input device by name, or pass null to follow the system default */
+  setPreferredInputDevice: (deviceName: string | null): Promise<void> => {
+    return invoke("set_preferred_input_device", { deviceName });
+  },
+
+  // ========== Output (playback) device selection ==========
+
+  /** Whether this platform lets the user choose which playback device is captured */
+  isOutputDeviceSelectable: (): Promise<boolean> => {
+    return invoke("is_output_device_selectable");
+  },
+
+  /** List the playback devices whose audio can be captured */
+  listOutputDevices: (): Promise<AudioDevice[]> => {
+    return invoke("list_audio_output_devices");
+  },
+
+  /** Get the pinned playback device name (null follows the system default) */
+  getPreferredOutputDevice: (): Promise<string | null> => {
+    return invoke("get_preferred_output_device");
+  },
+
+  /** Pin a playback device by name, or pass null to follow the system default */
+  setPreferredOutputDevice: (deviceName: string | null): Promise<void> => {
+    return invoke("set_preferred_output_device", { deviceName });
   },
 
   /** Start listen-only recording (system audio only, no mic) with segment tracking */

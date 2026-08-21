@@ -1,4 +1,6 @@
 pub mod converter;
+pub mod devices;
+pub mod levels;
 pub mod mixer;
 pub mod recorder;
 pub mod system_audio;
@@ -9,12 +11,16 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub use devices::{list_input_devices, AudioDevice};
 pub use mixer::build_playback_track;
 pub use recorder::{
     pause_recording, resume_recording, start_recording, stop_recording, RecordingPhase,
     RecordingState,
 };
-pub use system_audio::{create_system_audio_capture, is_system_audio_available, SystemAudioCapture};
+pub use system_audio::{
+    create_system_audio_capture, is_output_device_selectable, is_system_audio_available,
+    list_output_devices, SystemAudioCapture,
+};
 
 // Re-export system audio buffer functions for live transcription
 #[cfg(target_os = "macos")]

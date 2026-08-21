@@ -7,7 +7,9 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::ai::prompts::MAX_CONTENT_LENGTH;
-use crate::ai::{OllamaClient, OllamaModel, SummaryPrompts, WritingPrompts};
+use crate::ai::{
+    LlmClient, LlmModel, ProviderConfig, ProviderKind, SummaryPrompts, WritingPrompts,
+};
 use crate::commands::links::update_incoming_links_internal;
 use crate::db::models::{ActionItem, ActionItemWithNote, Summary, SummaryType};
 use crate::db::Database;
@@ -63,27 +65,82 @@ fn split_into_chunks(text: &str, max_size: usize) -> Vec<String> {
     final_chunks
 }
 
+/// Settings keys for the model backend.
+pub const PROVIDER_SETTING: &str = "ai_provider";
+pub const BASE_URL_SETTING: &str = "ai_base_url";
+pub const API_KEY_SETTING: &str = "ai_api_key";
+
 pub struct AiState {
-    pub client: Arc<OllamaClient>,
+    /// Held behind a lock so the backend can be swapped at runtime, and behind
+    /// an `Arc` so a generation can run without holding that lock — a summary
+    /// takes tens of seconds, and blocking settings changes for its duration
+    /// would deadlock the UI against itself.
+    client: Mutex<Arc<LlmClient>>,
+    pub config: Mutex<ProviderConfig>,
     pub selected_model: Mutex<Option<String>>,
     pub is_generating: AtomicBool,
 }
 
 impl Default for AiState {
     fn default() -> Self {
+        let config = ProviderConfig::default();
         Self {
-            client: Arc::new(OllamaClient::new()),
+            // The default config is a local Ollama, which is always valid.
+            client: Mutex::new(Arc::new(
+                LlmClient::from_config(&config).expect("the default provider config is valid"),
+            )),
+            config: Mutex::new(config),
             selected_model: Mutex::new(None),
             is_generating: AtomicBool::new(false),
         }
     }
 }
 
+impl AiState {
+    /// Take a handle to the current backend. Clones the `Arc` and releases the
+    /// lock immediately, so a long generation never blocks a config change.
+    pub async fn client(&self) -> Arc<LlmClient> {
+        self.client.lock().await.clone()
+    }
+
+    /// Swap in a new backend, leaving the old one untouched for any generation
+    /// still streaming through it.
+    pub async fn apply_config(&self, config: ProviderConfig) -> Result<(), String> {
+        let client = LlmClient::from_config(&config).map_err(|e| e.to_string())?;
+        *self.client.lock().await = Arc::new(client);
+        *self.config.lock().await = config;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OllamaStatus {
     pub running: bool,
-    pub models: Vec<OllamaModel>,
+    pub models: Vec<LlmModel>,
     pub selected_model: Option<String>,
+    /// Which backend answered, so the UI can label the status correctly.
+    pub provider: ProviderKind,
+}
+
+/// The provider settings, with the API key reduced to a boolean.
+///
+/// The key never travels back to the frontend: it is write-only from the UI's
+/// point of view, so it cannot leak through a devtools console or a log.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigView {
+    pub provider: ProviderKind,
+    pub base_url: String,
+    pub has_api_key: bool,
+}
+
+/// Outcome of a connection test, for the "Test connection" button.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTest {
+    pub ok: bool,
+    pub message: String,
+    pub model_count: usize,
 }
 
 #[allow(dead_code)]
@@ -100,31 +157,35 @@ pub struct GenerateSummaryResponse {
     pub summary: Summary,
 }
 
-/// Check if Ollama is running and get available models
+/// Check if the configured model server is reachable, and list its models.
 #[tauri::command]
 pub async fn get_ollama_status(state: State<'_, AiState>) -> Result<OllamaStatus, String> {
-    let running = state.client.is_running().await;
+    let client = state.client().await;
+    let running = client.is_running().await;
 
     let models = if running {
-        state.client.list_models().await.unwrap_or_default()
+        client.list_models().await.unwrap_or_default()
     } else {
         vec![]
     };
 
     let selected_model = state.selected_model.lock().await.clone();
+    let provider = state.config.lock().await.kind;
 
     Ok(OllamaStatus {
         running,
         models,
         selected_model,
+        provider,
     })
 }
 
-/// List available Ollama models
+/// List the models the configured server offers.
 #[tauri::command]
-pub async fn list_ollama_models(state: State<'_, AiState>) -> Result<Vec<OllamaModel>, String> {
+pub async fn list_ollama_models(state: State<'_, AiState>) -> Result<Vec<LlmModel>, String> {
     state
-        .client
+        .client()
+        .await
         .list_models()
         .await
         .map_err(|e| e.to_string())
@@ -137,7 +198,8 @@ pub async fn select_ollama_model(
     state: State<'_, AiState>,
 ) -> Result<(), String> {
     let models = state
-        .client
+        .client()
+        .await
         .list_models()
         .await
         .map_err(|e| e.to_string())?;
@@ -148,6 +210,119 @@ pub async fn select_ollama_model(
 
     *state.selected_model.lock().await = Some(model_name);
     Ok(())
+}
+
+// ========== Provider configuration ==========
+
+/// Read the current provider settings. The API key is reported only as a
+/// boolean; it is never sent back to the frontend.
+#[tauri::command]
+pub async fn get_ai_provider_config(
+    state: State<'_, AiState>,
+) -> Result<ProviderConfigView, String> {
+    let config = state.config.lock().await;
+    Ok(ProviderConfigView {
+        provider: config.kind,
+        base_url: config.base_url.clone(),
+        has_api_key: config.api_key.is_some(),
+    })
+}
+
+/// Point the app at a different model server.
+///
+/// `api_key` distinguishes three cases: `None` keeps the stored key, `Some("")`
+/// clears it, and any other value replaces it. Without that distinction the UI
+/// could not offer a masked field that is left blank to mean "unchanged".
+#[tauri::command]
+pub async fn set_ai_provider_config(
+    provider: String,
+    base_url: String,
+    api_key: Option<String>,
+    state: State<'_, AiState>,
+    db: State<'_, Database>,
+) -> Result<ProviderConfigView, String> {
+    let kind = ProviderKind::from_setting(&provider);
+
+    let resolved_key = match api_key {
+        None => state.config.lock().await.api_key.clone(),
+        Some(key) if key.trim().is_empty() => None,
+        Some(key) => Some(key),
+    };
+
+    let config = ProviderConfig {
+        kind,
+        base_url: crate::ai::provider::normalize_base_url(&base_url),
+        api_key: resolved_key,
+    };
+
+    // Rejects a bad URL before anything is persisted, so a typo cannot leave
+    // the app in a state it reloads into on next launch.
+    state.apply_config(config.clone()).await?;
+
+    db.set_setting(PROVIDER_SETTING, kind.as_setting())
+        .map_err(|e| e.to_string())?;
+    db.set_setting(BASE_URL_SETTING, &config.base_url)
+        .map_err(|e| e.to_string())?;
+    db.set_setting(API_KEY_SETTING, config.api_key.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())?;
+
+    Ok(ProviderConfigView {
+        provider: config.kind,
+        base_url: config.base_url,
+        has_api_key: config.api_key.is_some(),
+    })
+}
+
+/// Probe the configured server and report what happened in one line.
+#[tauri::command]
+pub async fn test_ai_connection(state: State<'_, AiState>) -> Result<ConnectionTest, String> {
+    let client = state.client().await;
+
+    match client.list_models().await {
+        Ok(models) => Ok(ConnectionTest {
+            ok: true,
+            message: if models.is_empty() {
+                // Reachable but empty is a real state worth distinguishing from
+                // unreachable: an Ollama with nothing pulled yet looks like this.
+                "Connected, but the server offers no models.".to_string()
+            } else {
+                format!("Connected. {} model(s) available.", models.len())
+            },
+            model_count: models.len(),
+        }),
+        Err(e) => Ok(ConnectionTest {
+            ok: false,
+            message: e.to_string(),
+            model_count: 0,
+        }),
+    }
+}
+
+/// Load the provider settings into the running state at startup.
+pub async fn restore_provider_config(state: &AiState, db: &Database) {
+    let read = |key: &str| db.get_setting(key).ok().flatten();
+
+    let Some(kind) = read(PROVIDER_SETTING).map(|v| ProviderKind::from_setting(&v)) else {
+        // Nothing saved yet: the default local Ollama is already in place.
+        return;
+    };
+
+    let base_url = read(BASE_URL_SETTING)
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| crate::ai::DEFAULT_OLLAMA_URL.to_string());
+    let api_key = read(API_KEY_SETTING).filter(|k| !k.trim().is_empty());
+
+    let config = ProviderConfig {
+        kind,
+        base_url,
+        api_key,
+    };
+
+    if let Err(e) = state.apply_config(config).await {
+        // A saved config that no longer validates must not take the AI
+        // features down; the default stays in place instead.
+        eprintln!("Ignoring the saved AI provider config: {}", e);
+    }
 }
 
 /// Get the currently selected model
@@ -243,7 +418,8 @@ pub async fn generate_summary(
             };
 
             let chunk_response = ai_state
-                .client
+                .client()
+                .await
                 .generate(&model, &chunk_prompt, 0.7, Some(4096))
                 .await
                 .map_err(|e| e.to_string())?;
@@ -268,7 +444,8 @@ pub async fn generate_summary(
         };
 
         ai_state
-            .client
+            .client()
+            .await
             .generate(&model, &merge_prompt, 0.7, Some(4096))
             .await
             .map_err(|e| e.to_string())?
@@ -289,7 +466,8 @@ pub async fn generate_summary(
 
         // Generate with Ollama
         ai_state
-            .client
+            .client()
+            .await
             .generate(&model, &prompt, 0.7, Some(4096))
             .await
             .map_err(|e| e.to_string())?
@@ -307,7 +485,8 @@ pub async fn generate_summary(
 
         // Generate with Ollama
         ai_state
-            .client
+            .client()
+            .await
             .generate(&model, &prompt, 0.7, Some(4096))
             .await
             .map_err(|e| e.to_string())?
@@ -315,6 +494,19 @@ pub async fn generate_summary(
 
     // Strip thinking tags from response
     let clean_response = strip_thinking_tags(&response);
+
+    // A summary block with nothing in it is worse than an error: it reads as
+    // "the meeting had nothing worth recording" rather than "this did not
+    // work". Two ways to arrive here, both seen in the wild — a model whose
+    // whole reply was a thinking block, and a server that routed the answer
+    // into `reasoning` and left `content` null.
+    if clean_response.trim().is_empty() {
+        return Err(format!(
+            "{model} returned nothing usable, so no summary was saved. If the reply was all \
+             thinking, the model needs a prompt that asks for an answer outside <think>; if the \
+             endpoint is vLLM, check that --reasoning-parser matches the model."
+        ));
+    }
 
     // Save to database
     let summary_id = db
@@ -436,7 +628,8 @@ pub async fn generate_summary_stream(
             };
 
             let chunk_response = ai_state
-                .client
+                .client()
+                .await
                 .generate(&model, &chunk_prompt, 0.7, Some(4096))
                 .await
                 .map_err(|e| e.to_string())?;
@@ -486,7 +679,8 @@ pub async fn generate_summary_stream(
         });
 
         ai_state
-            .client
+            .client()
+            .await
             .generate_stream(&model, &merge_prompt, 0.7, Some(4096), tx)
             .await
             .map_err(|e| e.to_string())?
@@ -539,7 +733,8 @@ pub async fn generate_summary_stream(
 
         // Generate with Ollama streaming
         ai_state
-            .client
+            .client()
+            .await
             .generate_stream(&model, &prompt, 0.7, Some(4096), tx)
             .await
             .map_err(|e| e.to_string())?
@@ -555,6 +750,19 @@ pub async fn generate_summary_stream(
 
     // Strip thinking tags from response
     let clean_response = strip_thinking_tags(&response);
+
+    // A summary block with nothing in it is worse than an error: it reads as
+    // "the meeting had nothing worth recording" rather than "this did not
+    // work". Two ways to arrive here, both seen in the wild — a model whose
+    // whole reply was a thinking block, and a server that routed the answer
+    // into `reasoning` and left `content` null.
+    if clean_response.trim().is_empty() {
+        return Err(format!(
+            "{model} returned nothing usable, so no summary was saved. If the reply was all \
+             thinking, the model needs a prompt that asks for an answer outside <think>; if the \
+             endpoint is vLLM, check that --reasoning-parser matches the model."
+        ));
+    }
 
     // Save to database
     let summary_id = db
@@ -670,7 +878,8 @@ pub async fn extract_action_items(
 
     let prompt = SummaryPrompts::action_items_checkboxes(&transcript, notes.as_deref());
     let response = ai_state
-        .client
+        .client()
+        .await
         .generate(&model, &prompt, 0.3, Some(2048))
         .await
         .map_err(|e| e.to_string())?;
@@ -824,7 +1033,8 @@ pub async fn generate_title(
     for attempt in 1..=max_retries {
         // Generate with Ollama (low temperature for consistent output)
         let response = ai_state
-            .client
+            .client()
+            .await
             .generate(&model, &prompt, 0.3, Some(100))
             .await
             .map_err(|e| e.to_string())?;
@@ -1158,7 +1368,8 @@ pub async fn generate_title_from_summary(
     for attempt in 1..=max_retries {
         // Generate with Ollama (low temperature for consistent output)
         let response = ai_state
-            .client
+            .client()
+            .await
             .generate(&model, &prompt, 0.3, Some(100))
             .await
             .map_err(|e| e.to_string())?;
@@ -1284,7 +1495,8 @@ pub async fn ai_write_stream(
 
     // Generate with Ollama streaming
     let response = ai_state
-        .client
+        .client()
+        .await
         .generate_stream(&model, &prompt, 0.7, Some(4096), tx)
         .await
         .map_err(|e| e.to_string())?;

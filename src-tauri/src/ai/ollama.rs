@@ -67,9 +67,16 @@ pub struct OllamaClient {
 
 impl OllamaClient {
     pub fn new() -> Self {
+        Self::with_base_url(OLLAMA_BASE_URL)
+    }
+
+    /// Point the client at a specific Ollama server, local or remote.
+    pub fn with_base_url(base_url: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: OLLAMA_BASE_URL.to_string(),
+            // Trailing slashes would otherwise produce `//api/tags`, which some
+            // reverse proxies in front of a remote Ollama will not route.
+            base_url: crate::ai::provider::normalize_base_url(base_url),
         }
     }
 
@@ -303,5 +310,18 @@ mod tests {
     async fn test_ollama_client_creation() {
         let client = OllamaClient::new();
         assert_eq!(client.base_url, OLLAMA_BASE_URL);
+    }
+
+    #[test]
+    fn a_remote_host_can_be_targeted() {
+        let client = OllamaClient::with_base_url("http://ollama.lan:11434");
+        assert_eq!(client.base_url, "http://ollama.lan:11434");
+    }
+
+    #[test]
+    fn a_trailing_slash_is_trimmed_from_the_base_url() {
+        // `//api/tags` is not routed by some reverse proxies.
+        let client = OllamaClient::with_base_url("http://ollama.lan:11434/");
+        assert_eq!(client.base_url, "http://ollama.lan:11434");
     }
 }
