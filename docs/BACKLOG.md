@@ -129,14 +129,13 @@ the physical thing it controls.
 The third backend: live audio streamed to the Spark's Nemotron ASR over two
 websockets, one per track. Demoed successfully. What is not done:
 
-- **No echo suppression.** The local path runs `is_echo_of_system` so the room's
-  speakers playing the far end does not get transcribed twice. The streaming
-  path has no equivalent, so on speakers every remote utterance appears twice —
-  once as `Others` from the system track and once as `You` from the microphone
-  hearing it. Headphones hide this entirely, which is why the demo looked clean.
-  The existing filter compares against a rolling window of system segments and
-  the streaming path's timing differs enough that it needs testing rather than
-  copying.
+- ~~**No echo suppression.**~~ Done 2026-08-20. The filter is shared with the
+  local path; what differs is the time frame. The two track clocks count what
+  each socket was sent, and Windows loopback delivers nothing while no audio
+  plays, so the system track's absolute offset drifts behind the microphone's
+  and the two are not comparable. Utterances are therefore placed by *arrival*,
+  extended backwards by their duration — the one thing both clocks measure
+  reliably. **Not yet confirmed against a real meeting on speakers.**
 - **Untested over a real meeting length.** Longest verified run is a few
   seconds. Memory growth, timeouts, reconnect behaviour and what arrives during
   long silences are all unknown — flagged by the Spark-side brief and still

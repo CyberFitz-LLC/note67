@@ -456,6 +456,69 @@ describe("streaming partials", () => {
     expect(hook.result.current.liveSegments[0].text).toBe("a new thing");
   });
 
+  it("takes a withdrawn draft off screen", async () => {
+    // The streaming path drops a mic utterance it judges to be the room's
+    // speakers, and says so with a settled event carrying no text. The draft
+    // was already shown as the user speaking, so it has to go — otherwise the
+    // far end's words stay attributed to whoever holds the microphone.
+    const hook = await live();
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("can you hear me")], { partial: true }));
+    });
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+
+    await act(async () => {
+      bus.emit(EVENT, update("n1", []));
+    });
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(0);
+    });
+  });
+
+  it("a withdrawal leaves settled text alone", async () => {
+    const hook = await live();
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("This was really said.")]));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [seg("draft")], { partial: true }));
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", []));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+    expect(hook.result.current.liveSegments[0].text).toBe("This was really said.");
+  });
+
+  it("withdrawing one track does not touch the other", async () => {
+    const hook = await live();
+    await act(async () => {
+      bus.emit(
+        EVENT,
+        update("n1", [seg("meeting audio")], { partial: true, audio_source: "system" })
+      );
+    });
+    await act(async () => {
+      bus.emit(
+        EVENT,
+        update("n1", [seg("my echo")], { partial: true, audio_source: "mic" })
+      );
+    });
+    await act(async () => {
+      bus.emit(EVENT, update("n1", [], { audio_source: "mic" }));
+    });
+
+    await waitFor(() => {
+      expect(hook.result.current.liveSegments).toHaveLength(1);
+    });
+    expect(hook.result.current.liveSegments[0].text).toBe("meeting audio");
+  });
+
   it("still appends whisper segments, which arrive complete", async () => {
     // The local path sends no `partial` flag at all. Its segments are discrete
     // utterances and every one of them has to be kept.

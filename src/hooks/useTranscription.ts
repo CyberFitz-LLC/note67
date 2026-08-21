@@ -269,11 +269,23 @@ export function useLiveTranscription(): UseLiveTranscriptionReturn {
               created_at: new Date().toISOString(),
             }));
 
-            if (newSegments.length === 0) return prev;
-
             // Missing audio_source means the local path, which is mic-only.
             const track = audio_source ?? "mic";
             const inFlight = partialIdRef.current[track];
+
+            if (!partial && segments.length === 0) {
+              // A settled event carrying no text withdraws the draft for this
+              // track — the streaming path sends one when it drops an utterance
+              // as an echo of the meeting audio. Without this the draft stays on
+              // screen for ever, attributing the far end's words to the person
+              // holding the microphone.
+              partialIdRef.current[track] = undefined;
+              return inFlight === undefined
+                ? prev
+                : prev.filter((s) => s.id !== inFlight);
+            }
+
+            if (newSegments.length === 0) return prev;
 
             if (partial) {
               // Revised text for this track. Replace what is on screen rather

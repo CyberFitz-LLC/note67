@@ -15,7 +15,8 @@
 //! `stop_live_transcription` command stops this path too.
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
@@ -30,7 +31,21 @@ use crate::transcription::streaming::{
     self, Recognised, StreamingSession, CHUNK_SAMPLES, SAMPLE_RATE,
 };
 use crate::transcription::transcriber::TranscriptionSegment;
-use crate::transcription::TranscriptionError;
+use crate::transcription::{is_echo_of_system, TranscriptionError};
+
+/// How long a settled microphone utterance is held before it is judged an echo.
+///
+/// Both tracks go to the same recogniser, so the far end's words and the mic's
+/// re-capture of them are recognised at similar speed — but not in a guaranteed
+/// order. Without a pause, a mic echo can be judged against a window that does
+/// not yet contain the system utterance it is echoing, and it survives.
+///
+/// Costs nothing visible: the partial is already on screen, and this only
+/// delays the point at which it is written down.
+const ECHO_GRACE: Duration = Duration::from_millis(600);
+
+/// How much recent system audio is kept for echo comparison.
+const ECHO_MEMORY_SECS: f64 = 30.0;
 
 /// How often the capture buffers are drained and pushed to the sockets.
 ///
@@ -38,6 +53,43 @@ use crate::transcription::TranscriptionError;
 /// client paces sends in real time; firing a backlog at it as fast as the
 /// socket accepts is explicitly not the tested path.
 const TICK: Duration = Duration::from_millis(streaming::CHUNK_MS as u64);
+
+/// Recent system-audio utterances, for judging whether the microphone is
+/// hearing the room's speakers rather than a person.
+///
+/// **Spans are measured by arrival, not by the track clocks.** Each clock counts
+/// what that socket has been sent, and the two tracks are not fed at the same
+/// rate — Windows loopback delivers nothing at all while no application is
+/// playing audio, so the system track's absolute offset falls behind the
+/// microphone's by however much silence has passed. Comparing those numbers
+/// would put the two tracks in different time frames and the overlap test would
+/// never fire.
+///
+/// What each clock *does* measure reliably is duration. So an utterance is
+/// placed by when it came back, extending backwards by how long it ran, which
+/// puts both tracks on one wall clock.
+#[derive(Clone, Default)]
+pub struct EchoWindow {
+    /// (start, end, text), seconds since the session began.
+    recent: Arc<Mutex<Vec<(f64, f64, String)>>>,
+}
+
+impl EchoWindow {
+    /// Note a system utterance that ended `at` seconds into the session.
+    pub fn record(&self, at: f64, duration: f64, text: &str) {
+        let Ok(mut recent) = self.recent.lock() else {
+            return;
+        };
+        recent.push((at - duration.max(0.0), at, text.to_string()));
+        // Anything older than the window cannot overlap what arrives next, and
+        // keeping it would grow without bound over a long meeting.
+        recent.retain(|(_, end, _)| *end > at - ECHO_MEMORY_SECS);
+    }
+
+    pub fn snapshot(&self) -> Vec<(f64, f64, String)> {
+        self.recent.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+}
 
 /// Keeps a quiet microphone usable without flattening the signal.
 ///
@@ -209,12 +261,19 @@ pub async fn start_streaming_transcription(
     *live_state.system_time_offset.lock().await = 0.0;
     live_state.segments.lock().await.clear();
 
+    // One clock and one window shared by both readers, so a microphone
+    // utterance can be checked against what the meeting was saying at the time.
+    let started = Instant::now();
+    let echo = EchoWindow::default();
+
     spawn_reader(
         app.clone(),
         note_id.clone(),
         live_state.clone(),
         mic_rx,
         AudioSource::Mic,
+        started,
+        echo.clone(),
     );
     spawn_reader(
         app.clone(),
@@ -222,6 +281,8 @@ pub async fn start_streaming_transcription(
         live_state.clone(),
         system_rx,
         AudioSource::System,
+        started,
+        echo,
     );
 
     tokio::spawn(feed_loop(
@@ -317,12 +378,15 @@ async fn feed_loop(
 }
 
 /// Consumes one track's recognitions: partials to the UI, finals to the DB.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader(
     app: AppHandle,
     note_id: String,
     live_state: Arc<LiveTranscriptionState>,
     mut rx: tokio::sync::mpsc::Receiver<Recognised>,
     source: AudioSource,
+    started: Instant,
+    echo: EchoWindow,
 ) {
     tokio::spawn(async move {
         while let Some(item) = rx.recv().await {
@@ -360,6 +424,47 @@ fn spawn_reader(
                     start_time,
                     end_time,
                 } => {
+                    let duration = (end_time - start_time).max(0.0);
+
+                    match source {
+                        AudioSource::System => {
+                            // The meeting's own words, which the microphone may
+                            // be about to repeat back.
+                            echo.record(started.elapsed().as_secs_f64(), duration, &text);
+                        }
+                        AudioSource::Mic => {
+                            // Wait for the far end's matching utterance to land
+                            // before judging, then check.
+                            tokio::time::sleep(ECHO_GRACE).await;
+                            let at = started.elapsed().as_secs_f64() - ECHO_GRACE.as_secs_f64();
+                            if is_echo_of_system(
+                                &text,
+                                at - duration,
+                                at,
+                                &echo.snapshot(),
+                            ) {
+                                println!(
+                                    "[stream] dropped a mic utterance as an echo of the meeting audio: {text:?}"
+                                );
+                                // Take the draft off screen. It was shown as the
+                                // user speaking and it was the room's speakers,
+                                // so leaving it would attribute the far end's
+                                // words to whoever is wearing the microphone.
+                                let _ = app.emit(
+                                    "transcription-update",
+                                    TranscriptionUpdateEvent {
+                                        note_id: note_id.clone(),
+                                        segments: vec![],
+                                        is_final: false,
+                                        partial: false,
+                                        audio_source: source,
+                                    },
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
                     let segment = TranscriptionSegment {
                         start_time,
                         end_time,
@@ -527,4 +632,70 @@ mod tests {
         assert_eq!(speaker_for(AudioSource::Mic), "You");
         assert_eq!(speaker_for(AudioSource::System), "Others");
     }
+
+    #[test]
+    fn an_utterance_is_placed_by_when_it_arrived_less_how_long_it_ran() {
+        // The two track clocks count what each socket was sent, and the system
+        // track stalls whenever nothing is playing — so absolute offsets from
+        // the clocks are not comparable between tracks. Arrival is.
+        let w = EchoWindow::default();
+        w.record(12.0, 3.0, "shall we start");
+        assert_eq!(w.snapshot(), vec![(9.0, 12.0, "shall we start".to_string())]);
+    }
+
+    #[test]
+    fn the_window_forgets_what_can_no_longer_overlap() {
+        let w = EchoWindow::default();
+        w.record(1.0, 1.0, "old news");
+        w.record(ECHO_MEMORY_SECS + 5.0, 2.0, "current");
+        let kept = w.snapshot();
+        assert_eq!(kept.len(), 1, "a long meeting must not grow this for ever");
+        assert_eq!(kept[0].2, "current");
+    }
+
+    #[test]
+    fn a_negative_duration_does_not_invert_the_span() {
+        // Defensive: the clock should never produce one, and an inverted span
+        // would silently never match rather than failing loudly.
+        let w = EchoWindow::default();
+        w.record(5.0, -2.0, "odd");
+        let (start, end, _) = w.snapshot()[0].clone();
+        assert!(start <= end, "span inverted: {start} > {end}");
+    }
+
+    #[test]
+    fn the_speakers_playing_the_far_end_back_is_recognised_as_echo() {
+        // The case this whole mechanism exists for: testing on speakers, where
+        // the microphone hears the meeting and reports it as the user talking.
+        let w = EchoWindow::default();
+        w.record(10.0, 4.0, "we should ship it on Friday");
+        // The mic hears the same words over the same stretch.
+        assert!(is_echo_of_system(
+            "we should ship it on Friday",
+            6.0,
+            10.0,
+            &w.snapshot()
+        ));
+    }
+
+    #[test]
+    fn talking_over_the_meeting_is_not_echo() {
+        // The failure that matters more than a duplicate: dropping what the
+        // user actually said because they spoke while the far end was talking.
+        let w = EchoWindow::default();
+        w.record(10.0, 4.0, "we should ship it on Friday");
+        assert!(!is_echo_of_system(
+            "sorry, can I stop you there",
+            6.0,
+            10.0,
+            &w.snapshot()
+        ));
+    }
+
+    #[test]
+    fn nothing_is_echo_when_the_meeting_has_said_nothing() {
+        let w = EchoWindow::default();
+        assert!(!is_echo_of_system("just thinking aloud", 0.0, 3.0, &w.snapshot()));
+    }
+
 }
