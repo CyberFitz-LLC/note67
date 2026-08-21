@@ -210,6 +210,11 @@ Design questions this raises, none of them settled:
 
 ### Speaker identification
 
+**Design written 2026-08-21: [`people/DESIGN.md`](people/DESIGN.md).** Phase 1
+(named people, participants, filtering by person) is scoped and carries no
+biometric claim; three open questions there need answering before it starts.
+The notes below are what that design was built from.
+
 Wanted: `Speaker 1..n` instead of "You" and "Others", relabelling to real names,
 suggestions once someone has been labelled enough times, and always a manual
 override for a specific stretch.
