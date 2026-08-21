@@ -148,10 +148,35 @@ jobs:
           # Installation Guide for Windows, silent-install subpackage table).
           # An invalid name does not warn — the installer aborts, and its exit
           # code says nothing about which entry it disliked.
-          # `crt` is separate from `cudart` and is not optional: cuda_runtime.h
-          # includes crt/host_config.h on its 82nd line, so without it nothing
-          # that includes the runtime header compiles at all.
-          sub-packages: '["nvcc", "crt", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          # 13.x splits things 12.x bundled into `nvcc`/`cudart`, and each
+          # omission fails late and obscurely rather than at install time:
+          #
+          #   crt      — cuda_runtime.h includes crt/host_config.h on line 82,
+          #              so without it nothing that includes the runtime header
+          #              compiles. Presents as C1083 on a missing header.
+          #   nvvm     — holds `cicc`, the device-side compiler nvcc shells out
+          #              to. Without it nvcc reports only "The system cannot
+          #              find the path specified" and exits 1.
+          #   nvjitlink — cuBLAS links against it from 12.4 onward.
+          sub-packages: '["nvcc", "crt", "nvvm", "cudart", "cublas", "cublas_dev", "nvjitlink", "thrust", "visual_studio_integration"]'
+
+      # Each missing piece of the toolkit fails somewhere later and says
+      # nothing useful about what is absent, so state up front what actually
+      # landed. Three CI cycles went on discovering omissions one at a time
+      # that this would have shown at a glance.
+      - name: Show what the CUDA install provided
+        if: matrix.variant == 'cuda'
+        shell: pwsh
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          foreach ($tool in @("bin\nvcc.exe", "nvvm\bin\cicc.exe", "bin\ptxas.exe",
+                              "bin\fatbinary.exe", "bin\nvlink.exe",
+                              "include\crt\host_config.h", "include\cuda_runtime.h",
+                              "include\thrust\version.h")) {
+            $p = Join-Path $env:CUDA_PATH $tool
+            $mark = if (Test-Path $p) { "ok  " } else { "MISSING" }
+            Write-Host "$mark $tool"
+          }
 
       # The toolkit ships the MSBuild integration but does not register it with
       # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
