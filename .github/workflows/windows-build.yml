@@ -251,6 +251,15 @@ jobs:
           # Ampere, Ada — plus PTX, so anything newer JIT-compiles on first run
           # instead of silently falling back to the CPU.
           CUDAARCHS: "75-real;86-real;89-real;90-virtual"
+          # CCCL — the CUDA 13 standard library that thrust now lives inside —
+          # refuses to compile under MSVC's traditional preprocessor and says
+          # so as a hard #error. It offers
+          # CCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING to silence it;
+          # that is not taken, because the text it silences is "this may lead
+          # to unexpected compilation errors" and a quietly miscompiled CUDA
+          # kernel is worse than a red build. CUDAFLAGS is CMake's own
+          # environment variable for seeding CMAKE_CUDA_FLAGS.
+          CUDAFLAGS: "-Xcompiler=/Zc:preprocessor"
         run: |
           if [ "${{ matrix.variant }}" = "cuda" ]; then
             # Resource paths are relative to src-tauri; "./" puts them next to
