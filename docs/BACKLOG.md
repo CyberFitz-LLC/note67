@@ -115,8 +115,36 @@ the physical thing it controls.
 - **Inference serialization fix** — the hypothesis for the crash ten seconds
   into a recording. If it crashes again there, the concurrency diagnosis was
   wrong and the Event Viewer exception code is what decides.
-- **Remote model endpoints** — no request has reached a live vLLM or remote
-  Ollama. SSE reassembly is tested against captured frames, not a server.
+- ~~**Remote model endpoints**~~ — done 2026-08-20, and it found a real defect.
+  The Spark's vLLM serves `lightning-30b-nvfp4` with `--reasoning-parser
+  nemotron_v3`, whose delimiter the model never emits, so every reply came back
+  `content: null` with the answer in `reasoning`. Summaries saved empty and task
+  generation found nothing. The client now falls back to `reasoning` only when
+  `content` is empty, and an empty reply is an error rather than a saved
+  summary. **The server is still misconfigured** — every OpenAI-compatible
+  client on :8902 sees null content, so LiteLLM and Fitzy are affected too.
+
+## Streaming recogniser (shipped 2026-08-20, incomplete)
+
+The third backend: live audio streamed to the Spark's Nemotron ASR over two
+websockets, one per track. Demoed successfully. What is not done:
+
+- **No echo suppression.** The local path runs `is_echo_of_system` so the room's
+  speakers playing the far end does not get transcribed twice. The streaming
+  path has no equivalent, so on speakers every remote utterance appears twice —
+  once as `Others` from the system track and once as `You` from the microphone
+  hearing it. Headphones hide this entirely, which is why the demo looked clean.
+  The existing filter compares against a rolling window of system segments and
+  the streaming path's timing differs enough that it needs testing rather than
+  copying.
+- **Untested over a real meeting length.** Longest verified run is a few
+  seconds. Memory growth, timeouts, reconnect behaviour and what arrives during
+  long silences are all unknown — flagged by the Spark-side brief and still
+  open.
+- **No diarization on this path.** The upload backend returns `Speaker 1..N`;
+  this returns only the two track labels.
+- **The recogniser is unauthenticated** and bound `0.0.0.0` on VLAN3. Fine on
+  the LAN, and the settings copy says so, but it is not a thing to expose.
 
 ## Audio routing and speaker attribution
 
@@ -193,7 +221,11 @@ whisper.cpp does not do it. Realistic options, in order of cost:
 1. **Track-derived attribution**, which is what exists: which file a segment came
    from. Correct for "me versus everyone else" and useless beyond it.
 2. **A diarization model** (pyannote-class, or whisper.cpp's tinydiarize for two
-   speakers). Real dependency, real GPU time, offline.
+   speakers). Real dependency, real GPU time, offline. **Partly built:**
+   `note67-asr` on the Spark (Parakeet TDT + NeMo ClusteringDiarizer) returns
+   `Speaker 1..N` and is wired into the *upload* path. Its accuracy is still
+   unestablished — 4 speakers found in a synthetic 6-voice fixture, and espeak
+   voices are a poor proxy. **A real meeting recording is the missing input.**
 3. **Speaker embeddings + a labelled store.** Embed each speaker turn, cluster
    within a meeting for `Speaker N`, and match against previously labelled
    embeddings across meetings to suggest names. This is the version that
