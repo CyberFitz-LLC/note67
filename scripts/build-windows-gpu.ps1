@@ -11,6 +11,12 @@
         .\scripts\build-windows-gpu.ps1 -Backend vulkan
 
 .NOTES
+    CI builds both installers on every push and they can be downloaded rather
+    than built — see docs/BUILD.md, which also records what the CUDA toolchain
+    requires and why. Read it before changing anything CUDA-shaped here: this
+    script and .github/workflows/windows-build.yml must stay on the same CUDA
+    major version, or "it builds" means different things in the two places.
+
     Prerequisites, all one-time:
       winget install Rustlang.Rustup
       winget install OpenJS.NodeJS.LTS

@@ -298,40 +298,12 @@ Smaller things the protocol left behind:
 ## Build and release
 
 - ~~**CUDA CI build has never succeeded.**~~ Green since 2026-08-21. It was
-  toolchain drift, not our code, and took seven cycles because each piece
-  failed late and described itself badly:
-
-  1. The hosted image moved to Visual Studio 18 / MSVC 14.51, which CUDA 12.5's
-     nvcc refuses — exit code 5 while compiling CMake's own compiler-id file.
-     Fixed by moving CI to **CUDA 13.2.2**, which is what the local script had
-     been using all along. That divergence was the root of it: the desk and CI
-     did not agree on what "builds" meant.
-  2. 13.x splits packages 12.x bundled. **`crt`** (cuda_runtime.h includes
-     crt/host_config.h) and **`nvvm`** (holds `cicc`, which nvcc shells out to)
-     are separate, and their absence shows up as a missing header and as "the
-     system cannot find the path specified" respectively. `thrust` is still a
-     valid subpackage; `cccl` is not one on Windows at any version.
-  3. **`CUDAARCHS`** must be set. ggml leaves the architecture to CMake and
-     CMake asks the machine; a runner has no GPU, so it fell back to a Maxwell
-     default that CUDA 13 dropped.
-  4. **`CUDAFLAGS=-std=c++17 -Xcompiler=/Zc:preprocessor`**. CCCL requires the
-     conforming preprocessor and CUB requires C++17, and nothing in
-     whisper.cpp's CMake sets a CUDA standard, so nvcc defaulted to C++14.
-
-  The job now prints which toolkit pieces actually landed before using any of
-  them, because discovering omissions one CI cycle at a time is what made this
-  slow.
-
-  **Two things this exposed, both still open:**
-
-  - **Locally built installers are probably GPU-specific.** Nothing has ever
-    set the CUDA architecture, so a build at John's desk detects his card and
-    targets only that; anyone else's GPU would fall back to CPU. CI now names
-    Turing/Ampere/Ada plus PTX. `scripts/build-windows-gpu.ps1` is deliberately
-    untouched — fixing it makes local builds slower, and that is a trade to
-    make on purpose.
-  - **The CUDA installer is 862 MB against Vulkan's 20 MB**, almost all of it
-    cuBLAS. That is a real distribution question, not a build one.
+  toolchain drift, not our code: CI was on CUDA 12.5 against a Visual Studio 18
+  runner image, while the local script had already moved to CUDA 13. What the
+  toolchain requires, and why each flag is there, is written down in
+  [BUILD.md](BUILD.md) — read that before changing anything CUDA-shaped.
+  Two things it left open, both listed there: locally built installers are
+  probably GPU-specific, and the CUDA installer is 862 MB against Vulkan's 20.
 
 - **The NSIS bundler fetches its toolchain at build time.** A Vulkan build
   failed with `failed to bundle project: io: Peer disconnected` and succeeded
