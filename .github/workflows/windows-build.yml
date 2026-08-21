@@ -126,15 +126,24 @@ jobs:
           "VULKAN_SDK=$($root.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # Third-party action. Pin to a SHA if that matters more than convenience.
+      #
+      # CUDA 13, matching what builds locally. 12.5 used to work and stopped
+      # when the hosted image moved to Visual Studio 18 / MSVC 14.51: nvcc
+      # refuses a host compiler that far ahead of it and exits with code 5
+      # while compiling CMake's own compiler-identification file, so the build
+      # died before any of our code was touched. `-allow-unsupported-compiler`
+      # does not rescue it. Keep this in step with the toolkit the local script
+      # expects, or CI and the desk disagree about what "builds" means.
       - name: Install CUDA Toolkit
         if: matrix.variant == 'cuda' && steps.sdk.outputs.cuda != 'true'
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: '12.5.0'
+          cuda: '13.2.2'
           method: 'network'
           # Only what ggml needs to compile and link; the full toolkit is a
-          # multi-gigabyte download for no gain.
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+          # multi-gigabyte download for no gain. `thrust` is not a separate
+          # sub-package in 13.x — it ships inside `cccl`.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "cccl", "visual_studio_integration"]'
 
       # The toolkit ships the MSBuild integration but does not register it with
       # Visual Studio, so CMake's `enable_language(CUDA)` fails with "No CUDA
@@ -171,9 +180,18 @@ jobs:
         run: |
           $bin = "$env:CUDA_PATH\bin"
           if (-not (Test-Path $bin)) { throw "CUDA_PATH not set or missing bin/: '$env:CUDA_PATH'" }
-          $want = Get-ChildItem $bin -Filter *.dll |
-                  Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' }
-          if (-not $want) { throw "No cudart/cublas DLLs found in $bin" }
+          # Searched recursively, and deduplicated by name. CUDA 13 moved the
+          # runtime DLLs out of bin\ into a subdirectory, so a flat listing
+          # finds nothing on a perfectly good toolkit and reports it as a
+          # missing install. The local build script learned this first.
+          $want = Get-ChildItem $bin -Filter *.dll -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match '^(cudart64|cublas64|cublasLt64)_' } |
+                  Group-Object Name | ForEach-Object { $_.Group[0] }
+          if (-not $want) {
+            $subdirs = (Get-ChildItem $bin -Directory -ErrorAction SilentlyContinue |
+                        ForEach-Object { $_.Name }) -join ", "
+            throw "No cudart/cublas DLLs under $bin (searched recursively; subdirectories: $subdirs)"
+          }
           New-Item -ItemType Directory -Force -Path src-tauri/cuda-runtime | Out-Null
           foreach ($dll in $want) {
             Copy-Item $dll.FullName -Destination src-tauri/cuda-runtime -Force
