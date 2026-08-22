@@ -76,14 +76,25 @@ pub fn decode(path: &Path) -> Result<Decoded, AudioError> {
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            stream,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|e| AudioError::IoError(std::io::Error::other(format!("unreadable audio: {e}"))))?;
+    let probed = match symphonia::default::get_probe().format(
+        &hint,
+        stream,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            // A recording the app never got to finalize still holds all its
+            // audio; only the declared length is missing. Worth one attempt
+            // before calling a meeting unreadable.
+            if let Ok(recovered) = recover_unfinalized_wav(path) {
+                return Ok(recovered);
+            }
+            return Err(AudioError::IoError(std::io::Error::other(format!(
+                "unreadable audio: {e}"
+            ))));
+        }
+    };
 
     let mut format = probed.format;
     let track = format
@@ -132,6 +143,123 @@ pub fn decode(path: &Path) -> Result<Decoded, AudioError> {
             }
         }
     }
+
+    Ok(Decoded {
+        samples,
+        sample_rate,
+        channels,
+    })
+}
+
+
+/// Recover a WAV whose header was never completed.
+///
+/// hound writes the RIFF and `data` headers with placeholder lengths and
+/// patches them on `finalize()`. If the app dies before that — a crash, a
+/// force-quit, a machine losing power mid-meeting — the samples are all on
+/// disk and the declared length is still zero, so every decoder refuses the
+/// file: "missing data chunk".
+///
+/// The audio is not lost, only undeclared. This reads the format from the
+/// `fmt ` chunk, finds where `data` begins, and treats everything from there to
+/// the end of the file as samples — which is exactly what the length field
+/// would have said.
+///
+/// Only ever used after a normal decode has failed, and only when the header is
+/// coherent enough to trust: without a readable `fmt ` chunk, or with a
+/// remainder that is not a whole number of frames, this refuses rather than
+/// inventing audio.
+fn recover_unfinalized_wav(path: &Path) -> Result<Decoded, AudioError> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(AudioError::IoError(std::io::Error::other(
+            "not a RIFF/WAVE file",
+        )));
+    }
+
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at = |i: usize| {
+        u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize
+    };
+
+    let mut pos = 12;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits = 0u16;
+    let mut is_float = false;
+    let mut data_start = None;
+
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let declared = u32_at(pos + 4);
+        let body = pos + 8;
+
+        if id == b"fmt " && body + 16 <= bytes.len() {
+            is_float = u16_at(body) == 3; // WAVE_FORMAT_IEEE_FLOAT
+            channels = u16_at(body + 2);
+            sample_rate = u32_at(body + 4) as u32;
+            bits = u16_at(body + 14);
+        } else if id == b"data" {
+            data_start = Some(body);
+            break;
+        }
+
+        // A zero-length chunk before `data` would loop for ever.
+        if declared == 0 && id != b"data" {
+            break;
+        }
+        pos = body + declared + (declared & 1);
+    }
+
+    let (Some(start), true) = (data_start, channels > 0 && sample_rate > 0 && bits > 0) else {
+        return Err(AudioError::IoError(std::io::Error::other(
+            "no usable fmt/data header to recover from",
+        )));
+    };
+
+    let bytes_per_sample = (bits / 8) as usize;
+    let frame = bytes_per_sample * channels as usize;
+    if frame == 0 || start >= bytes.len() {
+        return Err(AudioError::IoError(std::io::Error::other(
+            "no audio after the header",
+        )));
+    }
+
+    // Whatever is there, rounded down to whole frames — the tail of a file that
+    // stopped mid-frame is not a sample.
+    let usable = ((bytes.len() - start) / frame) * frame;
+    if usable == 0 {
+        return Err(AudioError::IoError(std::io::Error::other(
+            "no complete audio frames after the header",
+        )));
+    }
+
+    let raw = &bytes[start..start + usable];
+    let samples: Vec<f32> = match (is_float, bits) {
+        (true, 32) => raw
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect(),
+        (false, 16) => raw
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect(),
+        (false, 32) => raw
+            .chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2147483648.0)
+            .collect(),
+        _ => {
+            return Err(AudioError::IoError(std::io::Error::other(format!(
+                "unsupported sample format for recovery: {bits} bits, float={is_float}"
+            ))))
+        }
+    };
+
+    println!(
+        "[codec] recovered {} unfinalized samples from {}",
+        samples.len(),
+        path.display()
+    );
 
     Ok(Decoded {
         samples,
@@ -195,12 +323,17 @@ pub fn encode_flac_16k_mono(samples: &[f32], path: &Path) -> Result<(), AudioErr
     // Padding makes the two agree. It costs at most one block of trailing
     // silence — 4096 samples, a quarter-second at 16 kHz — at the very end of a
     // recording, where it changes nothing anyone hears or transcribes.
+    // Always at least one whole block, including for no samples at all.
+    //
+    // Skipping the padding when there was nothing to encode produced a FLAC
+    // with no frames, which no decoder will read. That is not a hypothetical:
+    // a system-audio capture from a meeting where nothing was ever played
+    // decodes to zero samples, and those files failed compaction on every run
+    // and stayed as WAVs for ever.
     let block = config.block_size;
-    if !pcm.is_empty() {
-        let remainder = pcm.len() % block;
-        if remainder != 0 {
-            pcm.resize(pcm.len() + (block - remainder), 0);
-        }
+    let remainder = pcm.len() % block;
+    if remainder != 0 || pcm.is_empty() {
+        pcm.resize(pcm.len() + (block - remainder), 0);
     }
 
     let source = flacenc::source::MemSource::from_samples(&pcm, 1, 16, TARGET_RATE as usize);
@@ -456,10 +589,25 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_recording_does_not_panic() {
-        let path = tmp("empty.flac");
-        encode_flac_16k_mono(&[], &path).expect("encode nothing");
-        let _ = std::fs::remove_file(&path);
+    fn an_empty_or_tiny_recording_still_produces_a_readable_file() {
+        // Found in the wild: system-audio captures from meetings where nothing
+        // was ever played decode to zero samples, and the FLAC written from
+        // them could not be read back — so compaction refused them for ever,
+        // every run, and they stayed as WAVs.
+        //
+        // The earlier version of this test only checked that encoding did not
+        // panic, which is why the gap survived. Encoding something unreadable
+        // is the failure that matters.
+        for n in [0usize, 1, 15, 16, 100] {
+            let path = tmp(&format!("tiny-{n}.flac"));
+            let samples = vec![0.1f32; n];
+            encode_flac_16k_mono(&samples, &path)
+                .unwrap_or_else(|e| panic!("length {n} failed to encode: {e}"));
+            let back = decode_to_16k_mono(&path)
+                .unwrap_or_else(|e| panic!("length {n} encoded to something unreadable: {e}"));
+            assert!(back.len() >= n, "length {n} lost samples");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]
@@ -552,6 +700,85 @@ mod tests {
             "a partial file was left where a later run could mistake it for audio"
         );
         assert!(!path.with_extension("flac").exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a WAV exactly as hound leaves one when finalize never ran: correct
+    /// fmt chunk, `data` declared as zero length, samples written after it.
+    fn unfinalized_wav(path: &std::path::Path, samples: &[f32], channels: u16, rate: u32) {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&0u32.to_le_bytes()); // never patched
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * channels as u32 * 2).to_le_bytes());
+        out.extend_from_slice(&(channels * 2).to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&0u32.to_le_bytes()); // never patched
+        for s in samples {
+            out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+        }
+        std::fs::write(path, out).expect("write");
+    }
+
+    #[test]
+    fn a_recording_the_app_never_finalized_is_recovered() {
+        // Found in a real library: nine files reporting "missing data chunk".
+        // The app died before hound patched the header, so every decoder
+        // refused them — but the meeting audio was there the whole time.
+        let path = tmp("unfinalized.wav");
+        let original = signal(16_000);
+        unfinalized_wav(&path, &original, 1, 16_000);
+
+        // Symphonia alone cannot read it; the codec can.
+        let back = decode_to_16k_mono(&path).expect("recover");
+        assert!(
+            back.len() >= original.len() - 1,
+            "recovered {} of {} samples",
+            back.len(),
+            original.len()
+        );
+        assert!(back.iter().any(|s| s.abs() > 0.05), "recovered only silence");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unfinalized_stereo_recording_is_recovered_at_the_right_rate() {
+        let path = tmp("unfinalized-48k.wav");
+        unfinalized_wav(&path, &signal(48_000 * 2), 2, 48_000);
+        let back = decode_to_16k_mono(&path).expect("recover");
+        // 48 kHz stereo, one second of frames -> ~16000 mono samples.
+        assert!(
+            (back.len() as i64 - 16_000).abs() < 100,
+            "expected ~16000 samples, got {}",
+            back.len()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recovery_refuses_a_file_that_is_not_audio() {
+        // The rule that keeps this honest: recovery must not invent samples
+        // from bytes that were never audio.
+        let path = tmp("garbage-header.wav");
+        std::fs::write(&path, b"RIFFxxxxWAVEnonsense and more nonsense here ok").expect("write");
+        assert!(decode_to_16k_mono(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_header_with_no_audio_after_it_is_not_recovered() {
+        let path = tmp("header-only.wav");
+        unfinalized_wav(&path, &[], 1, 16_000);
+        assert!(
+            decode_to_16k_mono(&path).is_err(),
+            "a header with no samples should not decode to anything"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

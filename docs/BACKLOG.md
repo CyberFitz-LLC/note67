@@ -263,6 +263,14 @@ Notes on doing it properly:
 - **Chunking is tuned for a 4096 context.** `MAX_CONTENT_LENGTH` and
   `split_into_chunks` predate configurable providers, so a long-context model
   gets more round-trips than it needs. Works, wastes time.
+- **Recordings can be left unfinalized, and used to be unreadable.** hound
+  writes the WAV header with placeholder lengths and patches them on
+  `finalize()`; if the app dies first the samples are all on disk and every
+  decoder refuses the file. Nine such files turned up in one real library.
+  `codec::recover_unfinalized_wav` now reads them, so the audio is not lost —
+  but nothing prevents the state, and a recording that ends this way is
+  invisible until something tries to read it. Worth finding out what killed
+  the app in those nine cases.
 - **Deleting a note leaves its audio on disk, for ever.** The rows go — the
   FK cascades — and the files are never touched. Compaction now reports how
   many it found that nothing references, which on one real library was a large
