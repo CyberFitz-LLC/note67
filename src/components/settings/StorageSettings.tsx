@@ -13,6 +13,7 @@ interface CompactionReport {
   bytes_before: number;
   bytes_after: number;
   failures: CompactionFailure[];
+  orphans: number;
 }
 
 function gb(bytes: number): string {
@@ -111,6 +112,14 @@ export function StorageSettings() {
             <p>
               Nothing was compacted. {report.files_examined - report.files_failed}{" "}
               of {report.files_examined} were already compressed.
+            </p>
+          )}
+
+          {report.orphans > 0 && (
+            <p style={{ color: "var(--color-text-secondary)" }}>
+              {report.orphans} of those belong to notes that no longer exist —
+              deleting a note has never removed its audio. They were compressed
+              too, but nothing will ever play them.
             </p>
           )}
 

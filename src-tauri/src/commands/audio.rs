@@ -580,6 +580,14 @@ pub struct CompactionReport {
     /// What went wrong, and where. A count alone leaves the only explanation in
     /// a console the user cannot see.
     pub failures: Vec<CompactionFailure>,
+    /// Files that were on disk with nothing in the database pointing at them.
+    ///
+    /// Deleting a note removes its rows and leaves its audio behind, so these
+    /// accumulate. They are compacted like anything else — the space is real —
+    /// but they are counted separately because nothing will ever play them and
+    /// the honest thing is to say so rather than let them look like part of the
+    /// library.
+    pub orphans: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -600,7 +608,13 @@ pub struct CompactionFailure {
 /// counted, left exactly as it was, and does not stop the pass — one unreadable
 /// recording should not block recovering the rest.
 #[tauri::command]
-pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, String> {
+pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<CompactionReport, String> {
+    let recordings_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data directory: {e}"))?
+        .join("recordings");
+
     let mut report = CompactionReport {
         files_examined: 0,
         files_compacted: 0,
@@ -608,26 +622,54 @@ pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, Strin
         bytes_before: 0,
         bytes_after: 0,
         failures: Vec::new(),
+        orphans: 0,
     };
 
-    // Convert one file, accounting for it either way. Returns the path it
-    // should now be known by — unchanged if anything went wrong.
-    let mut convert = |path: &std::path::Path, report: &mut CompactionReport| -> Option<std::path::PathBuf> {
-        if !path.exists() {
-            // A row naming a file that is gone is a pre-existing problem, not
-            // one to report as a compaction failure.
-            return None;
+    // Walk the directory rather than the database.
+    //
+    // Two earlier passes worked from DB rows and each missed most of the disk,
+    // because plenty of files have no row: deleting a note removes its rows and
+    // leaves the audio, playback mixes exist for notes whose audio_path was
+    // cleared, and uploads leave temporaries. The directory is the only honest
+    // account of what is taking up space.
+    let entries = match std::fs::read_dir(&recordings_dir) {
+        Ok(e) => e,
+        Err(e) => return Err(format!("could not read {}: {e}", recordings_dir.display())),
+    };
+
+    // What moved, so database rows naming the old path can be corrected after.
+    let mut moved: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
         }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+
+        // Already done, or the debris of an interrupted conversion.
+        if ext == "flac" || ext == "partial" {
+            continue;
+        }
+        if !audio::converter::is_supported_format(&path) {
+            continue;
+        }
+
         report.files_examined += 1;
-        match audio::codec::compact(path) {
+        match audio::codec::compact(&path) {
             Ok(done) => {
                 report.bytes_before += done.before_bytes;
                 report.bytes_after += done.after_bytes;
-                if done.path != *path {
+                if done.path != path {
                     report.files_compacted += 1;
-                    Some(done.path)
-                } else {
-                    None
+                    moved.insert(
+                        path.to_string_lossy().to_string(),
+                        done.path.to_string_lossy().to_string(),
+                    );
                 }
             }
             Err(e) => {
@@ -637,67 +679,66 @@ pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, Strin
                     reason: e.to_string(),
                 });
                 eprintln!("[compact] skipped {} — {e}", path.display());
-                None
-            }
-        }
-    };
-
-    // 1. Recording segments: the mic and system tracks of each recording.
-    for segment in db.all_audio_segments().map_err(|e| e.to_string())? {
-        let mic = segment.mic_path.as_ref().map(std::path::PathBuf::from);
-        let system = segment.system_path.as_ref().map(std::path::PathBuf::from);
-
-        let new_mic = mic.as_ref().and_then(|p| convert(p, &mut report));
-        let new_system = system.as_ref().and_then(|p| convert(p, &mut report));
-
-        if (new_mic.is_some() || new_system.is_some()) && segment.id > 0 {
-            let mic_str = new_mic
-                .or(mic)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let sys_str = new_system
-                .or(system)
-                .map(|p| p.to_string_lossy().to_string());
-            if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys_str.as_deref()) {
-                eprintln!("[compact] converted segment {} but could not record it: {e}", segment.id);
             }
         }
     }
 
-    // 2. Uploaded audio.
-    for (id, path) in db.all_uploaded_audio().map_err(|e| e.to_string())? {
-        let path = std::path::PathBuf::from(&path);
-        if let Some(new_path) = convert(&path, &mut report)
-            && let Err(e) = db.update_uploaded_audio_path(id, &new_path.to_string_lossy())
-        {
-            eprintln!("[compact] converted upload {id} but could not record it: {e}");
+    // Now correct every database reference to a file that moved. Done after the
+    // conversions rather than alongside them, so a row is only ever updated to
+    // a path that already exists.
+    let mut referenced = std::collections::HashSet::new();
+
+    if let Ok(segments) = db.all_audio_segments() {
+        for segment in segments {
+            let mic = segment.mic_path.clone();
+            let system = segment.system_path.clone();
+            for p in [mic.as_ref(), system.as_ref()].into_iter().flatten() {
+                referenced.insert(p.clone());
+            }
+            let new_mic = mic.as_ref().and_then(|p| moved.get(p)).cloned();
+            let new_system = system.as_ref().and_then(|p| moved.get(p)).cloned();
+            if (new_mic.is_some() || new_system.is_some()) && segment.id > 0 {
+                let mic_str = new_mic.or(mic).unwrap_or_default();
+                let sys_str = new_system.or(system);
+                if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys_str.as_deref()) {
+                    eprintln!("[compact] moved segment {} but could not record it: {e}", segment.id);
+                }
+            }
         }
     }
 
-    // 3. Playback mixes — `{note_id}.wav`, one per note.
-    //
-    // These were the ones missed on the first pass, and they are the largest
-    // single category: each is the whole note mixed down again, so a library
-    // carries roughly a second copy of every meeting in them. They are derived
-    // and would be rebuilt on demand, but converting is cheaper than
-    // regenerating and keeps playback working for notes that are never
-    // recorded into again.
-    for (note_id, path) in db.all_note_audio_paths().map_err(|e| e.to_string())? {
-        let path = std::path::PathBuf::from(&path);
-        if let Some(new_path) = convert(&path, &mut report)
-            && let Err(e) = db.update_note_audio_path(&note_id, &new_path.to_string_lossy())
-        {
-            eprintln!("[compact] converted the playback track for {note_id} but could not record it: {e}");
+    if let Ok(uploads) = db.all_uploaded_audio() {
+        for (id, path) in uploads {
+            referenced.insert(path.clone());
+            if let Some(new_path) = moved.get(&path)
+                && let Err(e) = db.update_uploaded_audio_path(id, new_path)
+            {
+                eprintln!("[compact] moved upload {id} but could not record it: {e}");
+            }
         }
     }
+
+    if let Ok(notes) = db.all_note_audio_paths() {
+        for (note_id, path) in notes {
+            referenced.insert(path.clone());
+            if let Some(new_path) = moved.get(&path)
+                && let Err(e) = db.update_note_audio_path(&note_id, new_path)
+            {
+                eprintln!("[compact] moved the playback track for {note_id} but could not record it: {e}");
+            }
+        }
+    }
+
+    report.orphans = moved.keys().filter(|p| !referenced.contains(*p)).count();
 
     println!(
-        "[compact] {} of {} files, {} MB -> {} MB, {} failed",
+        "[compact] {} of {} files, {} MB -> {} MB, {} failed, {} orphaned",
         report.files_compacted,
         report.files_examined,
         report.bytes_before / 1_048_576,
         report.bytes_after / 1_048_576,
-        report.files_failed
+        report.files_failed,
+        report.orphans
     );
 
     Ok(report)
