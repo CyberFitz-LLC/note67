@@ -354,22 +354,25 @@ export function NoteView({
 
   // Retranscribe state and handlers
   const [isRetranscribing, setIsRetranscribing] = useState(false);
+  // Why a retranscribe did nothing. It used to fail into console.error, so the
+  // commonest failure — no Whisper model loaded, which is normal on a machine
+  // using a remote recogniser — looked exactly like the button doing nothing.
+  const [retranscribeError, setRetranscribeError] = useState<string | null>(null);
 
   const handleRetranscribeAll = useCallback(async () => {
     if (isRetranscribing) return;
     setIsRetranscribing(true);
     // Switch to transcript tab to show progress
     onTabChange("transcript");
+    setRetranscribeError(null);
     try {
-      console.log("Starting retranscribe for note:", note.id);
-      console.log("Audio segments:", audioSegments);
-      console.log("Uploads:", uploads);
       const result = await transcriptionApi.retranscribeNote(note.id);
       console.log("Retranscribe result:", result);
       // Refresh transcripts
       onTranscriptUpdated?.();
     } catch (error) {
       console.error("Retranscribe failed:", error);
+      setRetranscribeError(String(error));
     } finally {
       setIsRetranscribing(false);
     }
@@ -580,6 +583,17 @@ export function NoteView({
                       {isRetranscribing ? "Retranscribing..." : "Retranscribe"}
                     </button>
                   )}
+                {retranscribeError && (
+                  <span
+                    className="text-xs ml-2"
+                    style={{ color: "#ef4444" }}
+                    title={retranscribeError}
+                  >
+                    {retranscribeError.includes("No model loaded")
+                      ? "Retranscribing needs a local Whisper model — load one in Settings → Whisper."
+                      : retranscribeError.replace(/^Error:\s*/, "")}
+                  </span>
+                )}
               </>
             )}
             {/* Generate/Regenerate button */}

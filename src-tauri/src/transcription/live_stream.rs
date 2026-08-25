@@ -28,7 +28,7 @@ use crate::transcription::live::{
     MIC_TARGET_PEAK,
 };
 use crate::transcription::streaming::{
-    self, Recognised, StreamingSession, CHUNK_SAMPLES, SAMPLE_RATE,
+    self, Recognised, SendOutcome, StreamingSession, CHUNK_SAMPLES, SAMPLE_RATE,
 };
 use crate::transcription::transcriber::TranscriptionSegment;
 use crate::transcription::{is_echo_of_system, TranscriptionError};
@@ -286,6 +286,7 @@ pub async fn start_streaming_transcription(
     );
 
     tokio::spawn(feed_loop(
+        app.clone(),
         note_id,
         recording_state,
         live_state,
@@ -298,6 +299,7 @@ pub async fn start_streaming_transcription(
 
 /// Drains capture into the two sockets, one frame at a time.
 async fn feed_loop(
+    app_for_warning: AppHandle,
     note_id: String,
     recording_state: Arc<RecordingState>,
     live_state: Arc<LiveTranscriptionState>,
@@ -308,6 +310,11 @@ async fn feed_loop(
     let mut mic_frames = FrameBuffer::default();
     let mut system_frames = FrameBuffer::default();
     let mut gain = MicGain::default();
+    // Frames the recogniser was too far behind to take. Counted rather than
+    // ignored: this is audio the transcript will not contain, and silence about
+    // it is how a meeting comes back with holes nobody can explain.
+    let mut dropped: u64 = 0;
+    let mut warned_behind = false;
 
     loop {
         ticker.tick().await;
@@ -337,9 +344,10 @@ async fn feed_loop(
                 let mono = to_mono_16k(mic_samples, rate, ch);
                 for mut frame in mic_frames.push(&mono) {
                     gain.apply(&mut frame);
-                    if !mic_session.send(streaming::to_s16le(&frame)) {
-                        println!("[stream] the microphone recogniser stopped accepting audio");
-                        break;
+                    match mic_session.send(streaming::to_s16le(&frame)) {
+                        SendOutcome::Sent => {}
+                        SendOutcome::Behind => dropped += 1,
+                        SendOutcome::Disconnected => break,
                     }
                 }
             }
@@ -350,12 +358,32 @@ async fn feed_loop(
         let system_samples = take_system_audio_samples();
         if !system_samples.is_empty() {
             for frame in system_frames.push(&system_samples) {
-                if !system_session.send(streaming::to_s16le(&frame)) {
-                    println!("[stream] the system-audio recogniser stopped accepting audio");
-                    break;
+                match system_session.send(streaming::to_s16le(&frame)) {
+                    SendOutcome::Sent => {}
+                    SendOutcome::Behind => dropped += 1,
+                    SendOutcome::Disconnected => break,
                 }
             }
         }
+
+        // Say so once, as soon as it starts happening, rather than at the end
+        // when the meeting is over and nothing can be done about it.
+        if dropped > 0 && !warned_behind {
+            warned_behind = true;
+            println!(
+                "[stream] the recogniser is not keeping up — audio is being dropped and the \
+                 transcript will fall behind"
+            );
+            let _ = app_for_warning.emit(
+                "transcription-falling-behind",
+                "The recogniser is not keeping up. The transcript is behind and some audio is \
+                 being lost — the recording itself is unaffected.",
+            );
+        }
+    }
+
+    if dropped > 0 {
+        println!("[stream] {dropped} frame(s) were dropped because the recogniser was behind");
     }
 
     // Push the tails, then drop the sessions — which closes the sockets, and
@@ -363,10 +391,10 @@ async fn feed_loop(
     // still comes back.
     if let Some(mut frame) = mic_frames.flush() {
         gain.apply(&mut frame);
-        mic_session.send(streaming::to_s16le(&frame));
+        let _ = mic_session.send(streaming::to_s16le(&frame));
     }
     if let Some(frame) = system_frames.flush() {
-        system_session.send(streaming::to_s16le(&frame));
+        let _ = system_session.send(streaming::to_s16le(&frame));
     }
 
     // Give the finals a moment to come back before the readers see the socket

@@ -258,16 +258,26 @@ impl StreamingSession {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Queue a chunk. Returns false once the socket is gone.
+    /// Queue a chunk.
     ///
     /// Never blocks the capture loop: audio arrives on a real-time thread, and
-    /// waiting on a network send there would drop samples. A full queue means
-    /// the recogniser is behind, which is worth reporting rather than hiding.
-    pub fn send(&self, pcm: Vec<u8>) -> bool {
+    /// waiting on a network send there would drop samples.
+    ///
+    /// The two ways this can fail are not the same thing and must not be
+    /// treated as one. A dead socket means stop; a full queue means the
+    /// recogniser is behind and audio is being lost. Returning a plain `false`
+    /// for both made back-pressure look like a disconnect, and the only thing
+    /// it produced was a log line claiming the recogniser had "stopped
+    /// accepting audio" while it was simply overloaded.
+    pub fn send(&self, pcm: Vec<u8>) -> SendOutcome {
         if !self.is_alive() {
-            return false;
+            return SendOutcome::Disconnected;
         }
-        self.audio.try_send(pcm).is_ok()
+        match self.audio.try_send(pcm) {
+            Ok(()) => SendOutcome::Sent,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Behind,
+            Err(_) => SendOutcome::Disconnected,
+        }
     }
 }
 
@@ -277,6 +287,17 @@ impl StreamingSession {
 /// discards whatever was still being decoded — which is always the end of the
 /// meeting, the part people go back to.
 pub const FINALIZE_GRACE: Duration = Duration::from_millis(1500);
+
+/// What happened to a chunk handed to a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    Sent,
+    /// The recogniser is not keeping up and this audio was dropped. The
+    /// recording continues; the transcript will have a hole.
+    Behind,
+    /// The socket is gone. The session has to stop.
+    Disconnected,
+}
 
 /// How many chunks may queue before the sender gives up.
 ///
@@ -460,7 +481,7 @@ mod socket_tests {
 
             tokio::spawn(async move {
                 for frame in samples.chunks(CHUNK_SAMPLES) {
-                    if !session.send(to_s16le(frame)) {
+                    if session.send(to_s16le(frame)) == SendOutcome::Disconnected {
                         break;
                     }
                     // Paced like real time: firing a backlog at a streaming
@@ -588,6 +609,57 @@ mod socket_tests {
         // loop feeding audio nowhere.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!session.is_alive());
-        assert!(!session.send(vec![0, 0]), "a dead session accepts no audio");
+        assert_eq!(
+            session.send(vec![0, 0]),
+            SendOutcome::Disconnected,
+            "a dead session must report disconnection, not back-pressure"
+        );
     }
+    #[tokio::test]
+    async fn a_recogniser_that_cannot_keep_up_reads_as_behind_not_as_gone() {
+        // The distinction this exists for: under back-pressure the session is
+        // perfectly alive, and treating a full queue as a disconnect made a
+        // slow recogniser look like a broken one — while audio was quietly
+        // dropped and the transcript fell minutes behind.
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            // Accepts the connection and then reads nothing, so the client's
+            // queue fills — a recogniser that is up but overloaded.
+            let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"ready"}"#.into(),
+            ));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let (session, _rx) = connect(&format!("ws://{addr}"), "test")
+            .await
+            .expect("connect");
+
+        let chunk = vec![0u8; CHUNK_SAMPLES * 2];
+        let mut behind = 0;
+        for _ in 0..(QUEUE_CHUNKS * 20) {
+            match session.send(chunk.clone()) {
+                SendOutcome::Behind => behind += 1,
+                SendOutcome::Disconnected => {
+                    panic!("back-pressure was reported as a disconnection")
+                }
+                SendOutcome::Sent => {}
+            }
+        }
+
+        assert!(behind > 0, "the queue never filled, so nothing was tested");
+        assert!(
+            session.is_alive(),
+            "the session must stay alive while merely overloaded"
+        );
+    }
+
 }
