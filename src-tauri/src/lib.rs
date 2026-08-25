@@ -404,6 +404,10 @@ pub fn run() {
             commands::rebuild_note_playback,
             commands::stop_dual_recording_with_segments,
             commands::compact_recordings,
+            commands::add_screenshot,
+            commands::list_screenshots,
+            commands::delete_screenshot,
+            commands::extract_screenshot_text,
             commands::is_dual_recording,
             // Pause/Resume/Continue recording commands
             commands::get_recording_phase,

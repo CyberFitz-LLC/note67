@@ -1,6 +1,6 @@
 [package]
 name = "note67"
-version = "0.1.36"
+version = "0.1.37"
 description = "A private, local notes assistant"
 authors = ["you"]
 license = "AGPL-3.0-or-later"
@@ -48,6 +48,7 @@ anyhow = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 cpal = "0.15"
+base64 = "0.22"
 hound = "3.5"
 # Pure Rust, so recordings compress without adding a C toolchain to the
 # Windows build. Decoding is symphonia's, which already handles FLAC.

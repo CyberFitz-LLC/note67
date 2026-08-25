@@ -112,6 +112,35 @@ fn migrate_v1(conn: &Connection) -> rusqlite::Result<()> {
         [],
     )?;
 
+    // Screenshots pasted into a note during (or after) a meeting.
+    //
+    // `captured_at_ms` is the position in the meeting, so a slide can be read
+    // against what was being said when it appeared — which is the whole point
+    // of keeping it here rather than in a folder.
+    //
+    // `extracted_text` is what a vision model read out of the image. It is
+    // deliberately NOT a transcript segment: the transcript is what was said,
+    // it is what the chain hashes, and quietly mixing model-generated text into
+    // it would make an attested record of something nobody uttered.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS note_screenshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            captured_at_ms INTEGER NOT NULL,
+            caption TEXT,
+            extracted_text TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_note_screenshots_note
+         ON note_screenshots(note_id, captured_at_ms)",
+        [],
+    )?;
+
     // Index for faster transcript lookups
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_transcript_note

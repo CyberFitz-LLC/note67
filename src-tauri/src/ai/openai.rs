@@ -32,7 +32,36 @@ struct ChatRequest {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    content: ChatContent,
+}
+
+/// A message body, which is either plain text or a sequence of parts.
+///
+/// Untagged, because the wire format is not a choice we get to make: the
+/// OpenAI-compatible shape is a bare string for text and an array of typed
+/// parts once an image is involved, and a server will reject the wrong one.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ChatContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrl {
+    /// A `data:` URL. Images are inlined rather than hosted: this app has no
+    /// server to serve them from, and a screenshot of a meeting is not
+    /// something to put behind a public URL even if it did.
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,11 +336,76 @@ impl OpenAiCompatClient {
             // instructions, so it maps to one user message.
             messages: vec![ChatMessage {
                 role: "user",
-                content: prompt.to_string(),
+                content: ChatContent::Text(prompt.to_string()),
             }],
             temperature,
             stream,
         }
+    }
+
+    /// Ask about an image.
+    ///
+    /// Separate from `generate` rather than an optional argument, because a
+    /// model that cannot see returns something confidently wrong rather than an
+    /// error — so the caller needs to have chosen this deliberately.
+    pub async fn generate_with_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        image: &[u8],
+        mime: &str,
+        temperature: f32,
+    ) -> Result<String, LlmError> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(image);
+
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: vec![ChatMessage {
+                role: "user",
+                content: ChatContent::Parts(vec![
+                    ContentPart::Text {
+                        text: prompt.to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: format!("data:{mime};base64,{encoded}"),
+                        },
+                    },
+                ]),
+            }],
+            temperature,
+            stream: false,
+        };
+
+        let url = format!("{}/chat/completions", self.v1_root);
+        let response = self
+            .authorized(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| self.connect_error(e))?;
+
+        if !response.status().is_success() {
+            return Err(self.status_error(response, model).await);
+        }
+
+        let parsed: ChatResponse = response
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+
+        parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.text())
+            .ok_or_else(|| {
+                LlmError::InvalidResponse(format!(
+                    "{model} returned nothing for the image. Not every model can see — check \
+                     that this one accepts images."
+                ))
+            })
     }
 
     pub async fn generate(

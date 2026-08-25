@@ -19,6 +19,20 @@ const ACTION_ITEM_COLS: &str =
     "id, note_id, stable_id, text, description, parent_id, assignee, due_date, done, sort_order, created_at, updated_at";
 
 /// Row -> AudioSegment. Shared so the by-note and by-id queries cannot drift.
+fn map_screenshot(
+    row: &rusqlite::Row,
+) -> rusqlite::Result<crate::commands::screenshots::Screenshot> {
+    Ok(crate::commands::screenshots::Screenshot {
+        id: row.get(0)?,
+        note_id: row.get(1)?,
+        file_path: row.get(2)?,
+        captured_at_ms: row.get(3)?,
+        caption: row.get(4)?,
+        extracted_text: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
 fn map_audio_segment(row: &rusqlite::Row) -> rusqlite::Result<AudioSegment> {
     Ok(AudioSegment {
         id: row.get(0)?,
@@ -836,6 +850,78 @@ impl Database {
             "UPDATE notes SET audio_path = ?1, updated_at = ?2 WHERE id = ?3",
             params![path, Utc::now().to_rfc3339(), note_id],
         )?;
+        Ok(())
+    }
+
+    // ========== Screenshots ==========
+
+    pub fn add_screenshot(
+        &self,
+        note_id: &str,
+        file_path: &str,
+        captured_at_ms: i64,
+        caption: Option<&str>,
+    ) -> anyhow::Result<crate::commands::screenshots::Screenshot> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO note_screenshots (note_id, file_path, captured_at_ms, caption, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![note_id, file_path, captured_at_ms, caption, now],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(crate::commands::screenshots::Screenshot {
+            id,
+            note_id: note_id.to_string(),
+            file_path: file_path.to_string(),
+            captured_at_ms,
+            caption: caption.map(|c| c.to_string()),
+            extracted_text: None,
+            created_at: now,
+        })
+    }
+
+    pub fn list_screenshots(
+        &self,
+        note_id: &str,
+    ) -> anyhow::Result<Vec<crate::commands::screenshots::Screenshot>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, note_id, file_path, captured_at_ms, caption, extracted_text, created_at
+             FROM note_screenshots WHERE note_id = ?1 ORDER BY captured_at_ms ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map([note_id], map_screenshot)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn get_screenshot(
+        &self,
+        id: i64,
+    ) -> anyhow::Result<Option<crate::commands::screenshots::Screenshot>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, note_id, file_path, captured_at_ms, caption, extracted_text, created_at
+             FROM note_screenshots WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], map_screenshot)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn set_screenshot_text(&self, id: i64, text: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute(
+            "UPDATE note_screenshots SET extracted_text = ?1 WHERE id = ?2",
+            params![text, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_screenshot(&self, id: i64) -> anyhow::Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{}", e))?;
+        conn.execute("DELETE FROM note_screenshots WHERE id = ?1", [id])?;
         Ok(())
     }
 

@@ -338,6 +338,48 @@ pub fn is_ai_generating(state: State<'_, AiState>) -> bool {
 }
 
 /// Generate a summary for a note
+
+/// What the screenshots in a note add to the model's context.
+///
+/// Kept apart from the transcript and labelled with where it came from, for two
+/// reasons. The transcript is what was *said* — it is what the chain hashes and
+/// what a receipt attests — so model-read text must never be folded into it.
+/// And the model itself needs to know: a figure read off a slide and a figure
+/// somebody stated out loud carry different weight, and a summary that
+/// attributes a slide to a speaker is wrong in a way nobody can spot later.
+fn screenshot_context(db: &Database, note_id: &str) -> String {
+    let Ok(shots) = db.list_screenshots(note_id) else {
+        return String::new();
+    };
+
+    let described: Vec<String> = shots
+        .iter()
+        .filter_map(|shot| {
+            let text = shot.extracted_text.as_ref()?;
+            if text.trim().is_empty() {
+                return None;
+            }
+            let at = shot.captured_at_ms / 1000;
+            Some(format!(
+                "[Screen shared at {:02}:{:02}]\n{}",
+                at / 60,
+                at % 60,
+                text.trim()
+            ))
+        })
+        .collect();
+
+    if described.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "\n\nThe following was read from screens shared during the meeting. It was \
+         displayed, not spoken:\n\n{}",
+        described.join("\n\n")
+    )
+}
+
 #[tauri::command]
 pub async fn generate_summary(
     note_id: String,
@@ -381,6 +423,9 @@ pub async fn generate_summary(
         .filter(|text| !text.contains("[BLANK_AUDIO]"))
         .collect::<Vec<_>>()
         .join(" ");
+
+    // Anything read off a shared screen, appended and labelled as such.
+    let transcript = format!("{transcript}{}", screenshot_context(&db, &note_id));
 
     let has_transcript = !transcript.trim().is_empty();
     let has_notes = notes.as_ref().is_some_and(|n| !n.trim().is_empty());
@@ -575,6 +620,9 @@ pub async fn generate_summary_stream(
         .filter(|text| !text.contains("[BLANK_AUDIO]"))
         .collect::<Vec<_>>()
         .join(" ");
+
+    // Anything read off a shared screen, appended and labelled as such.
+    let transcript = format!("{transcript}{}", screenshot_context(&db, &note_id));
 
     let has_transcript = !transcript.trim().is_empty();
     let has_notes = notes.as_ref().is_some_and(|n| !n.trim().is_empty());
@@ -870,6 +918,9 @@ pub async fn extract_action_items(
         .filter(|text| !text.contains("[BLANK_AUDIO]"))
         .collect::<Vec<_>>()
         .join(" ");
+
+    // Anything read off a shared screen, appended and labelled as such.
+    let transcript = format!("{transcript}{}", screenshot_context(&db, &note_id));
 
     let has_notes = notes.as_ref().is_some_and(|n| !n.trim().is_empty());
     if transcript.trim().is_empty() && !has_notes {

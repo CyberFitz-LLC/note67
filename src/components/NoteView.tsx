@@ -24,6 +24,8 @@ import {
 import { useOllamaStore } from "../stores/ollamaStore";
 import { useWhisperStore } from "../stores/whisperStore";
 import { useRecordingStore } from "../stores/recordingStore";
+import { useScreenshots, imageFromClipboard } from "../hooks/useScreenshots";
+import { ScreenshotStrip } from "./ScreenshotStrip";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
 import { useNoteUiStore } from "../stores/noteUiStore";
@@ -354,6 +356,35 @@ export function NoteView({
 
   // Retranscribe state and handlers
   const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const {
+    screenshots,
+    add: addScreenshot,
+    extract: extractScreenshot,
+    remove: removeScreenshot,
+    error: screenshotError,
+  } = useScreenshots(note.id);
+
+  // Paste an image anywhere in this note to file it against the meeting.
+  //
+  // Bound to the document rather than a single element, because a screenshot
+  // is pasted wherever the cursor happens to be. Anything that is not an image
+  // is left entirely alone, so ordinary text pasting is untouched.
+  useEffect(() => {
+    const onPaste = async (event: ClipboardEvent) => {
+      const bytes = await imageFromClipboard(event);
+      if (!bytes) return;
+      event.preventDefault();
+      // Positioned by the transcript rather than a wall clock: the end of the
+      // last thing transcribed is where the conversation currently is, which
+      // is exactly where a slide being discussed belongs. It works the same
+      // during a recording and after one, so there is no second clock to keep
+      // in step.
+      const last = transcript[transcript.length - 1];
+      await addScreenshot(bytes, (last?.end_time ?? 0) * 1000);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [addScreenshot, transcript]);
   // Why a retranscribe did nothing. It used to fail into console.error, so the
   // commonest failure — no Whisper model loaded, which is normal on a machine
   // using a remote recogniser — looked exactly like the button doing nothing.
@@ -925,6 +956,20 @@ export function NoteView({
 
           {activeTab === "transcript" && (
             <>
+              {screenshotError && (
+                <p className="mb-3 text-sm" style={{ color: "#ef4444" }}>
+                  {screenshotError}
+                </p>
+              )}
+              {screenshots.length > 0 && (
+                <div className="mb-4">
+                  <ScreenshotStrip
+                    screenshots={screenshots}
+                    onExtract={extractScreenshot}
+                    onDelete={removeScreenshot}
+                  />
+                </div>
+              )}
               {(isAutoRetranscribing || isRetranscribing) && (
                 <div
                   className="mb-3 px-3 py-2 rounded-lg flex items-center gap-2 text-xs"

@@ -203,6 +203,34 @@ impl LlmClient {
         }
     }
 
+    /// Ask about an image.
+    ///
+    /// Only the OpenAI-compatible path carries images. Ollama has its own
+    /// shape for this and nothing in the app needs it yet, so rather than
+    /// pretend, it says plainly that it cannot — a caller that silently sent
+    /// the prompt without the picture would get a confident answer about
+    /// nothing.
+    pub async fn generate_with_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        image: &[u8],
+        mime: &str,
+        temperature: f32,
+    ) -> Result<String, LlmError> {
+        match self {
+            LlmClient::OpenAiCompat(c) => {
+                c.generate_with_image(model, prompt, image, mime, temperature)
+                    .await
+            }
+            LlmClient::Ollama(_) => Err(LlmError::InvalidResponse(
+                "Reading screenshots needs an OpenAI-compatible endpoint with a vision model; \
+                 the Ollama provider does not support images here."
+                    .to_string(),
+            )),
+        }
+    }
+
     pub async fn generate_stream(
         &self,
         model: &str,
