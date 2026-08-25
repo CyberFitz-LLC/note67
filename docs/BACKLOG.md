@@ -267,10 +267,15 @@ Notes on doing it properly:
   writes the WAV header with placeholder lengths and patches them on
   `finalize()`; if the app dies first the samples are all on disk and every
   decoder refuses the file. Nine such files turned up in one real library.
-  `codec::recover_unfinalized_wav` now reads them, so the audio is not lost —
-  but nothing prevents the state, and a recording that ends this way is
-  invisible until something tries to read it. Worth finding out what killed
-  the app in those nine cases.
+  `codec::recover_unfinalized_wav` now reads them, so the audio is not lost.
+
+  The cause was app crashes, which John reports have largely stopped. Nothing
+  prevents the state and nothing announces it — a recording that ends this way
+  is invisible until something reads it — but with recovery in place the
+  practical harm is gone, so this is **not** worth building crash detection
+  for. If unfinalized files start appearing again in fresh recordings, that is
+  the signal that something is crashing once more, and it is worth chasing
+  then rather than now.
 - **Deleting a note leaves its audio on disk, for ever.** The rows go — the
   FK cascades — and the files are never touched. Compaction now reports how
   many it found that nothing references, which on one real library was a large
