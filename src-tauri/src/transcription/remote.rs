@@ -246,6 +246,53 @@ pub async fn poll_once(
 }
 
 /// Submit and wait.
+/// Whether the service is up and holding its models, before anything is sent.
+///
+/// Worth one request first because the alternative is what a real failure
+/// looked like: four tracks uploaded in turn to a service that was not running,
+/// four identical connection errors, and a message that repeated the same fact
+/// four times without ever saying the plain version of it.
+///
+/// A service that answers but reports no models is treated as not ready. It
+/// accepts a job and then cannot do it, which is a slower and more confusing
+/// way to fail.
+pub async fn health(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<(), RemoteError> {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let mut request = client.get(&url);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| RemoteError::Unreachable(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(RemoteError::Rejected {
+            status: response.status().as_u16(),
+            body: response.text().await.unwrap_or_default(),
+        });
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| RemoteError::Malformed(e.to_string()))?;
+
+    if body.get("models_loaded") == Some(&serde_json::Value::Bool(false)) {
+        return Err(RemoteError::Unreachable(
+            "the service is running but its models are not loaded yet".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn transcribe(
     client: &reqwest::Client,
     base_url: &str,
@@ -434,4 +481,26 @@ mod tests {
             serde_json::from_str(r#"{"job_id":"abc123"}"#).unwrap();
         assert_eq!(r.job_id, "abc123");
     }
+    #[test]
+    fn a_service_that_reports_no_models_is_not_ready() {
+        // The shape this guards, taken from the real endpoint: it answers 200
+        // while still loading, accepts a job, and then cannot do it. Treating
+        // that as available turns a clear failure into a slow confusing one.
+        let loading: serde_json::Value =
+            serde_json::from_str(r#"{"status":"ok","models_loaded":false}"#).unwrap();
+        assert_eq!(
+            loading.get("models_loaded"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        let ready: serde_json::Value = serde_json::from_str(
+            r#"{"status":"ok","models_loaded":true,"jobs_active":0,"queue_depth":0}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            ready.get("models_loaded"),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+
 }

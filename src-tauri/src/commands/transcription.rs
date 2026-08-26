@@ -673,9 +673,19 @@ async fn retranscribe_remote(
     api_key: Option<&str>,
     max_speakers: Option<u32>,
 ) -> Result<RetranscribeResult, String> {
+    let client = reqwest::Client::new();
+
+    // Asked once, before anything is uploaded. Sending several tracks to a
+    // service that is not running produces the same connection error once per
+    // track and never says the simple thing.
+    if let Err(e) = crate::transcription::remote::health(&client, base_url, api_key).await {
+        return Err(format!(
+            "The transcription service at {base_url} is not available, so nothing was changed. {e}"
+        ));
+    }
+
     let segments = db.get_audio_segments(note_id).map_err(|e| e.to_string())?;
     let uploads = db.get_uploaded_audio(note_id).map_err(|e| e.to_string())?;
-    let client = reqwest::Client::new();
 
     let mut rebuilt: Vec<NewTranscriptSegment> = Vec::new();
     let mut failed_items: Vec<String> = Vec::new();
