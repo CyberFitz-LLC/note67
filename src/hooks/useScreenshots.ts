@@ -24,21 +24,34 @@ export function useScreenshots(noteId: string | null) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Loaded inside the effect with a cancellation guard rather than by calling a
+  // shared refresh(), which reads to the linter — correctly — as setting state
+  // straight from an effect body. The guard also stops a slow load for one note
+  // landing after the user has moved to another.
+  useEffect(() => {
+    if (!noteId) return;
+    let cancelled = false;
+    invoke<Screenshot[]>("list_screenshots", { noteId })
+      .then((rows) => {
+        if (!cancelled) setScreenshots(rows);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [noteId]);
+
+  /** Re-read from the database — for callers that changed it another way. */
   const refresh = useCallback(async () => {
-    if (!noteId) {
-      setScreenshots([]);
-      return;
-    }
+    if (!noteId) return;
     try {
       setScreenshots(await invoke<Screenshot[]>("list_screenshots", { noteId }));
     } catch (e) {
       setError(String(e));
     }
   }, [noteId]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   const add = useCallback(
     async (bytes: Uint8Array, capturedAtMs: number) => {
@@ -97,7 +110,18 @@ export function useScreenshots(noteId: string | null) {
     }
   }, []);
 
-  return { screenshots, add, extract, remove, refresh, busy, error };
+  return {
+    // Derived rather than cleared in an effect. With no note there is nothing
+    // to show, and saying so here means no render is spent transitioning
+    // through a stale list on the way to an empty one.
+    screenshots: noteId ? screenshots : [],
+    add,
+    extract,
+    remove,
+    refresh,
+    busy,
+    error,
+  };
 }
 
 /**

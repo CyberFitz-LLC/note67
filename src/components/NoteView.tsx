@@ -407,14 +407,7 @@ export function NoteView({
     } finally {
       setIsRetranscribing(false);
     }
-  }, [
-    note.id,
-    isRetranscribing,
-    onTranscriptUpdated,
-    onTabChange,
-    audioSegments,
-    uploads,
-  ]);
+  }, [note.id, isRetranscribing, onTranscriptUpdated, onTabChange]);
 
   // Set titleValue to current note.title when entering edit mode
   const handleEditTitle = () => {
