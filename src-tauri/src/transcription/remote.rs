@@ -30,6 +30,22 @@ pub const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 /// only loads the appliance.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
+/// How many polls in a row may fail to reach the service before a job is
+/// abandoned.
+///
+/// A diarizing pass over an hour of meeting runs for minutes on a busy box, and
+/// the appliance shares that box with whatever else is loaded. A single blip —
+/// a restart, a moment of memory pressure — used to discard the whole job and
+/// report nothing, while the work may well have been continuing on the other
+/// side. Roughly a minute of unreachability at the poll interval, which
+/// survives a restart without waiting indefinitely on a service that has
+/// genuinely gone.
+///
+/// Consecutive, deliberately: reaching the service resets it, so a long job
+/// that hiccups repeatedly is tolerated while one that has truly lost its
+/// service is not.
+pub const MAX_POLL_FAILURES: u32 = 20;
+
 #[derive(Debug, Error)]
 pub enum RemoteError {
     #[error("the transcription service could not be reached: {0}")]
@@ -240,9 +256,35 @@ pub async fn transcribe(
 ) -> Result<TranscriptionResult, RemoteError> {
     let job_id = submit(client, base_url, api_key, wav, filename, max_speakers).await?;
     let started = std::time::Instant::now();
+    let mut unreachable_polls = 0u32;
 
     loop {
-        let job = poll_once(client, base_url, api_key, &job_id).await?;
+        let job = match poll_once(client, base_url, api_key, &job_id).await {
+            Ok(job) => {
+                unreachable_polls = 0;
+                job
+            }
+            // Not being able to reach the service is not the same as the job
+            // having failed. The work may still be running; only the asking
+            // went wrong.
+            Err(RemoteError::Unreachable(reason)) => {
+                unreachable_polls += 1;
+                if unreachable_polls >= MAX_POLL_FAILURES {
+                    return Err(RemoteError::Unreachable(format!(
+                        "{reason} (unreachable for {} consecutive polls)",
+                        unreachable_polls
+                    )));
+                }
+                if started.elapsed() > MAX_WAIT {
+                    return Err(RemoteError::TimedOut(MAX_WAIT));
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            // Anything else — a rejection, an unreadable answer — is the
+            // service telling us something, and retrying would only repeat it.
+            Err(other) => return Err(other),
+        };
         match progress_of(&job.status) {
             Progress::Done => return to_result(&job),
             Progress::Failed => {

@@ -779,14 +779,23 @@ async fn retranscribe_remote(
         completed_items += 1;
     }
 
-    if rebuilt.is_empty() {
+    // Nothing is replaced unless every track came back.
+    //
+    // Each track is half a conversation: the microphone is you, the system
+    // track is everyone else. Swapping in a transcript built from whichever
+    // half succeeded would silently delete the other half — and it would look
+    // like a successful retranscription, which is the worst way to lose a
+    // meeting. The existing transcript stays until there is a complete one to
+    // put in its place.
+    if !failed_items.is_empty() || rebuilt.is_empty() {
+        let detail = if failed_items.is_empty() {
+            "no audio produced any text".to_string()
+        } else {
+            failed_items.join("; ")
+        };
         return Err(format!(
-            "Retranscription produced nothing; the existing transcript was left untouched.{}",
-            if failed_items.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", failed_items.join("; "))
-            }
+            "Retranscription did not complete, so the existing transcript was left untouched. \
+             {detail}"
         ));
     }
 
