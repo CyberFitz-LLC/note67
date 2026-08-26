@@ -404,6 +404,7 @@ pub fn run() {
             commands::rebuild_note_playback,
             commands::stop_dual_recording_with_segments,
             commands::compact_recordings,
+            commands::get_track_levels,
             commands::add_screenshot,
             commands::list_screenshots,
             commands::delete_screenshot,

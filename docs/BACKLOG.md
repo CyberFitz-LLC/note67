@@ -155,11 +155,12 @@ missing. Ordered by what unblocks what.
 
 Two real defects found 2026-08-12, both matching what a live meeting showed:
 
-1. **The level meter only ever measured the microphone.** `process_audio` in
-   `recorder.rs` is the only writer of `audio_level`, and it is the *input*
-   stream's callback. The Windows loopback path never touches it. So changing
-   the system-audio device could not move the meter — the meter was not
-   measuring that track.
+1. ~~**The level meter only ever measured the microphone.**~~ Fixed 2026-08-26.
+   `process_audio` in `recorder.rs` was the only writer of `audio_level`, and
+   it is the *input* stream's callback, so the meter could never move for
+   system audio. The recording bar now shows one meter per track, both fed
+   from `audio::levels::LevelMeter` — which the loopback path had been writing
+   to all along.
 2. **The device is bound when the stream opens.** `run_recording` reads the
    preference once and calls `open_input_device`. Changing it mid-recording
    writes to a mutex nothing re-reads until the next recording, so the change

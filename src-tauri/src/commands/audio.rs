@@ -89,6 +89,43 @@ pub fn get_audio_level(state: State<AudioState>) -> f32 {
     f32::from_bits(state.recording.audio_level.load(Ordering::SeqCst))
 }
 
+/// What each track is hearing, as (rms, held peak) per track.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct TrackLevels {
+    pub mic_rms: f32,
+    pub mic_peak: f32,
+    pub system_rms: f32,
+    pub system_peak: f32,
+}
+
+/// Levels for both tracks at once.
+///
+/// The old single reading was the microphone only — `process_audio` in
+/// recorder.rs is its sole writer and that is the *input* stream's callback, so
+/// the meter could never move for system audio however loud the meeting was.
+/// Someone watching a flat bar had no way to tell "the far end is silent" from
+/// "this meter does not measure the far end", and the second is what was
+/// actually true.
+///
+/// Both come from `audio::levels::LevelMeter`, which holds peaks: a meter
+/// sampled a few times a second misses the transients that matter, so a held
+/// peak is what makes clipping visible at all.
+#[tauri::command]
+pub fn get_track_levels(state: State<AudioState>) -> TrackLevels {
+    let mic_rms = f32::from_bits(state.recording.audio_level.load(Ordering::SeqCst));
+    let system = audio::system_audio::system_level();
+    TrackLevels {
+        mic_rms,
+        // The mic path stores a single RMS rather than feeding a LevelMeter, so
+        // its peak is the best it can honestly report. Reported rather than
+        // faked so the UI can show one bar per track without inventing a
+        // number.
+        mic_peak: mic_rms,
+        system_rms: system.rms(),
+        system_peak: system.peak(),
+    }
+}
+
 /// Check if system audio capture is available on this platform
 #[tauri::command]
 pub fn is_system_audio_supported() -> bool {

@@ -229,8 +229,12 @@ export function useRecording(): UseRecordingReturn {
     if (isRecording) {
       levelIntervalRef.current = window.setInterval(async () => {
         try {
-          const level = await audioApi.getAudioLevel();
-          useRecordingStore.getState().patch({ audioLevel: level });
+          // Both tracks in one call. Polling them separately would let the
+          // two bars disagree about the same instant.
+          const levels = await audioApi.getTrackLevels();
+          useRecordingStore
+            .getState()
+            .patch({ audioLevel: levels.mic_rms, trackLevels: levels });
         } catch {
           // Ignore errors during polling
         }

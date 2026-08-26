@@ -11,6 +11,13 @@ export interface DualRecordingResult {
   playbackPath: string | null;
 }
 
+export interface TrackLevels {
+  mic_rms: number;
+  mic_peak: number;
+  system_rms: number;
+  system_peak: number;
+}
+
 export const audioApi = {
   // Basic recording (mic only)
   startRecording: (noteId: string): Promise<string> => {
@@ -42,6 +49,11 @@ export const audioApi = {
 
   getAudioLevel: (): Promise<number> => {
     return invoke("get_audio_level");
+  },
+
+  /** Levels for both tracks — the microphone and system audio. */
+  getTrackLevels: (): Promise<TrackLevels> => {
+    return invoke("get_track_levels");
   },
 
   // System audio support (macOS only)

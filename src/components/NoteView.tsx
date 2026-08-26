@@ -31,6 +31,7 @@ import {
   willUseRemote,
 } from "../hooks/useTranscriptionBackend";
 import { ScreenshotStrip } from "./ScreenshotStrip";
+import { TrackLevelMeters } from "./TrackLevelMeters";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
 import { useNoteUiStore } from "../stores/noteUiStore";
@@ -98,7 +99,7 @@ export function NoteView({
   const isRecording =
     useRecordingStore((s) => s.isRecording) && isThisNoteRecording;
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
-  const audioLevel = useRecordingStore((s) => s.audioLevel);
+  const trackLevels = useRecordingStore((s) => s.trackLevels);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
 
   // Live transcription is scoped to the recording note, same as above.
@@ -859,20 +860,13 @@ export function NoteView({
                 ? "Listening (system audio only)"
                 : "Recording"}
             </span>
-            {recordingMode !== "system-only" && (
-              <div
-                className="flex-1 h-1 rounded-full overflow-hidden"
-                style={{ backgroundColor: "rgba(229, 77, 46, 0.2)" }}
-              >
-                <div
-                  className="h-full rounded-full transition-all duration-100"
-                  style={{
-                    width: `${Math.min(100, audioLevel * 400)}%`,
-                    backgroundColor: "var(--color-accent)",
-                  }}
-                />
-              </div>
-            )}
+            <TrackLevelMeters
+              micRms={trackLevels.mic_rms}
+              micPeak={trackLevels.mic_peak}
+              systemRms={trackLevels.system_rms}
+              systemPeak={trackLevels.system_peak}
+              showMic={recordingMode !== "system-only"}
+            />
           </div>
         )}
 

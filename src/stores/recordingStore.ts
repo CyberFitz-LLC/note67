@@ -17,6 +17,13 @@ export interface RecordingStoreState {
   isPaused: boolean;
   recordingPhase: RecordingPhase;
   audioLevel: number;
+  /** Held peak and RMS for each track, so the meters can show both. */
+  trackLevels: {
+    mic_rms: number;
+    mic_peak: number;
+    system_rms: number;
+    system_peak: number;
+  };
   audioPath: string | null;
   error: string | null;
   recordingMode: RecordingMode;
@@ -46,6 +53,7 @@ const initial: RecordingSnapshot = {
   isPaused: false,
   recordingPhase: RecordingPhase.Idle,
   audioLevel: 0,
+  trackLevels: { mic_rms: 0, mic_peak: 0, system_rms: 0, system_peak: 0 },
   audioPath: null,
   error: null,
   recordingMode: "idle",
