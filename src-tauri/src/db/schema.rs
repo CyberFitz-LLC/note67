@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 #[allow(dead_code)]
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
     let version = get_schema_version(conn)?;
@@ -55,6 +55,9 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         migrate_v16(conn)?;
     }
 
+    if version < 17 {
+        migrate_v17(conn)?;
+    }
     Ok(())
 }
 
@@ -109,35 +112,6 @@ fn migrate_v1(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL,
             FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
         )",
-        [],
-    )?;
-
-    // Screenshots pasted into a note during (or after) a meeting.
-    //
-    // `captured_at_ms` is the position in the meeting, so a slide can be read
-    // against what was being said when it appeared — which is the whole point
-    // of keeping it here rather than in a folder.
-    //
-    // `extracted_text` is what a vision model read out of the image. It is
-    // deliberately NOT a transcript segment: the transcript is what was said,
-    // it is what the chain hashes, and quietly mixing model-generated text into
-    // it would make an attested record of something nobody uttered.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS note_screenshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            note_id TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            captured_at_ms INTEGER NOT NULL,
-            caption TEXT,
-            extracted_text TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
-        )",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_note_screenshots_note
-         ON note_screenshots(note_id, captured_at_ms)",
         [],
     )?;
 
@@ -811,6 +785,46 @@ fn migrate_v16(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Screenshots pasted into a meeting.
+///
+/// Its own migration rather than an addition to v1, which only ever runs on a
+/// database that does not exist yet. Putting it there shipped a table that
+/// every existing install was missing, and the feature failed with "no such
+/// table" on exactly the machines that had been using the app longest.
+fn migrate_v17(conn: &Connection) -> rusqlite::Result<()> {
+    // Screenshots pasted into a note during (or after) a meeting.
+    //
+    // `captured_at_ms` is the position in the meeting, so a slide can be read
+    // against what was being said when it appeared — which is the whole point
+    // of keeping it here rather than in a folder.
+    //
+    // `extracted_text` is what a vision model read out of the image. It is
+    // deliberately NOT a transcript segment: the transcript is what was said,
+    // it is what the chain hashes, and quietly mixing model-generated text into
+    // it would make an attested record of something nobody uttered.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS note_screenshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            note_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            captured_at_ms INTEGER NOT NULL,
+            caption TEXT,
+            extracted_text TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_note_screenshots_note
+         ON note_screenshots(note_id, captured_at_ms)",
+        [],
+    )?;
+
+    set_schema_version(conn, 17)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,4 +1061,40 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
     }
+    #[test]
+    fn a_table_added_in_the_newest_migration_reaches_an_existing_install() {
+        // The failure this exists for, shipped in 0.1.37: note_screenshots was
+        // created in migrate_v1, which only ever runs on a database that does
+        // not exist yet. Every fresh install had the table and every existing
+        // one did not, so the feature failed with "no such table" on precisely
+        // the machines that had been using the app longest — and both existing
+        // migration tests passed, because both start from an empty database.
+        //
+        // So this simulates an upgrade rather than an install: take a fully
+        // migrated database back to the previous version, remove what the
+        // newest migration is responsible for, and require migrating again to
+        // put it back. A table created in the wrong migration cannot survive
+        // that.
+        let conn = db();
+        conn.execute("DROP TABLE IF EXISTS note_screenshots", [])
+            .expect("drop");
+        set_schema_version(&conn, SCHEMA_VERSION - 1).expect("rewind");
+
+        run_migrations(&conn).expect("upgrade");
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='note_screenshots'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            exists, 1,
+            "note_screenshots was not recreated by upgrading, so it is defined in a migration \
+             that existing installs never run"
+        );
+        assert_eq!(get_schema_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
 }
