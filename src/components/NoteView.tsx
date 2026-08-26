@@ -25,6 +25,11 @@ import { useOllamaStore } from "../stores/ollamaStore";
 import { useWhisperStore } from "../stores/whisperStore";
 import { useRecordingStore } from "../stores/recordingStore";
 import { useScreenshots, imageFromClipboard } from "../hooks/useScreenshots";
+import {
+  DEFAULT_CONFIG,
+  useTranscriptionBackend,
+  willUseRemote,
+} from "../hooks/useTranscriptionBackend";
 import { ScreenshotStrip } from "./ScreenshotStrip";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
@@ -356,6 +361,7 @@ export function NoteView({
 
   // Retranscribe state and handlers
   const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const { config: transcriptionConfig } = useTranscriptionBackend();
   const {
     screenshots,
     add: addScreenshot,
@@ -604,7 +610,11 @@ export function NoteView({
                           />
                         </svg>
                       )}
-                      {isRetranscribing ? "Retranscribing..." : "Retranscribe"}
+                      {isRetranscribing
+                        ? "Retranscribing..."
+                        : willUseRemote(transcriptionConfig ?? DEFAULT_CONFIG)
+                          ? "Retranscribe with speakers"
+                          : "Retranscribe"}
                     </button>
                   )}
                 {retranscribeError && (

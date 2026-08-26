@@ -648,6 +648,160 @@ pub async fn retranscribe_audio_segment(
 }
 
 /// Retranscribe all audio sources in a note
+
+/// Rebuild a note's transcript using the remote diarizing recogniser.
+///
+/// The reason this exists rather than always using local Whisper: whisper.cpp
+/// cannot tell speakers apart at all, so a ten-person call comes back as one
+/// undifferentiated wall of "Others". The remote service diarizes, and running
+/// it over a finished recording is the only way this app can put `Speaker 1..N`
+/// against a meeting it recorded itself.
+///
+/// The two tracks are treated differently and deliberately:
+///
+/// - The **microphone** is one person by construction, so its segments are
+///   labelled "You". Diarizing a single-speaker track invents distinctions that
+///   are not there.
+/// - The **system** track is everyone else, and is where diarization earns its
+///   keep. Its labels come back as `Speaker 1..N` — placeholders, which
+///   `merge::is_generic` already understands, ready to be given real names.
+async fn retranscribe_remote(
+    app: &AppHandle,
+    db: &Database,
+    note_id: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    max_speakers: Option<u32>,
+) -> Result<RetranscribeResult, String> {
+    let segments = db.get_audio_segments(note_id).map_err(|e| e.to_string())?;
+    let uploads = db.get_uploaded_audio(note_id).map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
+
+    let mut rebuilt: Vec<NewTranscriptSegment> = Vec::new();
+    let mut failed_items: Vec<String> = Vec::new();
+    let mut total_segments_created = 0usize;
+    let total_items = segments.len() + uploads.len();
+    let mut completed_items = 0usize;
+
+    // (stored path, label to force, or None to keep what the diarizer said)
+    let mut jobs: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let Some(mic) = &segment.mic_path {
+            jobs.push((
+                format!("Recording {} (you)", index + 1),
+                PathBuf::from(mic),
+                Some("You".to_string()),
+            ));
+        }
+        if let Some(system) = &segment.system_path {
+            jobs.push((
+                format!("Recording {} (others)", index + 1),
+                PathBuf::from(system),
+                None,
+            ));
+        }
+    }
+    for upload in &uploads {
+        jobs.push((
+            upload.original_filename.clone(),
+            PathBuf::from(&upload.file_path),
+            Some(upload.speaker_label.clone()),
+        ));
+    }
+
+    for (item_name, path, forced_label) in jobs {
+        let _ = app.emit(
+            "retranscribe-progress",
+            serde_json::json!({
+                "noteId": note_id,
+                "totalItems": total_items,
+                "completedItems": completed_items,
+                "currentItem": item_name,
+            }),
+        );
+
+        // Resolved, because a path stored before compaction names a WAV that is
+        // now a FLAC.
+        let Some(resolved) = crate::audio::codec::resolve_existing(&path) else {
+            failed_items.push(format!("{item_name}: the audio is missing"));
+            completed_items += 1;
+            continue;
+        };
+
+        let bytes = match std::fs::read(&resolved) {
+            Ok(b) => b,
+            Err(e) => {
+                failed_items.push(format!("{item_name}: {e}"));
+                completed_items += 1;
+                continue;
+            }
+        };
+        let filename = resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "audio".to_string());
+
+        match crate::transcription::remote::transcribe(
+            &client,
+            base_url,
+            api_key,
+            bytes,
+            &filename,
+            max_speakers,
+        )
+        .await
+        {
+            Ok(result) => {
+                let mut last_start = 0.0_f64;
+                for seg in &result.segments {
+                    if should_skip_segment(&seg.text, seg.start_time, seg.end_time) {
+                        continue;
+                    }
+                    let (start_time, end_time) =
+                        clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
+                    let speaker = forced_label
+                        .clone()
+                        .or_else(|| seg.speaker.clone())
+                        // A diarizer that returned nothing leaves the track
+                        // label, which is weaker but true.
+                        .or_else(|| Some("Others".to_string()));
+                    rebuilt.push(
+                        NewTranscriptSegment::new(note_id, start_time, end_time, &seg.text)
+                            .with_speaker(speaker)
+                            .with_source_type("recording"),
+                    );
+                    total_segments_created += 1;
+                }
+            }
+            Err(e) => failed_items.push(format!("{item_name}: {e}")),
+        }
+
+        completed_items += 1;
+    }
+
+    if rebuilt.is_empty() {
+        return Err(format!(
+            "Retranscription produced nothing; the existing transcript was left untouched.{}",
+            if failed_items.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", failed_items.join("; "))
+            }
+        ));
+    }
+
+    rebuilt.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
+    db.replace_transcript_segments(note_id, &rebuilt)
+        .map_err(|e| format!("Failed to save the rebuilt transcript: {e}"))?;
+
+    Ok(RetranscribeResult {
+        total_items,
+        completed_items,
+        failed_items,
+        total_segments: total_segments_created,
+    })
+}
+
 #[tauri::command]
 pub async fn retranscribe_note(
     note_id: String,
@@ -658,6 +812,42 @@ pub async fn retranscribe_note(
     // Check if already transcribing
     if state.is_transcribing.swap(true, Ordering::SeqCst) {
         return Err("Already transcribing. Please wait for the current transcription to finish.".to_string());
+    }
+
+    // Which recogniser rebuilds this transcript.
+    //
+    // Checked before the Whisper model is demanded, because the remote path
+    // needs no local model — and on a machine using a remote recogniser there
+    // is unlikely to be one. Insisting on it first is what made retranscribe
+    // fail on exactly the setup that most needs it.
+    let backend = {
+        let get = |key: &str| db.get_setting(key).ok().flatten();
+        crate::transcription::backend::resolve(
+            &get(crate::transcription::backend::BACKEND_KEY).unwrap_or_default(),
+            get(crate::transcription::backend::BASE_URL_KEY).as_deref(),
+            get(crate::transcription::backend::API_KEY_KEY).as_deref(),
+            get(crate::transcription::backend::MAX_SPEAKERS_KEY).as_deref(),
+            get(crate::transcription::backend::STREAM_URL_KEY).as_deref(),
+        )
+    };
+
+    if let crate::transcription::backend::Backend::Remote {
+        base_url,
+        api_key,
+        max_speakers,
+    } = &backend
+    {
+        let result = retranscribe_remote(
+            &app,
+            &db,
+            &note_id,
+            base_url,
+            api_key.as_deref(),
+            *max_speakers,
+        )
+        .await;
+        state.is_transcribing.store(false, Ordering::SeqCst);
+        return result;
     }
 
     // Get the transcriber

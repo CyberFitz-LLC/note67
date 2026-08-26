@@ -638,7 +638,21 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
     };
 
     // What moved, so database rows naming the old path can be corrected after.
+    //
+    // Keyed by file NAME, not by the full path. Matching whole path strings is
+    // what failed in the field: a row and a directory listing can render the
+    // same file differently, the lookup misses, and the row is left naming a
+    // WAV that no longer exists — which surfaces much later as "Audio file not
+    // found" on a recording that is sitting right there. Every one of these
+    // files lives in the same directory, so the name is enough.
     let mut moved: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    let key_of = |p: &str| -> String {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| p.to_lowercase())
+    };
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -667,7 +681,7 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
                 if done.path != path {
                     report.files_compacted += 1;
                     moved.insert(
-                        path.to_string_lossy().to_string(),
+                        key_of(&path.to_string_lossy()),
                         done.path.to_string_lossy().to_string(),
                     );
                 }
@@ -693,10 +707,10 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
             let mic = segment.mic_path.clone();
             let system = segment.system_path.clone();
             for p in [mic.as_ref(), system.as_ref()].into_iter().flatten() {
-                referenced.insert(p.clone());
+                referenced.insert(key_of(p));
             }
-            let new_mic = mic.as_ref().and_then(|p| moved.get(p)).cloned();
-            let new_system = system.as_ref().and_then(|p| moved.get(p)).cloned();
+            let new_mic = mic.as_ref().and_then(|p| moved.get(&key_of(p))).cloned();
+            let new_system = system.as_ref().and_then(|p| moved.get(&key_of(p))).cloned();
             if (new_mic.is_some() || new_system.is_some()) && segment.id > 0 {
                 let mic_str = new_mic.or(mic).unwrap_or_default();
                 let sys_str = new_system.or(system);
@@ -709,8 +723,8 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
 
     if let Ok(uploads) = db.all_uploaded_audio() {
         for (id, path) in uploads {
-            referenced.insert(path.clone());
-            if let Some(new_path) = moved.get(&path)
+            referenced.insert(key_of(&path));
+            if let Some(new_path) = moved.get(&key_of(&path))
                 && let Err(e) = db.update_uploaded_audio_path(id, new_path)
             {
                 eprintln!("[compact] moved upload {id} but could not record it: {e}");
@@ -720,8 +734,8 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
 
     if let Ok(notes) = db.all_note_audio_paths() {
         for (note_id, path) in notes {
-            referenced.insert(path.clone());
-            if let Some(new_path) = moved.get(&path)
+            referenced.insert(key_of(&path));
+            if let Some(new_path) = moved.get(&key_of(&path))
                 && let Err(e) = db.update_note_audio_path(&note_id, new_path)
             {
                 eprintln!("[compact] moved the playback track for {note_id} but could not record it: {e}");
@@ -729,7 +743,7 @@ pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<Compact
         }
     }
 
-    report.orphans = moved.keys().filter(|p| !referenced.contains(*p)).count();
+    report.orphans = moved.keys().filter(|k| !referenced.contains(*k)).count();
 
     println!(
         "[compact] {} of {} files, {} MB -> {} MB, {} failed, {} orphaned",

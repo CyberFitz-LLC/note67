@@ -349,6 +349,30 @@ pub fn encode_flac_16k_mono(samples: &[f32], path: &Path) -> Result<(), AudioErr
     Ok(())
 }
 
+
+/// Find a recording that may have been rewritten in another format.
+///
+/// A stored path can go stale: compaction replaces `x.wav` with `x.flac`, and
+/// any row still naming the WAV then points at nothing. That happened for real
+/// — a note whose audio was on disk the whole time reported "Audio file not
+/// found" and refused to retranscribe.
+///
+/// So a path is resolved rather than trusted: the name as given, then the same
+/// name in the other format. Sibling formats only, in the same directory — this
+/// repairs a rename, it does not go looking for audio elsewhere.
+pub fn resolve_existing(path: &Path) -> Option<std::path::PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    for ext in ["flac", "wav"] {
+        let candidate = path.with_extension(ext);
+        if candidate != path && candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// What compacting one recording achieved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Compacted {
@@ -780,6 +804,40 @@ mod tests {
             "a header with no samples should not decode to anything"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_path_left_over_from_before_compaction_still_resolves() {
+        // The failure this exists for: compaction rewrote x.wav as x.flac and a
+        // database row still named the WAV, so retranscribe reported the audio
+        // missing when it was on disk under the other extension.
+        let flac = tmp("stale-ref.flac");
+        encode_flac_16k_mono(&signal(8192), &flac).expect("encode");
+
+        let stale = flac.with_extension("wav");
+        assert!(!stale.exists(), "the test needs the WAV to be absent");
+
+        let found = resolve_existing(&stale).expect("should resolve to the flac");
+        assert_eq!(found, flac);
+        let _ = std::fs::remove_file(&flac);
+    }
+
+    #[test]
+    fn a_path_that_exists_is_returned_untouched() {
+        let path = tmp("present.flac");
+        encode_flac_16k_mono(&signal(4096), &path).expect("encode");
+        assert_eq!(resolve_existing(&path).as_ref(), Some(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_recording_that_is_genuinely_gone_stays_gone() {
+        // Resolution repairs a rename. It must not invent a file, or a deleted
+        // recording would look recoverable.
+        let path = tmp("definitely-not-here.wav");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("flac"));
+        assert!(resolve_existing(&path).is_none());
     }
 
 }
