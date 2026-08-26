@@ -683,21 +683,31 @@ async fn retranscribe_remote(
     let total_items = segments.len() + uploads.len();
     let mut completed_items = 0usize;
 
-    // (stored path, label to force, or None to keep what the diarizer said)
-    let mut jobs: Vec<(String, PathBuf, Option<String>)> = Vec::new();
+    // (name, path, label to force, speakers to look for)
+    //
+    // The speaker count is not the same for every track, and getting it wrong
+    // is expensive rather than merely inaccurate. Diarization is the heavy part
+    // of this service — it dominates the run time and the memory — and asking
+    // it to separate speakers on a track that has exactly one is pure cost.
+    // A microphone records one person by construction, so it asks for one.
+    let mut jobs: Vec<(String, PathBuf, Option<String>, Option<u32>)> = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         if let Some(mic) = &segment.mic_path {
             jobs.push((
                 format!("Recording {} (you)", index + 1),
                 PathBuf::from(mic),
                 Some("You".to_string()),
+                Some(1),
             ));
         }
         if let Some(system) = &segment.system_path {
+            // Everyone else, and the only track where diarization earns what it
+            // costs.
             jobs.push((
                 format!("Recording {} (others)", index + 1),
                 PathBuf::from(system),
                 None,
+                max_speakers,
             ));
         }
     }
@@ -706,10 +716,11 @@ async fn retranscribe_remote(
             upload.original_filename.clone(),
             PathBuf::from(&upload.file_path),
             Some(upload.speaker_label.clone()),
+            Some(1),
         ));
     }
 
-    for (item_name, path, forced_label) in jobs {
+    for (item_name, path, forced_label, speakers) in jobs {
         let _ = app.emit(
             "retranscribe-progress",
             serde_json::json!({
@@ -747,7 +758,7 @@ async fn retranscribe_remote(
             api_key,
             bytes,
             &filename,
-            max_speakers,
+            speakers,
         )
         .await
         {

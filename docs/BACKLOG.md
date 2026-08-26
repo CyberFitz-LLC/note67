@@ -249,6 +249,22 @@ Notes on doing it properly:
 
 ## Note67 app
 
+- **Retranscribing a long meeting can take the appliance down with it.**
+  2026-08-26: a diarizing retranscribe of a fifty-minute call rebooted the
+  Spark. The cause is on that box — its containers run with no memory limit
+  (`Memory=0`), so when NeMo diarization asked for headroom that a resident
+  27B model had already taken, the kernel had no container to sacrifice and
+  the machine went instead. Memory limits on the containers are the fix, and
+  they are not ours to set.
+
+  What we changed is the half of the load that was never needed: the
+  microphone track asks for one speaker rather than diarizing a recording that
+  has one person in it by construction. That roughly halves the heavy work.
+  It reduces the risk; it does not remove it, and nothing in this app can —
+  a client cannot see how much memory an appliance has left. Chunking long
+  audio would bound it, at the cost of speaker identity across chunk
+  boundaries, which is the whole point of diarizing.
+
 - **Manual transcript edits do not create a version.** `Reason::Edit` exists and
   nothing produces it, because the app has no transcript editing surface. When
   one is added, it must append a version or the chain will have a blind spot
