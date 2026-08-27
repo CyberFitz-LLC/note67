@@ -118,13 +118,20 @@ pub fn progress_of(status: &str) -> Progress {
 /// recording that yielded nothing and a service that lost the result are
 /// indistinguishable here, and the harmless reading of the two is the wrong
 /// one to guess.
+/// Turn a finished job into a result.
+///
+/// **A job that finished with no segments is an empty result, not a failure.**
+/// It used to be an error, on the reasoning that a service returning nothing
+/// had gone wrong. Real audio disproved it: a recording is split into segments
+/// and the last one is routinely a short silent tail, which transcribes to
+/// nothing because there is nothing in it. Calling that a failure threw away
+/// the segments that had worked — a whole meeting, correctly transcribed and
+/// diarized, discarded because a two-second tail of silence contained no
+/// speech.
+///
+/// Silence transcribing to nothing is the right answer. What the caller does
+/// with an empty contribution is the caller's decision.
 pub fn to_result(job: &JobStatus) -> Result<TranscriptionResult, RemoteError> {
-    if job.segments.is_empty() {
-        return Err(RemoteError::Failed(
-            "the service returned no transcript segments".into(),
-        ));
-    }
-
     let segments: Vec<TranscriptionSegment> = job
         .segments
         .iter()
@@ -434,13 +441,24 @@ mod tests {
     }
 
     #[test]
-    fn a_job_with_no_segments_is_an_error() {
-        // A recording that yielded nothing and a service that lost the result
-        // are indistinguishable here, and the harmless reading is the wrong
-        // one to guess.
-        let mut j = job("done", true, &[]);
-        j.segments.clear();
-        assert!(matches!(to_result(&j), Err(RemoteError::Failed(_))));
+    fn a_job_with_no_segments_is_an_empty_result_not_a_failure() {
+        // Reversed after real audio showed the cost. A recording is split into
+        // segments and the last is routinely a short silent tail; treating its
+        // empty transcript as a failure discarded the segments that had
+        // worked. One real meeting came back correctly transcribed and
+        // diarized into seven speakers, and was thrown away because a
+        // two-second tail of silence contained no speech.
+        let job = JobStatus {
+            status: "done".into(),
+            diarized: true,
+            speakers: vec![],
+            full_text: String::new(),
+            segments: vec![],
+            error: None,
+        };
+        let result = to_result(&job).expect("silence is a result, not an error");
+        assert!(result.segments.is_empty());
+        assert!(result.full_text.is_empty());
     }
 
     #[test]

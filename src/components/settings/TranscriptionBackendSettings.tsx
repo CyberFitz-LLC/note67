@@ -155,11 +155,20 @@ export function TranscriptionBackendSettings({
             "password",
           )}
           {field(
-            "Most speakers to expect (optional)",
+            "Most speakers to expect",
             draft.maxSpeakers,
             (maxSpeakers) => setDraft({ ...draft, maxSpeakers }),
-            "e.g. 8 — leave empty to let it work this out",
+            "e.g. 12 — leave empty and the service caps at 8",
           )}
+
+          {/* The old wording said an empty box let the service "work it out".
+              It does not: it falls back to a limit of 8 and merges everyone
+              past it, so a ten-person call quietly comes back as eight voices
+              and nothing says why. */}
+          <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+            Left empty, the recogniser allows at most 8 speakers and merges any
+            beyond that — set this above the largest meeting you record.
+          </p>
 
           {/* The Rust side falls back to local for a URL it cannot use. Saying
               so here is the difference between "not finished yet" and a

@@ -350,6 +350,36 @@ pub fn encode_flac_16k_mono(samples: &[f32], path: &Path) -> Result<(), AudioErr
 }
 
 
+
+/// How long a recording is, without decoding it.
+///
+/// Read from the container's own header — STREAMINFO for FLAC, the fmt/data
+/// chunks for WAV — so asking costs a few bytes rather than a whole file. Used
+/// to decide whether something is worth uploading at all.
+pub fn duration_ms(path: &Path) -> Option<u64> {
+    let file = File::open(path).ok()?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = probed.format.tracks().first()?;
+    let frames = track.codec_params.n_frames?;
+    let rate = track.codec_params.sample_rate? as u64;
+    if rate == 0 {
+        return None;
+    }
+    Some(frames * 1000 / rate)
+}
+
 /// Find a recording that may have been rewritten in another format.
 ///
 /// A stored path can go stale: compaction replaces `x.wav` with `x.flac`, and
@@ -838,6 +868,39 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("flac"));
         assert!(resolve_existing(&path).is_none());
+    }
+
+    #[test]
+    fn duration_is_read_from_the_header_rather_than_the_audio() {
+        let path = tmp("duration.flac");
+        // Two seconds at the target rate.
+        encode_flac_16k_mono(&signal(TARGET_RATE as usize * 2), &path).expect("encode");
+        let ms = duration_ms(&path).expect("a duration");
+        assert!(
+            (1_900..=2_400).contains(&ms),
+            "expected about 2000 ms, got {ms}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_silent_tail_is_short_enough_to_recognise_as_one() {
+        // The case this is for: a recording's last segment is often a couple of
+        // seconds of nothing, and uploading it to a transcription service costs
+        // a round trip to be told there is no speech in it.
+        let path = tmp("tail.flac");
+        encode_flac_16k_mono(&vec![0.0; (TARGET_RATE as usize * 23) / 10], &path).expect("encode");
+        let ms = duration_ms(&path).expect("a duration");
+        assert!(ms < 3_000, "expected a short tail, got {ms} ms");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_that_is_not_audio_has_no_duration() {
+        let path = tmp("not-audio.bin");
+        std::fs::write(&path, b"nope").expect("write");
+        assert_eq!(duration_ms(&path), None);
+        let _ = std::fs::remove_file(&path);
     }
 
 }

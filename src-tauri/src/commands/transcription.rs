@@ -649,6 +649,14 @@ pub async fn retranscribe_audio_segment(
 
 /// Retranscribe all audio sources in a note
 
+/// Below this, a segment is a tail rather than a recording.
+///
+/// Two seconds and change is what a stopped recording leaves behind, and no
+/// meeting turns on a sub-second utterance that a segmentation boundary happened
+/// to isolate. Erring short: skipping real speech is worse than one wasted
+/// request.
+const MIN_TRANSCRIBABLE_MS: u64 = 1_000;
+
 /// Rebuild a note's transcript using the remote diarizing recogniser.
 ///
 /// The reason this exists rather than always using local Whisper: whisper.cpp
@@ -748,6 +756,18 @@ async fn retranscribe_remote(
             completed_items += 1;
             continue;
         };
+
+        // A recording is split into segments and the last is routinely a short
+        // silent tail. Uploading one buys a round trip to be told there is no
+        // speech in it — and on a memory-constrained appliance, a needless job
+        // is not free. Skipped rather than sent, and skipping is not failing.
+        if let Some(ms) = crate::audio::codec::duration_ms(&resolved)
+            && ms < MIN_TRANSCRIBABLE_MS
+        {
+            println!("[retranscribe] skipping {item_name}: only {ms} ms of audio");
+            completed_items += 1;
+            continue;
+        }
 
         let bytes = match std::fs::read(&resolved) {
             Ok(b) => b,
