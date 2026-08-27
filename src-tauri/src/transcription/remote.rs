@@ -112,12 +112,6 @@ pub fn progress_of(status: &str) -> Progress {
     }
 }
 
-/// Turn a finished job into the app's own shape.
-///
-/// A job that produced no segments is an error, not an empty transcript: a
-/// recording that yielded nothing and a service that lost the result are
-/// indistinguishable here, and the harmless reading of the two is the wrong
-/// one to guess.
 /// Turn a finished job into a result.
 ///
 /// **A job that finished with no segments is an empty result, not a failure.**

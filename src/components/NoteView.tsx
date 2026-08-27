@@ -396,6 +396,13 @@ export function NoteView({
   // commonest failure — no Whisper model loaded, which is normal on a machine
   // using a remote recogniser — looked exactly like the button doing nothing.
   const [retranscribeError, setRetranscribeError] = useState<string | null>(null);
+  // What a completed pass actually produced. Success used to be silent, so a
+  // run that finished and changed nothing looked exactly like one that never
+  // ran — which is precisely the state that took a round of guessing to tell
+  // apart.
+  const [retranscribeOutcome, setRetranscribeOutcome] = useState<string | null>(
+    null,
+  );
 
   const handleRetranscribeAll = useCallback(async () => {
     if (isRetranscribing) return;
@@ -403,9 +410,17 @@ export function NoteView({
     // Switch to transcript tab to show progress
     onTabChange("transcript");
     setRetranscribeError(null);
+    setRetranscribeOutcome(null);
     try {
       const result = await transcriptionApi.retranscribeNote(note.id);
       console.log("Retranscribe result:", result);
+      setRetranscribeOutcome(
+        `Rebuilt ${result.totalSegments} segment${
+          result.totalSegments === 1 ? "" : "s"
+        } from ${result.completedItems} recording${
+          result.completedItems === 1 ? "" : "s"
+        }.`,
+      );
       // Refresh transcripts
       onTranscriptUpdated?.();
     } catch (error) {
@@ -618,6 +633,14 @@ export function NoteView({
                           : "Retranscribe"}
                     </button>
                   )}
+                {retranscribeOutcome && !retranscribeError && (
+                  <span
+                    className="text-xs ml-2"
+                    style={{ color: "var(--color-text-secondary)" }}
+                  >
+                    {retranscribeOutcome}
+                  </span>
+                )}
                 {retranscribeError && (
                   <span
                     className="text-xs ml-2"
