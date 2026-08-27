@@ -844,6 +844,48 @@ async fn retranscribe_remote(
     db.replace_transcript_segments(note_id, &rebuilt)
         .map_err(|e| format!("Failed to save the rebuilt transcript: {e}"))?;
 
+    // Extend the chain, exactly as the local path does.
+    //
+    // Missing this is worse than it looks: the transcript is replaced and the
+    // chain still describes what it used to be, so the content and the record
+    // of the content disagree — in an app whose product is that record. It also
+    // looked to the user like nothing had happened, because the version list is
+    // where a retranscription becomes visible.
+    //
+    // `Recorded`, not `Merged`: the audio is ours and was fed to a recogniser
+    // we chose on hardware we own. `Merged` is for borrowed names, and
+    // "Speaker 1" is not a name.
+    //
+    // Logged rather than propagated, matching the local path: the transcript
+    // was replaced successfully, and failing here would report a completed pass
+    // as failed.
+    match db.record_transcript_version(
+        note_id,
+        crate::exochain::Origin::Recorded,
+        crate::exochain::Reason::Retranscribe,
+    ) {
+        Ok(Some(v)) => println!(
+            "[retranscribe] transcript v{} recorded for {note_id} ({})",
+            v.version, v.content_hash
+        ),
+        Ok(None) => println!("[retranscribe] transcript unchanged for {note_id}; no new version"),
+        Err(e) => eprintln!("Failed to record the transcript version for {note_id}: {e}"),
+    }
+
+    // And say it has finished. Without this the progress indicator has no
+    // completion to wait for and simply stops moving, which reads as a pass
+    // that quietly died.
+    let _ = app.emit(
+        "retranscribe-progress",
+        serde_json::json!({
+            "noteId": note_id,
+            "totalItems": total_items,
+            "completedItems": completed_items,
+            "currentItem": "",
+            "isComplete": true,
+        }),
+    );
+
     Ok(RetranscribeResult {
         total_items,
         completed_items,
