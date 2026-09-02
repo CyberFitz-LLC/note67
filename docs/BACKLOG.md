@@ -248,6 +248,29 @@ Notes on doing it properly:
   spot exactly where the most human-meaningful change happens.
 - Merging (above) is the cheapest large win here: Teams already knows the names.
 
+## Live meeting assistance
+
+**Design written 2026-08-29: [`live-assist/DESIGN.md`](live-assist/DESIGN.md).**
+Two panes beside a running meeting — a rolling brief and reactive suggestions
+drawing on Hindsight recall — with the response options offered as buttons that
+steer a second, focused pass. Four open questions there, of which the memory
+bank and the receipt-per-session ruling both block a start.
+
+## Retranscription with a remote recogniser — parked 2026-08-29
+
+Built and never made to work end to end. It crashed the appliance twice, and
+on the run that did complete, the client did not apply the result. The failures
+were mostly memory on the appliance rather than the client, but the feature
+never delivered a diarized transcript to a user.
+
+**Parked rather than removed**: `retranscribe_remote` and its path still work
+if the appliance has room, and the useful half — diarizing a finished recording
+to get speakers a live recogniser cannot — is worth reviving another way.
+[`live-assist/DESIGN.md`](live-assist/DESIGN.md) does not depend on it. The
+likelier revival is local diarization over the existing transcript
+(`sherpa-onnx` has Rust bindings and models measured in tens of megabytes), so
+no appliance is involved at all.
+
 ## Note67 app
 
 - **Retranscribing a long meeting can take the appliance down with it.**
