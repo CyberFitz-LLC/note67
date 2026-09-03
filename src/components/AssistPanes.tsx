@@ -1,0 +1,214 @@
+import { useState } from "react";
+
+import {
+  freshnessLabel,
+  stalenessSeconds,
+  type AssistOption,
+} from "../hooks/useAssist";
+
+/**
+ * The two panes beside a running meeting.
+ *
+ * A brief of what is being discussed, and options for what to say next. Both
+ * state how current they are rather than showing a spinner: a suggestion you
+ * act on is only as good as the moment it was made for, and mid-call that is
+ * the first thing worth knowing about it.
+ */
+export function AssistPanes({
+  running,
+  brief,
+  questions,
+  options,
+  raw,
+  asOf,
+  meetingSeconds,
+  receipt,
+  attestationNote,
+  error,
+  onStart,
+  onStop,
+  onExpand,
+}: {
+  running: boolean;
+  brief: string | null;
+  questions: string[];
+  options: AssistOption[];
+  raw: string | null;
+  asOf: number | null;
+  meetingSeconds: number | null;
+  receipt: string | null;
+  attestationNote: string | null;
+  error: string | null;
+  onStart: () => void;
+  onStop: () => void;
+  onExpand: (option: AssistOption) => Promise<string | null>;
+}) {
+  const [expanding, setExpanding] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<{ label: string; text: string } | null>(
+    null,
+  );
+
+  const behind = stalenessSeconds(asOf, meetingSeconds);
+  const freshness = freshnessLabel(behind);
+  const stale = behind !== null && behind >= 120;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold" style={{ color: "var(--color-text)" }}>
+          Live assistance
+        </h3>
+        <button
+          type="button"
+          onClick={running ? onStop : onStart}
+          className="text-xs px-2 py-1 rounded-lg"
+          style={{
+            backgroundColor: running
+              ? "var(--color-bg-subtle)"
+              : "var(--color-accent, #3b82f6)",
+            color: running ? "var(--color-text)" : "white",
+            border: running ? "1px solid var(--color-border)" : "none",
+          }}
+        >
+          {running ? "Stop" : "Start"}
+        </button>
+      </div>
+
+      {error && (
+        <p className="text-sm" style={{ color: "#ef4444" }}>
+          {error}
+        </p>
+      )}
+
+      {running && (
+        <p
+          className="text-xs"
+          style={{ color: stale ? "#eab308" : "var(--color-text-tertiary)" }}
+        >
+          {freshness}
+          {receipt && ` · session receipt ${receipt.slice(0, 12)}…`}
+        </p>
+      )}
+
+      {/* Said plainly rather than hidden: a session running without a receipt
+          is a fact worth being able to see, and pretending otherwise is the
+          one thing this app must never do. */}
+      {running && attestationNote && (
+        <p className="text-xs" style={{ color: "#eab308" }}>
+          Unattested — {attestationNote}
+        </p>
+      )}
+
+      {running && (
+        <>
+          <section className="space-y-1">
+            <h4
+              className="text-[10px] uppercase tracking-wide"
+              style={{ color: "var(--color-text-tertiary)" }}
+            >
+              What is being discussed
+            </h4>
+            <p
+              className="text-sm whitespace-pre-wrap"
+              style={{ color: "var(--color-text-secondary)" }}
+            >
+              {brief ?? "Listening…"}
+            </p>
+          </section>
+
+          {questions.length > 0 && (
+            <section className="space-y-1">
+              <h4
+                className="text-[10px] uppercase tracking-wide"
+                style={{ color: "var(--color-text-tertiary)" }}
+              >
+                Asked and not yet answered
+              </h4>
+              <ul className="text-sm space-y-1" style={{ color: "var(--color-text)" }}>
+                {questions.map((q) => (
+                  <li key={q}>· {q}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {options.length > 0 && (
+            <section className="space-y-2">
+              <h4
+                className="text-[10px] uppercase tracking-wide"
+                style={{ color: "var(--color-text-tertiary)" }}
+              >
+                You could
+              </h4>
+              <div className="flex flex-wrap gap-2">
+                {options.map((option) => (
+                  <button
+                    key={option.label}
+                    type="button"
+                    title={option.angle}
+                    disabled={expanding !== null}
+                    onClick={async () => {
+                      setExpanding(option.label);
+                      const text = await onExpand(option);
+                      setExpanding(null);
+                      if (text) setExpanded({ label: option.label, text });
+                    }}
+                    className="text-xs px-2 py-1 rounded-lg disabled:opacity-50"
+                    style={{
+                      backgroundColor: "var(--color-bg-subtle)",
+                      border: "1px solid var(--color-border)",
+                      color: "var(--color-text)",
+                    }}
+                  >
+                    {expanding === option.label ? "Thinking…" : option.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* A reply that could not be read as options. Shown as prose, never
+              as buttons — a fabricated option gets pressed. */}
+          {raw && options.length === 0 && (
+            <p
+              className="text-sm whitespace-pre-wrap"
+              style={{ color: "var(--color-text-secondary)" }}
+            >
+              {raw}
+            </p>
+          )}
+
+          {expanded && (
+            <section
+              className="p-3 rounded-lg space-y-1"
+              style={{
+                backgroundColor: "var(--color-bg-subtle)",
+                border: "1px solid var(--color-border)",
+              }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+                  {expanded.label}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setExpanded(null)}
+                  className="text-xs underline"
+                  style={{ color: "var(--color-text-tertiary)" }}
+                >
+                  Dismiss
+                </button>
+              </div>
+              <p
+                className="text-sm whitespace-pre-wrap"
+                style={{ color: "var(--color-text)" }}
+              >
+                {expanded.text}
+              </p>
+            </section>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

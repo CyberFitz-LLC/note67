@@ -32,6 +32,8 @@ import {
 } from "../hooks/useTranscriptionBackend";
 import { ScreenshotStrip } from "./ScreenshotStrip";
 import { TrackLevelMeters } from "./TrackLevelMeters";
+import { AssistPanes } from "./AssistPanes";
+import { useAssist } from "../hooks/useAssist";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
 import { useNoteUiStore } from "../stores/noteUiStore";
@@ -100,6 +102,7 @@ export function NoteView({
     useRecordingStore((s) => s.isRecording) && isThisNoteRecording;
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
   const trackLevels = useRecordingStore((s) => s.trackLevels);
+  const assist = useAssist(note.id);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
 
   // Live transcription is scoped to the recording note, same as above.
@@ -976,6 +979,36 @@ export function NoteView({
 
           {activeTab === "transcript" && (
             <>
+              {(isThisNoteRecording || assist.running) && (
+                <div
+                  className="mb-4 p-3 rounded-lg"
+                  style={{
+                    backgroundColor: "var(--color-bg-subtle)",
+                    border: "1px solid var(--color-border)",
+                  }}
+                >
+                  <AssistPanes
+                    running={assist.running}
+                    brief={assist.brief}
+                    questions={assist.questions}
+                    options={assist.options}
+                    raw={assist.raw}
+                    asOf={assist.asOf}
+                    meetingSeconds={
+                      transcript.length > 0
+                        ? (transcript[transcript.length - 1]?.end_time ?? 0)
+                        : null
+                    }
+                    receipt={assist.receipt}
+                    attestationNote={assist.attestationNote}
+                    error={assist.error}
+                    onStart={assist.start}
+                    onStop={assist.stop}
+                    onExpand={assist.expand}
+                  />
+                </div>
+              )}
+
               {screenshotError && (
                 <p className="mb-3 text-sm" style={{ color: "#ef4444" }}>
                   {screenshotError}

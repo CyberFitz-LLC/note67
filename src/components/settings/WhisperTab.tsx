@@ -1,4 +1,5 @@
 import { useModels } from "../../hooks";
+import { AssistSettings } from "./AssistSettings";
 import { useTranscriptionBackend } from "../../hooks/useTranscriptionBackend";
 import { TranscriptionBackendSettings } from "./TranscriptionBackendSettings";
 import {
@@ -140,6 +141,9 @@ export function WhisperTab() {
           className="mt-6 pt-6"
           style={{ borderTop: "1px solid var(--color-border)" }}
         >
+          <div className="pb-4 mb-4" style={{ borderBottom: "1px solid var(--color-border)" }}>
+            <AssistSettings />
+          </div>
           <TranscriptionBackendSettings
             // Remounted when the saved config changes, so the form seeds from
             // it once and needs no effect to stay in step.
