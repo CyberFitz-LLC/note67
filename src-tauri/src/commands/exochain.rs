@@ -102,6 +102,59 @@ const DEFAULT_NODE_URL: &str = "https://exochain-production.up.railway.app";
 
 /// Ask a node to attest this note's current transcript.
 ///
+
+/// Attest one live-assistance session.
+///
+/// Returns the receipt hash, or a plain reason there is none. Deliberately a
+/// `Result<String, String>` rather than an `Attestation`: the caller shows
+/// either a receipt or why there is not one, and every way of having no receipt
+/// reads the same to a user.
+///
+/// **Assistance runs either way.** A node that is unreachable, or a credential
+/// that does not name this activity, leaves the session unattested and says so
+/// — it does not silently pretend, and it does not stop a meeting because a
+/// service is down.
+pub async fn attest_assist_session(app: &AppHandle, note_id: &str) -> Result<String, String> {
+    let dir = identity_dir(app)?;
+    let (_identity, key) = identity::load_or_create(&dir, || chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+
+    let Some(stored) = credential::load(&dir) else {
+        return Err("no credential is installed, so the session is unattested".into());
+    };
+    if credential::standing(&stored, credential::now_ms()) != Standing::Active {
+        return Err("the installed credential is not usable, so the session is unattested".into());
+    }
+
+    let raw = credential::load_raw(&dir)
+        .ok_or("the stored credential could not be read, so the session is unattested")?;
+    let parsed = serde_json::from_str(&raw)
+        .map_err(|e| format!("the stored credential is not one this node would accept: {e}"))?;
+
+    let request = emit::build_session_request(&parsed, &key, note_id, emit::now())?;
+
+    let db = app.state::<Database>();
+    let node_url = db
+        .get_setting(NODE_URL_KEY)
+        .ok()
+        .flatten()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_NODE_URL.to_string());
+    let token = db.get_setting(NODE_TOKEN_KEY).ok().flatten();
+
+    match emit::emit(&reqwest::Client::new(), &node_url, token.as_deref(), &request).await {
+        Attestation::Attested { receipt_hash } => Ok(receipt_hash),
+        Attestation::Denied { reason } => Err(format!(
+            "the node refused to attest this session ({reason}). Live assistance needs \
+             '{}' in the credential's authority scope.",
+            emit::ASSIST_SESSION_TOOL
+        )),
+        Attestation::Pending { reason } => {
+            Err(format!("the session is unattested — {reason}"))
+        }
+    }
+}
+
 /// Returns what the node said. A receipt is recorded only when one was minted:
 /// an unreachable node leaves the transcript exactly as it was, which is the
 /// whole reason recording never depends on the node.

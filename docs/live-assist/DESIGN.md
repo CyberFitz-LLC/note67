@@ -153,6 +153,25 @@ mine to settle.
    assistance is switched on, naming the endpoint and the note. A receipt per
    pass would be a chain nobody could read.
 
+## The session receipt needs a credential that names it
+
+The node compares an action's `tool` **by equality**, so a session asks for
+`note67.assist.session` and a credential that does not list that exact string
+yields a **denial**, not a warning. That is the correct outcome — it says this
+installation was not authorised for this activity — but it means live
+assistance on an existing installation needs a credential minted with that tool
+in its authority scope, via the AVC App Registry Workbench.
+
+Until then a session runs **unattested and says so**. It does not stop, and it
+does not pretend: a node that is down, or a credential that does not cover
+this, leaves the pane running with the reason shown. Refusing to assist a
+meeting because a service is unreachable would be the wrong trade; claiming an
+attestation that was refused would be a worse one.
+
+The action has its own domain (`note67.action.v1|assist-session|`) so a session
+receipt can never collide with a transcript receipt for the same note. The
+meeting-attest domain is frozen and untouched.
+
 ## Open questions
 
 1. **How much may it interrupt?** The panes are passive by construction. A

@@ -360,6 +360,7 @@ pub fn run() {
                 api.prevent_close();
             }
         })
+        .manage(crate::assist::runner::AssistState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             show_main_window,
@@ -406,6 +407,10 @@ pub fn run() {
             commands::stop_dual_recording_with_segments,
             commands::compact_recordings,
             commands::get_track_levels,
+            commands::start_assist,
+            commands::stop_assist,
+            commands::assist_running,
+            commands::expand_assist_option,
             commands::add_screenshot,
             commands::list_screenshots,
             commands::delete_screenshot,

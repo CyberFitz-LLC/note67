@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "note67"
-version = "0.1.47"
+version = "0.1.48"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

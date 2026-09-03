@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod assist;
 pub mod audio;
 pub mod device_test;
 pub mod exochain;
@@ -16,6 +17,7 @@ pub mod transcription;
 pub mod upload;
 
 pub use ai::*;
+pub use assist::*;
 pub use audio::*;
 pub use screenshots::*;
 pub use export::*;
