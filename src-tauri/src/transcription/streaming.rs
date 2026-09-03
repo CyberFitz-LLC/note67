@@ -244,8 +244,19 @@ pub enum Recognised {
 /// Audio goes in through `send`, recognitions come out through the receiver
 /// returned by `connect`. Dropping the session closes the socket.
 pub struct StreamingSession {
-    audio: mpsc::Sender<Vec<u8>>,
+    outgoing: mpsc::Sender<OutFrame>,
     alive: Arc<AtomicBool>,
+}
+
+/// What goes down the socket.
+///
+/// Audio, or a request to close the current utterance. Finalize has to travel
+/// the same queue rather than being sent directly, or it would overtake audio
+/// still waiting to go and cut an utterance short of its own last words.
+#[derive(Debug)]
+enum OutFrame {
+    Audio(Vec<u8>),
+    Finalize,
 }
 
 impl StreamingSession {
@@ -270,10 +281,26 @@ impl StreamingSession {
     /// it produced was a log line claiming the recogniser had "stopped
     /// accepting audio" while it was simply overloaded.
     pub fn send(&self, pcm: Vec<u8>) -> SendOutcome {
+        self.enqueue(OutFrame::Audio(pcm))
+    }
+
+    /// Close the current utterance.
+    ///
+    /// This recogniser returns a final **only** when asked, so without this a
+    /// meeting is one utterance: partials that are ever-growing prefixes of the
+    /// whole conversation, a single final at the end, and every timestamp at
+    /// zero because nothing ever advanced. It also grows the recogniser's own
+    /// working state without bound, which is why a transcript that starts crisp
+    /// falls minutes behind after half an hour.
+    pub fn finalize(&self) -> SendOutcome {
+        self.enqueue(OutFrame::Finalize)
+    }
+
+    fn enqueue(&self, frame: OutFrame) -> SendOutcome {
         if !self.is_alive() {
             return SendOutcome::Disconnected;
         }
-        match self.audio.try_send(pcm) {
+        match self.outgoing.try_send(frame) {
             Ok(()) => SendOutcome::Sent,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Behind,
             Err(_) => SendOutcome::Disconnected,
@@ -315,7 +342,7 @@ pub async fn connect(
         .map_err(|e| format!("could not open a {label} stream: {e}"))?;
     let (mut write, mut read) = socket.split();
 
-    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(QUEUE_CHUNKS);
+    let (audio_tx, mut audio_rx) = mpsc::channel::<OutFrame>(QUEUE_CHUNKS);
     let (out_tx, out_rx) = mpsc::channel::<Recognised>(64);
     let alive = Arc::new(AtomicBool::new(true));
 
@@ -329,19 +356,34 @@ pub async fn connect(
     let writer_alive = Arc::clone(&alive);
     let writer_sent = Arc::clone(&sent);
     tokio::spawn(async move {
-        while let Some(pcm) = audio_rx.recv().await {
-            // Two bytes per sample, s16le.
-            let samples = pcm.len() / 2;
-            if write
-                .send(tokio_tungstenite::tungstenite::Message::Binary(pcm))
-                .await
-                .is_err()
-            {
-                break;
+        while let Some(frame) = audio_rx.recv().await {
+            match frame {
+                OutFrame::Audio(pcm) => {
+                    // Two bytes per sample, s16le.
+                    let samples = pcm.len() / 2;
+                    if write
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(pcm))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    // Advanced only after the send succeeds, so the clock never
+                    // claims audio the recogniser was not given.
+                    writer_sent.fetch_add(samples, Ordering::SeqCst);
+                }
+                OutFrame::Finalize => {
+                    if write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            finalize_frame(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
-            // Advanced only after the send succeeds, so the clock never claims
-            // audio the recogniser was not given.
-            writer_sent.fetch_add(samples, Ordering::SeqCst);
         }
         // Ask for the last utterance before going. A final that never arrives
         // is speech the user said and the transcript will not contain.
@@ -435,7 +477,7 @@ pub async fn connect(
 
     Ok((
         StreamingSession {
-            audio: audio_tx,
+            outgoing: audio_tx,
             alive,
         },
         out_rx,

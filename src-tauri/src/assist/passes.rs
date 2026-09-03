@@ -25,13 +25,29 @@ pub fn transcript_block(lines: &[Line]) -> String {
         .join("\n")
 }
 
+/// What the person has asked the assistant to concentrate on.
+///
+/// Rendered as an instruction rather than pasted into the conversation, so a
+/// focus like "watch for budget objections" cannot be mistaken for something a
+/// participant said. Empty means no steer, and adds nothing at all — an empty
+/// heading reads to a model as "they want nothing", which is different from
+/// "they did not say".
+pub fn focus_block(focus: &str) -> String {
+    let focus = focus.trim();
+    if focus.is_empty() {
+        return String::new();
+    }
+    format!("\n\nThe person you are helping has asked you to concentrate on: {focus}")
+}
+
 /// Update the running brief.
 ///
 /// Given the previous brief and only what is new, rather than the whole
 /// meeting. A transcript grows without bound, and re-reading it every minute
 /// costs more each time to say less each time.
-pub fn brief_prompt(previous: Option<&str>, new_lines: &[Line]) -> String {
+pub fn brief_prompt(previous: Option<&str>, new_lines: &[Line], focus: &str) -> String {
     let heard = transcript_block(new_lines);
+    let steer = focus_block(focus);
     match previous {
         Some(prev) if !prev.trim().is_empty() => format!(
             "You are keeping a running brief of a meeting in progress.\n\n\
@@ -40,13 +56,13 @@ pub fn brief_prompt(previous: Option<&str>, new_lines: &[Line]) -> String {
              Rewrite the brief so it covers the whole meeting including the new \
              material. Keep it under 200 words. Lead with what is being decided \
              or asked for, not with the order things were said in. Drop points \
-             that turned out not to matter. Write only the brief."
+             that turned out not to matter. Write only the brief.{steer}"
         ),
         _ => format!(
             "You are keeping a running brief of a meeting in progress.\n\n\
              So far:\n\n{heard}\n\n\
              Write a brief under 200 words covering what is being discussed. \
-             Lead with what is being decided or asked for. Write only the brief."
+             Lead with what is being decided or asked for. Write only the brief.{steer}"
         ),
     }
 }
@@ -56,6 +72,7 @@ pub fn suggestion_prompt(
     recent: &[Line],
     already_said: &[Line],
     memories: &[Memory],
+    focus: &str,
 ) -> String {
     let theirs = transcript_block(recent);
     let mine = if already_said.is_empty() {
@@ -64,6 +81,7 @@ pub fn suggestion_prompt(
         transcript_block(already_said)
     };
     let recalled = crate::assist::memory::as_context(memories);
+    let steer = focus_block(focus);
 
     format!(
         "You are helping someone during a live meeting. They cannot read much, \
@@ -74,6 +92,7 @@ pub fn suggestion_prompt(
          Reply with JSON only, in exactly this shape:\n\
          {{\"questions_open\": [\"...\"], \"options\": [{{\"label\": \"...\", \
          \"angle\": \"...\"}}]}}\n\n\
+         {steer}\n\n\
          `questions_open` lists anything the others asked that has not been \
          answered — an empty list if there is nothing outstanding. `options` \
          gives at most three ways this person could respond: `label` is two or \
@@ -181,7 +200,7 @@ mod tests {
     fn the_brief_is_given_only_what_is_new() {
         // The accumulator, not the whole transcript: re-reading a growing
         // meeting every minute costs more each time to say less each time.
-        let prompt = brief_prompt(Some("They want SOC 2."), &[line("Others", "And pen tests.")]);
+        let prompt = brief_prompt(Some("They want SOC 2."), &[line("Others", "And pen tests.")], "");
         assert!(prompt.contains("They want SOC 2."));
         assert!(prompt.contains("And pen tests."));
         assert!(prompt.contains("since"));
@@ -189,14 +208,14 @@ mod tests {
 
     #[test]
     fn a_first_brief_has_no_previous_to_carry() {
-        let prompt = brief_prompt(None, &[line("Others", "Let us start.")]);
+        let prompt = brief_prompt(None, &[line("Others", "Let us start.")], "");
         assert!(!prompt.contains("brief so far"));
         assert!(prompt.contains("Let us start."));
     }
 
     #[test]
     fn an_empty_previous_brief_is_treated_as_none() {
-        let prompt = brief_prompt(Some("   "), &[line("Others", "Hello.")]);
+        let prompt = brief_prompt(Some("   "), &[line("Others", "Hello.")], "");
         assert!(!prompt.contains("brief so far"));
     }
 
@@ -208,6 +227,7 @@ mod tests {
             &[line("Others", "Do you have SOC 2?")],
             &[line("You", "We are SOC 2 Type II.")],
             &[],
+            "",
         );
         assert!(prompt.contains("do not suggest \\\npoints they have made") || prompt.contains("do not suggest"));
         assert!(prompt.contains("We are SOC 2 Type II."));
@@ -215,7 +235,7 @@ mod tests {
 
     #[test]
     fn having_said_nothing_yet_is_stated_rather_than_left_blank() {
-        let prompt = suggestion_prompt(&[line("Others", "Hi.")], &[], &[]);
+        let prompt = suggestion_prompt(&[line("Others", "Hi.")], &[], &[], "");
         assert!(prompt.contains("not spoken on this yet"));
     }
 
@@ -228,6 +248,7 @@ mod tests {
                 text: "Acme were fined after an audit finding".into(),
                 context: None,
             }],
+            "",
         );
         assert!(prompt.contains("known, not said in this meeting"));
         assert!(prompt.contains("Acme were fined"));
@@ -289,4 +310,29 @@ mod tests {
         let block = transcript_block(&[line("Others", "Hello"), line("You", "Hi")]);
         assert_eq!(block, "Others: Hello\nYou: Hi");
     }
+    #[test]
+    fn a_focus_steers_both_passes() {
+        let focus = "watch for budget objections";
+        assert!(brief_prompt(None, &[line("Others", "Hi")], focus).contains(focus));
+        assert!(suggestion_prompt(&[line("Others", "Hi there")], &[], &[], focus).contains(focus));
+    }
+
+    #[test]
+    fn a_focus_is_an_instruction_not_something_someone_said() {
+        // Pasted into the conversation it would read as a participant's words,
+        // and the model would answer it rather than follow it.
+        let block = focus_block("watch for budget objections");
+        assert!(block.contains("asked you to concentrate on"));
+        assert!(!block.starts_with("Others:"));
+    }
+
+    #[test]
+    fn no_focus_adds_nothing() {
+        // Not an empty heading: to a model that reads as "they want nothing",
+        // which is different from "they did not say".
+        assert_eq!(focus_block(""), "");
+        assert_eq!(focus_block("   "), "");
+        assert!(!brief_prompt(None, &[line("Others", "Hi")], "").contains("concentrate on"));
+    }
+
 }

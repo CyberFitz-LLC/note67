@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+import { settingsApi } from "../api";
 
 import {
   freshnessLabel,
@@ -43,7 +45,22 @@ export function AssistPanes({
   onStop: () => void;
   onExpand: (option: AssistOption) => Promise<string | null>;
 }) {
+  const [focus, setFocus] = useState("");
+  const [focusSaved, setFocusSaved] = useState(true);
   const [expanding, setExpanding] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    settingsApi
+      .get("assist_focus")
+      .then((value) => {
+        if (!cancelled) setFocus(value ?? "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [expanded, setExpanded] = useState<{ label: string; text: string } | null>(
     null,
   );
@@ -101,6 +118,50 @@ export function AssistPanes({
 
       {running && (
         <>
+          {/* Read fresh on every pass, so a change takes effect on the next one
+              rather than the next meeting — which is when someone realises what
+              they actually wanted watched for. */}
+          <section className="space-y-1">
+            <h4
+              className="text-[10px] uppercase tracking-wide"
+              style={{ color: "var(--color-text-tertiary)" }}
+            >
+              Focus on
+            </h4>
+            <div className="flex gap-2">
+              <input
+                value={focus}
+                placeholder="e.g. budget objections, or the migration timeline"
+                onChange={(e) => {
+                  setFocus(e.target.value);
+                  setFocusSaved(false);
+                }}
+                className="flex-1 min-w-0 p-1.5 rounded-lg text-xs"
+                style={{
+                  backgroundColor: "var(--color-bg-elevated)",
+                  color: "var(--color-text)",
+                  border: "1px solid var(--color-border)",
+                }}
+              />
+              <button
+                type="button"
+                disabled={focusSaved}
+                onClick={async () => {
+                  await settingsApi.set("assist_focus", focus.trim());
+                  setFocusSaved(true);
+                }}
+                className="text-xs px-2 py-1 rounded-lg disabled:opacity-40"
+                style={{
+                  backgroundColor: "var(--color-bg-subtle)",
+                  border: "1px solid var(--color-border)",
+                  color: "var(--color-text)",
+                }}
+              >
+                {focusSaved ? "Set" : "Apply"}
+              </button>
+            </div>
+          </section>
+
           <section className="space-y-1">
             <h4
               className="text-[10px] uppercase tracking-wide"

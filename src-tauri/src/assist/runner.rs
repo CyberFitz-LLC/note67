@@ -103,6 +103,17 @@ pub async fn stop(app: &AppHandle) {
 }
 
 async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
+    // Read each pass rather than captured once, so changing the focus mid-
+    // meeting takes effect on the next pass instead of the next meeting —
+    // which is when someone realises what they actually want watched for.
+    let focus_now = |app: &AppHandle| -> String {
+        app.state::<Database>()
+            .get_setting(crate::assist::config::FOCUS_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
+
     let http = reqwest::Client::new();
     let mut brief_cadence = Cadence::new(BRIEF_INTERVAL);
     let mut suggest_cadence = Cadence::new(SUGGESTION_INTERVAL);
@@ -163,7 +174,7 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                 .collect();
 
             if !unseen.is_empty() {
-                let prompt = passes::brief_prompt(brief.as_deref(), &unseen);
+                let prompt = passes::brief_prompt(brief.as_deref(), &unseen, &focus_now(&app));
                 match generate(&app, &prompt, 0.3).await {
                     Ok(text) => {
                         brief = Some(text.clone());
@@ -215,7 +226,7 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                 None => Vec::new(),
             };
 
-            let prompt = passes::suggestion_prompt(&recent, &mine, &memories);
+            let prompt = passes::suggestion_prompt(&recent, &mine, &memories, &focus_now(&app));
             match generate(&app, &prompt, 0.4).await {
                 Ok(reply) => {
                     let parsed: Suggestions = passes::parse_suggestions(&reply);
@@ -244,6 +255,11 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
         }
     }
 
+    // Released here, not only in stop(). The loop also exits on its own when
+    // the recording ends, and leaving the flag set made the next meeting
+    // refuse to start with "already running" for a note that finished hours
+    // ago — with nothing a user could press to clear it.
+    app.state::<AssistState>().set_running(None).await;
     println!("[assist] stopped for {note_id}");
 }
 

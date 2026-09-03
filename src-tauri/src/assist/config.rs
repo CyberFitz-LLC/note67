@@ -8,6 +8,7 @@
 pub const ENABLED_KEY: &str = "assist_enabled";
 pub const HINDSIGHT_URL_KEY: &str = "assist_hindsight_url";
 pub const HINDSIGHT_BANK_KEY: &str = "assist_hindsight_bank";
+pub const FOCUS_KEY: &str = "assist_focus";
 
 /// How assistance will actually run, once the settings are read.
 #[derive(Debug, Clone, PartialEq)]

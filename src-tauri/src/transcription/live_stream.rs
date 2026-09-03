@@ -33,6 +33,88 @@ use crate::transcription::streaming::{
 use crate::transcription::transcriber::TranscriptionSegment;
 use crate::transcription::{is_echo_of_system, TranscriptionError};
 
+/// How long a track may be quiet before its utterance is closed.
+///
+/// The natural boundary in speech, and the one that gives a transcript its
+/// shape: without it a meeting is a single utterance, because this recogniser
+/// only returns a final when asked.
+const SILENCE_CLOSES_UTTERANCE: Duration = Duration::from_millis(900);
+
+/// The longest an utterance may run before being closed regardless.
+///
+/// A backstop for someone who simply does not pause. Twenty seconds keeps
+/// segments readable and keeps the recogniser's working state bounded — an
+/// utterance that grows for an hour is what turns a crisp transcript into one
+/// running minutes behind.
+const MAX_UTTERANCE: Duration = Duration::from_secs(20);
+
+/// Below this, a frame counts as silence for the purpose of closing an
+/// utterance. Deliberately lower than the transcription voice gate: this only
+/// decides where to put a boundary, so it should err towards hearing speech.
+const SILENCE_RMS: f32 = 0.01;
+
+/// Tracks when one socket's current utterance should be closed.
+#[derive(Debug)]
+struct Utterance {
+    /// When speech was last heard on this track.
+    last_voice: Option<Instant>,
+    /// When the current utterance began.
+    started: Option<Instant>,
+}
+
+impl Utterance {
+    fn new() -> Self {
+        Self {
+            last_voice: None,
+            started: None,
+        }
+    }
+
+    /// Note a frame, and say whether the utterance should now be closed.
+    fn observe(&mut self, rms: f32, now: Instant) -> bool {
+        if rms > SILENCE_RMS {
+            self.last_voice = Some(now);
+            if self.started.is_none() {
+                self.started = Some(now);
+            }
+            // Long enough that it must be broken somewhere, and here is as good
+            // as anywhere.
+            if self.started.is_some_and(|s| now.duration_since(s) >= MAX_UTTERANCE) {
+                self.reset();
+                return true;
+            }
+            return false;
+        }
+
+        // Silence. Only closes something that was actually open — otherwise a
+        // quiet meeting would send a finalize every tick and ask the recogniser
+        // for an endless run of empty finals.
+        let open = self.started.is_some();
+        let quiet_long_enough = self
+            .last_voice
+            .is_some_and(|v| now.duration_since(v) >= SILENCE_CLOSES_UTTERANCE);
+
+        if open && quiet_long_enough {
+            self.reset();
+            return true;
+        }
+        false
+    }
+
+    fn reset(&mut self) {
+        self.started = None;
+        self.last_voice = None;
+    }
+}
+
+/// Root-mean-square of a frame.
+fn frame_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
 /// How long a settled microphone utterance is held before it is judged an echo.
 ///
 /// Both tracks go to the same recogniser, so the far end's words and the mic's
@@ -315,6 +397,8 @@ async fn feed_loop(
     // it is how a meeting comes back with holes nobody can explain.
     let mut dropped: u64 = 0;
     let mut warned_behind = false;
+    let mut mic_utterance = Utterance::new();
+    let mut system_utterance = Utterance::new();
 
     loop {
         ticker.tick().await;
@@ -344,10 +428,14 @@ async fn feed_loop(
                 let mono = to_mono_16k(mic_samples, rate, ch);
                 for mut frame in mic_frames.push(&mono) {
                     gain.apply(&mut frame);
+                    let close = mic_utterance.observe(frame_rms(&frame), Instant::now());
                     match mic_session.send(streaming::to_s16le(&frame)) {
                         SendOutcome::Sent => {}
                         SendOutcome::Behind => dropped += 1,
                         SendOutcome::Disconnected => break,
+                    }
+                    if close {
+                        let _ = mic_session.finalize();
                     }
                 }
             }
@@ -358,10 +446,14 @@ async fn feed_loop(
         let system_samples = take_system_audio_samples();
         if !system_samples.is_empty() {
             for frame in system_frames.push(&system_samples) {
+                let close = system_utterance.observe(frame_rms(&frame), Instant::now());
                 match system_session.send(streaming::to_s16le(&frame)) {
                     SendOutcome::Sent => {}
                     SendOutcome::Behind => dropped += 1,
                     SendOutcome::Disconnected => break,
+                }
+                if close {
+                    let _ = system_session.finalize();
                 }
             }
         }
@@ -724,6 +816,95 @@ mod tests {
     fn nothing_is_echo_when_the_meeting_has_said_nothing() {
         let w = EchoWindow::default();
         assert!(!is_echo_of_system("just thinking aloud", 0.0, 3.0, &w.snapshot()));
+    }
+
+    fn at(base: Instant, ms: u64) -> Instant {
+        base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_pause_in_speech_closes_the_utterance() {
+        // The boundary that gives a transcript its shape. Without it a whole
+        // meeting is one utterance: partials that are ever-growing prefixes of
+        // the entire conversation, a single final at the end, and every
+        // timestamp at zero. That is what a real hour-long meeting produced.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+
+        assert!(!u.observe(0.2, base), "speech should not close anything");
+        assert!(!u.observe(0.0, at(base, 300)), "a short gap is not a boundary");
+        assert!(
+            u.observe(0.0, at(base, 1_000)),
+            "a second of silence should close the utterance"
+        );
+    }
+
+    #[test]
+    fn silence_before_anything_was_said_asks_for_nothing() {
+        // Otherwise a quiet meeting sends a finalize every tick and the
+        // recogniser answers with an endless run of empty finals.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        for tick in 0..50 {
+            assert!(
+                !u.observe(0.0, at(base, tick * 100)),
+                "silence closed an utterance that never opened"
+            );
+        }
+    }
+
+    #[test]
+    fn one_pause_closes_once_not_repeatedly() {
+        // After closing, the next silence must not close again — each close is
+        // a request to the recogniser and repeating it wastes the round trip
+        // and litters the transcript with empty finals.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        u.observe(0.2, base);
+        assert!(u.observe(0.0, at(base, 1_000)));
+        assert!(!u.observe(0.0, at(base, 2_000)));
+        assert!(!u.observe(0.0, at(base, 5_000)));
+    }
+
+    #[test]
+    fn someone_who_never_pauses_is_still_broken_up() {
+        // The backstop. Twenty minutes of unbroken speech is one unreadable
+        // segment, and it grows the recogniser's working state until the
+        // transcript falls minutes behind — which is what happened after about
+        // half an hour of a real meeting.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        let mut closes = 0;
+        for tick in 0..600 {
+            if u.observe(0.3, at(base, tick * 100)) {
+                closes += 1;
+            }
+        }
+        assert!(
+            closes >= 2,
+            "a minute of continuous speech produced {closes} boundaries"
+        );
+    }
+
+    #[test]
+    fn speech_resumes_a_new_utterance_after_a_close() {
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        u.observe(0.2, base);
+        assert!(u.observe(0.0, at(base, 1_000)));
+
+        assert!(!u.observe(0.2, at(base, 2_000)), "new speech should not close");
+        assert!(
+            u.observe(0.0, at(base, 3_100)),
+            "the next pause should close the new utterance"
+        );
+    }
+
+    #[test]
+    fn rms_is_zero_for_no_audio_and_positive_for_some() {
+        assert_eq!(frame_rms(&[]), 0.0);
+        assert_eq!(frame_rms(&[0.0; 100]), 0.0);
+        assert!(frame_rms(&[0.5; 100]) > 0.4);
     }
 
 }
