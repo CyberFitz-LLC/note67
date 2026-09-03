@@ -248,6 +248,58 @@ Notes on doing it properly:
   spot exactly where the most human-meaningful change happens.
 - Merging (above) is the cheapest large win here: Teams already knows the names.
 
+## Structured notes, after seeing Teams Facilitator
+
+Observed 2026-09-03 in a real Teams meeting and reported as "the best note
+taking thing I've seen so far": screenshots captured automatically and
+**organised by topic**, summaries of the thinking, an outline of what was
+discussed.
+
+Worth separating what is close from what is a different product, because they
+look alike in a demo and are not alike to build.
+
+**Topic segmentation is the keystone, and we are nearest to it.** Everything
+else Facilitator does well is downstream of dividing a meeting into topics:
+"screenshots by topic" and "a summary per topic" both fall out of it once the
+divisions exist, and the transcript stops being a wall of text. The live brief
+already reads a running meeting and says what is being discussed — it just
+throws the structure away and keeps the prose. Asking the same pass for
+boundaries as well as a summary is a small change to a prompt and a large
+change to what the note looks like afterwards.
+
+The hard part is not detecting a topic change. It is that the divisions have to
+be **stable**: a boundary that moves every ninety seconds as the model
+reconsiders makes a note that cannot be read while the meeting is still
+running. Once a topic has closed it should stay closed, which means the pass
+proposes new boundaries rather than re-segmenting the whole meeting each time —
+the same accumulator shape the brief already uses, for the same reason.
+
+**Organising what we already capture is then mostly presentation.** Screenshots
+carry the meeting position they were pasted at, and transcript segments carry
+times. Both can be placed under a topic by timestamp without any new capture,
+new model call, or new storage. This is the cheapest large win in the whole
+idea.
+
+**Automatic screenshots are a different product.** Teams can do it because it
+*is* the meeting client and already holds the shared-screen stream. Note67 sees
+system audio, not video, so the equivalent is periodically capturing the
+screen — which is a materially different privacy claim from recording a call,
+belongs in `SCOPING.md` on its own row rather than under an existing one, and
+on the machine that runs it competes with the video encode that has already
+caused trouble once. Worth doing deliberately or not at all.
+
+**What Facilitator has that we structurally cannot.** It knows the participant
+list, who is speaking from the call's own metadata, and when someone joined or
+left. We have two audio tracks and whatever a diarizer can infer. Any comparison
+should be honest about that: the note can be as well organised, but attribution
+will not be as good until [`people/DESIGN.md`](people/DESIGN.md) lands, and
+even then it is inference rather than knowledge.
+
+**Order, if this is picked up:** topics from the existing brief pass; then place
+the screenshots and transcript already captured under them; then consider
+capture. Nothing before the first of those is worth building, and the first is
+worth building whether or not the rest ever is.
+
 ## Live meeting assistance
 
 **Design written 2026-08-29: [`live-assist/DESIGN.md`](live-assist/DESIGN.md).**
