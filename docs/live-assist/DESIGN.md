@@ -140,20 +140,25 @@ mine to settle.
 
 ---
 
+## Settled
+
+1. ~~**Which memory?**~~ **A setting.** The bank and the Hindsight URL are both
+   configured, because only the person who filled a bank knows which one to
+   ask. Memory is optional: assistance runs without it, since suggestions
+   grounded only in the conversation are weaker but still useful, and making
+   the feature depend on an unrelated service being up would be worse. Half a
+   setting — a URL with no bank, or the reverse — counts as none.
+
+2. ~~**One receipt per session, or none?**~~ **One per session**, minted when
+   assistance is switched on, naming the endpoint and the note. A receipt per
+   pass would be a chain nobody could read.
+
 ## Open questions
 
-1. **Which memory, and what is in it?** Hindsight is reachable, but a bank has
-   to be named, and the value of every suggestion depends entirely on what that
-   bank knows. Recall against a bank holding no sales material returns nothing
-   useful, and the pane will look broken when it is merely empty. Note67's own
-   past meetings are arguably the better first source, and they are local.
-
-2. **One receipt per session, or none?** Per the governed-action point above.
-
-3. **How much may it interrupt?** The panes are passive by construction. A
+1. **How much may it interrupt?** The panes are passive by construction. A
    suggestion that pushes itself forward mid-sentence is a different product
    and a much riskier one.
 
-4. **Fable or Anthropic?** Not reachable through the current provider enum, and
+3. **Fable or Anthropic?** Not reachable through the current provider enum, and
    worth knowing whether it is wanted before the interface hardens around an
    OpenAI-compatible shape.

@@ -1,3 +1,4 @@
+mod assist;
 mod ai;
 mod audio;
 mod commands;
