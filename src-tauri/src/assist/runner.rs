@@ -16,6 +16,7 @@ use crate::assist::config::{Assist, MemorySource};
 use crate::assist::memory;
 use crate::assist::passes::{self, Line, Suggestions};
 use crate::assist::schedule::{Cadence, Decision};
+use crate::assist::status::Status;
 use crate::assist::trigger;
 use crate::commands::ai::AiState;
 use crate::db::Database;
@@ -103,6 +104,7 @@ pub async fn stop(app: &AppHandle) {
 }
 
 async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
+    let note_id_for_status = note_id.clone();
     // Read each pass rather than captured once, so changing the focus mid-
     // meeting takes effect on the next pass instead of the next meeting —
     // which is when someone realises what they actually want watched for.
@@ -123,6 +125,26 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
     // brief is shown, which is what keeps it incremental.
     let mut briefed_to: i64 = 0;
     let mut brief: Option<String> = None;
+
+    // Emitted on change rather than every tick: a status that repeats itself
+    // every five seconds is its own kind of noise, and the pane only needs to
+    // know when the answer to "what is it doing" has changed.
+    let mut last_status: Option<Status> = None;
+    let mut say = |app: &AppHandle, status: Status, last: &mut Option<Status>| {
+        if last.as_ref() == Some(&status) {
+            return;
+        }
+        let _ = app.emit(
+            "assist-status",
+            serde_json::json!({
+                "note_id": note_id_for_status.clone(),
+                "status": &status,
+                "message": status.message(),
+                "is_problem": status.is_problem(),
+            }),
+        );
+        *last = Some(status);
+    };
 
     loop {
         ticker.tick().await;
@@ -145,6 +167,9 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
             }
         };
         if segments.is_empty() {
+            // The state that produced ten minutes of "Listening…" with no way
+            // to tell it from a model that was failing.
+            say(&app, Status::NoTranscript, &mut last_status);
             continue;
         }
 
@@ -174,9 +199,11 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                 .collect();
 
             if !unseen.is_empty() {
+                say(&app, Status::Thinking, &mut last_status);
                 let prompt = passes::brief_prompt(brief.as_deref(), &unseen, &focus_now(&app));
                 match generate(&app, &prompt, 0.3).await {
                     Ok(text) => {
+                        say(&app, Status::Ready, &mut last_status);
                         brief = Some(text.clone());
                         briefed_to = newest_id;
                         emit(
@@ -191,7 +218,16 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                             },
                         );
                     }
-                    Err(e) => eprintln!("[assist] brief pass failed: {e}"),
+                    Err(e) => {
+                        eprintln!("[assist] brief pass failed: {e}");
+                        say(
+                            &app,
+                            Status::Failed {
+                                reason: e.to_string(),
+                            },
+                            &mut last_status,
+                        );
+                    }
                 }
             }
             brief_cadence.finished();
@@ -226,9 +262,11 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                 None => Vec::new(),
             };
 
+            say(&app, Status::Thinking, &mut last_status);
             let prompt = passes::suggestion_prompt(&recent, &mine, &memories, &focus_now(&app));
             match generate(&app, &prompt, 0.4).await {
                 Ok(reply) => {
+                    say(&app, Status::Ready, &mut last_status);
                     let parsed: Suggestions = passes::parse_suggestions(&reply);
                     emit(
                         &app,
@@ -249,7 +287,16 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                         },
                     );
                 }
-                Err(e) => eprintln!("[assist] suggestion pass failed: {e}"),
+                Err(e) => {
+                    eprintln!("[assist] suggestion pass failed: {e}");
+                    say(
+                        &app,
+                        Status::Failed {
+                            reason: e.to_string(),
+                        },
+                        &mut last_status,
+                    );
+                }
             }
             suggest_cadence.finished();
         }

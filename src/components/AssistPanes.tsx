@@ -18,6 +18,8 @@ import {
  */
 export function AssistPanes({
   running,
+  status,
+  statusIsProblem,
   brief,
   questions,
   options,
@@ -32,6 +34,8 @@ export function AssistPanes({
   onExpand,
 }: {
   running: boolean;
+  status: string | null;
+  statusIsProblem: boolean;
   brief: string | null;
   questions: string[];
   options: AssistOption[];
@@ -103,6 +107,7 @@ export function AssistPanes({
           style={{ color: stale ? "#eab308" : "var(--color-text-tertiary)" }}
         >
           {freshness}
+          {brief && status && statusIsProblem && ` · ${status}`}
           {receipt && ` · session receipt ${receipt.slice(0, 12)}…`}
         </p>
       )}
@@ -169,11 +174,21 @@ export function AssistPanes({
             >
               What is being discussed
             </h4>
+            {/* Never a bare "Listening…". When there is no brief the pane
+                says which kind of nothing it has — an empty transcript, a pass
+                in flight, or a model that did not answer and why. Ten minutes
+                of the old message told a user none of those. */}
             <p
               className="text-sm whitespace-pre-wrap"
-              style={{ color: "var(--color-text-secondary)" }}
+              style={{
+                color: brief
+                  ? "var(--color-text-secondary)"
+                  : statusIsProblem
+                    ? "#eab308"
+                    : "var(--color-text-tertiary)",
+              }}
             >
-              {brief ?? "Listening…"}
+              {brief ?? status ?? "Starting…"}
             </p>
           </section>
 

@@ -300,6 +300,27 @@ the screenshots and transcript already captured under them; then consider
 capture. Nothing before the first of those is worth building, and the first is
 worth building whether or not the rest ever is.
 
+## A pattern worth naming: silence as a failure mode
+
+Four times in this project a feature has had nothing to show and said nothing
+about why, and each time it cost a round of guessing against a live system:
+
+- an empty summary block, where the model had returned nothing and the app
+  saved it;
+- a retranscribe that appeared to do nothing, having failed into
+  `console.error`;
+- a retranscription that completed and reported neither success nor what it
+  produced;
+- live assistance sitting on "Listening…" for ten minutes with no way to tell
+  an empty transcript from a failing model.
+
+`assist::status` is the shape of the answer: when a feature has nothing to
+show, it should say **which kind of nothing it has**. Every one of these had
+its explanation in an `eprintln!` or a `console.error` that a release build
+shows nobody, which is the same as not having one.
+
+Worth applying wherever something long-running can produce nothing.
+
 ## Live meeting assistance
 
 **Design written 2026-08-29: [`live-assist/DESIGN.md`](live-assist/DESIGN.md).**

@@ -989,6 +989,8 @@ export function NoteView({
                 >
                   <AssistPanes
                     running={assist.running}
+                    status={assist.status}
+                    statusIsProblem={assist.statusIsProblem}
                     brief={assist.brief}
                     questions={assist.questions}
                     options={assist.options}

@@ -16,6 +16,12 @@ interface AssistUpdate {
   as_of_seconds: number;
 }
 
+interface AssistStatus {
+  note_id: string;
+  message: string;
+  is_problem: boolean;
+}
+
 interface AssistStarted {
   running: boolean;
   receipt: string | null;
@@ -39,7 +45,13 @@ export function useAssist(noteId: string | null) {
   const [receipt, setReceipt] = useState<string | null>(null);
   const [attestationNote, setAttestationNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What the panes are doing when they have nothing to show. Kept apart from
+  // `error`, which is for a command that failed outright — a pass that failed
+  // is a status, and assistance carries on.
+  const [status, setStatus] = useState<string | null>(null);
+  const [statusIsProblem, setStatusIsProblem] = useState(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  const unlistenStatusRef = useRef<UnlistenFn | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,10 +75,24 @@ export function useAssist(noteId: string | null) {
       })
       .catch((e) => !cancelled && setError(String(e)));
 
+    listen<AssistStatus>("assist-status", (event) => {
+      if (cancelled) return;
+      if (event.payload.note_id !== noteId) return;
+      setStatus(event.payload.message);
+      setStatusIsProblem(event.payload.is_problem);
+    })
+      .then((un) => {
+        if (cancelled) un();
+        else unlistenStatusRef.current = un;
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
       unlistenRef.current?.();
       unlistenRef.current = null;
+      unlistenStatusRef.current?.();
+      unlistenStatusRef.current = null;
     };
   }, [noteId]);
 
@@ -76,6 +102,8 @@ export function useAssist(noteId: string | null) {
     try {
       const started = await invoke<AssistStarted>("start_assist", { noteId });
       setRunning(started.running);
+      setStatus(null);
+      setStatusIsProblem(false);
       setReceipt(started.receipt);
       setAttestationNote(started.attestation_note);
     } catch (e) {
@@ -110,6 +138,8 @@ export function useAssist(noteId: string | null) {
 
   return {
     running,
+    status,
+    statusIsProblem,
     brief,
     questions,
     options,
