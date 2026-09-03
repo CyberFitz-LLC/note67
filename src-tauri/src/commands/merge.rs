@@ -24,12 +24,29 @@ pub struct MergeOutcome {
     pub disagreements: usize,
     /// True when nothing was changed because the two do not match.
     pub rejected: bool,
+    /// What the comparison found, whether or not it was enough to merge.
+    ///
+    /// Returned on a refusal too. "That does not look like the same meeting" is
+    /// a conclusion, and without the numbers behind it there is no way to tell
+    /// a genuinely different recording from two that simply overlapped too
+    /// little — which is the ordinary shape when one was started by hand.
+    pub evidence: MergeEvidence,
     /// The chain version this produced. `None` when nothing changed — merging
     /// a source that adds nothing is not a new state, and minting a version
     /// for it would fill the chain with links that attest nothing.
     pub version: Option<TranscriptVersion>,
     /// Where the two disagree, for review. The user decides, not the merge.
     pub conflicts: Vec<Conflict>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeEvidence {
+    pub matched: usize,
+    pub agreeing: usize,
+    pub base_segments: usize,
+    pub other_segments: usize,
+    pub overlap_ms: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,12 +115,21 @@ pub fn merge_transcript_into_note(
         })
         .collect();
 
+    let evidence = MergeEvidence {
+        matched: report.evidence.matched,
+        agreeing: report.evidence.agreeing,
+        base_segments: report.evidence.base_segments,
+        other_segments: report.evidence.other_segments,
+        overlap_ms: report.evidence.overlap_ms,
+    };
+
     if report.rejected {
         return Ok(MergeOutcome {
             offset_ms: None,
             segments_named: 0,
             disagreements: 0,
             rejected: true,
+            evidence,
             version: None,
             conflicts,
         });
@@ -151,6 +177,7 @@ pub fn merge_transcript_into_note(
         segments_named: report.segments_named,
         disagreements: report.disagreements,
         rejected: false,
+        evidence,
         version,
         conflicts,
     })
@@ -240,6 +267,7 @@ mod tests {
             segments_named: 5,
             disagreements: 1,
             rejected: false,
+            evidence: MergeEvidence::default(),
             version: None,
             conflicts: vec![Conflict {
                 start_ms: 0,
@@ -255,6 +283,33 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_carries_the_evidence_for_it() {
+        // "That does not look like the same meeting" is a conclusion. Without
+        // the numbers there is no way to tell a genuinely different recording
+        // from two that overlapped too little to be sure — which is the normal
+        // shape when one was started by hand, and was the real case reported.
+        let outcome = MergeOutcome {
+            offset_ms: None,
+            segments_named: 0,
+            disagreements: 0,
+            rejected: true,
+            evidence: MergeEvidence {
+                matched: 2,
+                agreeing: 2,
+                base_segments: 40,
+                other_segments: 120,
+                overlap_ms: 0,
+            },
+            version: None,
+            conflicts: vec![],
+        };
+        let v = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(v["evidence"]["matched"], 2);
+        assert_eq!(v["evidence"]["baseSegments"], 40);
+        assert_eq!(v["evidence"]["otherSegments"], 120);
+    }
+
+    #[test]
     fn a_rejected_merge_reports_no_version() {
         // Nothing was written, so nothing was appended to the chain. A version
         // here would attest a merge that did not happen.
@@ -263,6 +318,13 @@ mod tests {
             segments_named: 0,
             disagreements: 0,
             rejected: true,
+            evidence: MergeEvidence {
+                matched: 2,
+                agreeing: 2,
+                base_segments: 40,
+                other_segments: 120,
+                overlap_ms: 0,
+            },
             version: None,
             conflicts: vec![],
         };

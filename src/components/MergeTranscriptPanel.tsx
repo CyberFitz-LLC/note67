@@ -69,11 +69,37 @@ export function MergeTranscriptPanel({
 
       {outcome?.rejected && (
         <div className="text-sm" style={{ color: "#eab308" }}>
-          <strong>That does not look like the same meeting.</strong>
+          <strong>These could not be lined up.</strong>
           <p className="mt-1" style={{ color: "var(--color-text-secondary)" }}>
-            Too little of what was said matches, so nothing was changed. Merging
-            anyway would have attributed speech to people who were not here.
+            Nothing was changed. Merging without an alignment would have
+            attributed speech to people who were not here.
           </p>
+
+          {/* The evidence, not just the conclusion. Two recordings started by
+              hand overlap partially by nature, and a user needs to be able to
+              tell "a different meeting" from "not enough in common to be
+              sure". */}
+          <p className="mt-2 text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+            Compared {outcome.evidence.baseSegments} segments here against{" "}
+            {outcome.evidence.otherSegments} in the file.{" "}
+            {outcome.evidence.matched === 0
+              ? "Nothing in them matched."
+              : `${outcome.evidence.matched} passage${
+                  outcome.evidence.matched === 1 ? "" : "s"
+                } matched, but ${
+                  outcome.evidence.agreeing < 3
+                    ? "too few agreed on a single point in time"
+                    : "they did not agree on a single point in time"
+                }.`}
+          </p>
+          {outcome.evidence.matched > 0 && outcome.evidence.agreeing < 3 && (
+            <p className="mt-1 text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+              Two recordings only need to share a few minutes to be lined up, so
+              a short overlap is fine — but a handful of matching phrases can
+              also happen between different meetings, which is what this
+              refuses.
+            </p>
+          )}
         </div>
       )}
 

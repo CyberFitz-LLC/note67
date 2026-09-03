@@ -69,6 +69,27 @@ pub struct MergeReport {
     pub disagreements: usize,
     /// True when the two do not look like the same meeting.
     pub rejected: bool,
+    /// What lining the two up actually found, whether or not it was enough.
+    ///
+    /// Reported on a refusal as well as a merge. "That does not look like the
+    /// same meeting" is a conclusion; this is the evidence for it, and without
+    /// it a user has no way to tell a genuinely different recording from one
+    /// that overlapped too little to be sure.
+    pub evidence: MatchEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MatchEvidence {
+    /// Segments whose text matched something in the other transcript.
+    pub matched: usize,
+    /// Of those, how many agreed on one alignment.
+    pub agreeing: usize,
+    /// Segments in each transcript, so a short overlap can be seen for what it
+    /// is rather than mistaken for a poor match.
+    pub base_segments: usize,
+    pub other_segments: usize,
+    /// The stretch of the base transcript the other one covers, once aligned.
+    pub overlap_ms: i64,
 }
 
 /// Below this share of a base segment's duration, an overlap is incidental.
@@ -111,7 +132,16 @@ pub fn merge_speakers(
         })
         .collect();
 
-    let Some(offset) = estimate_offset(&base_anchors, &other_anchors) else {
+    let alignment = crate::merge::align::align(&base_anchors, &other_anchors);
+    let mut evidence = MatchEvidence {
+        base_segments: base.len(),
+        other_segments: other.len(),
+        matched: alignment.as_ref().map(|a| a.matched).unwrap_or(0),
+        agreeing: alignment.as_ref().map(|a| a.agreeing).unwrap_or(0),
+        overlap_ms: 0,
+    };
+
+    let Some(offset) = alignment.map(|a| a.offset_ms) else {
         // Refused rather than merged at zero offset. Merging two unrelated
         // recordings would attribute speech to people who were not there, and
         // the result would look entirely plausible.
@@ -119,13 +149,33 @@ pub fn merge_speakers(
             base.iter().map(passthrough).collect(),
             MergeReport {
                 rejected: true,
+                evidence,
                 ..Default::default()
             },
         );
     };
 
+    // How much of the base the other actually covers, once aligned. A short
+    // overlap is the normal shape when a recording is started by hand, and
+    // saying so is the difference between "these do not match" and "these share
+    // twelve minutes".
+    let shifted: Vec<(i64, i64)> = other
+        .iter()
+        .map(|s| (s.start_ms - offset, s.end_ms - offset))
+        .collect();
+    evidence.overlap_ms = base
+        .iter()
+        .map(|b| {
+            shifted
+                .iter()
+                .map(|o| overlap_ms((b.start_ms, b.end_ms), *o))
+                .sum::<i64>()
+        })
+        .sum();
+
     let mut report = MergeReport {
         offset_ms: Some(offset),
+        evidence,
         ..Default::default()
     };
     let mut merged = Vec::with_capacity(base.len());
