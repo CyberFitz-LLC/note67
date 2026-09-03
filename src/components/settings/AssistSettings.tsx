@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import { settingsApi } from "../../api";
+
+interface Bank {
+  id: string;
+  name: string;
+  mission: string | null;
+}
 
 const ENABLED_KEY = "assist_enabled";
 const URL_KEY = "assist_hindsight_url";
@@ -19,6 +26,32 @@ export function AssistSettings() {
   const [bank, setBank] = useState("");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [banks, setBanks] = useState<Bank[] | null>(null);
+  const [connecting, setConnecting] = useState(false);
+
+  const connect = async () => {
+    setConnecting(true);
+    setError(null);
+    try {
+      const found = await invoke<Bank[]>("list_memory_banks", {
+        baseUrl: url.trim(),
+      });
+      setBanks(found);
+      // A bank saved earlier that the service no longer offers is worth
+      // knowing about now rather than when a suggestion silently has no
+      // memory behind it.
+      if (bank && !found.some((b) => b.id === bank)) {
+        setError(
+          `The saved bank "${bank}" is not on this service — choose another.`,
+        );
+      }
+    } catch (e) {
+      setBanks(null);
+      setError(String(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +147,20 @@ export function AssistSettings() {
             />
           </div>
 
+          <button
+            type="button"
+            disabled={connecting || url.trim().length === 0}
+            onClick={connect}
+            className="text-xs px-2 py-1 rounded-lg disabled:opacity-50"
+            style={{
+              backgroundColor: "var(--color-bg-subtle)",
+              border: "1px solid var(--color-border)",
+              color: "var(--color-text)",
+            }}
+          >
+            {connecting ? "Connecting…" : "Connect and list banks"}
+          </button>
+
           <div>
             <label
               className="block text-xs mb-1"
@@ -121,20 +168,40 @@ export function AssistSettings() {
             >
               Memory bank
             </label>
-            <input
-              value={bank}
-              placeholder="which bank to ask"
-              onChange={(e) => {
-                setSaved(false);
-                setBank(e.target.value);
-              }}
-              className="w-full p-2 rounded-lg text-sm"
-              style={{
-                backgroundColor: "var(--color-bg-elevated)",
-                color: "var(--color-text)",
-                border: "1px solid var(--color-border)",
-              }}
-            />
+
+            {banks === null ? (
+              <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+                {bank
+                  ? `Currently asking "${bank}". Connect to change it.`
+                  : "Connect to see what this service offers."}
+              </p>
+            ) : banks.length === 0 ? (
+              <p className="text-xs" style={{ color: "#eab308" }}>
+                This service has no banks yet, so there is nothing to ask.
+              </p>
+            ) : (
+              <select
+                value={bank}
+                onChange={(e) => {
+                  setSaved(false);
+                  setBank(e.target.value);
+                }}
+                className="w-full p-2 rounded-lg text-sm"
+                style={{
+                  backgroundColor: "var(--color-bg-elevated)",
+                  color: "var(--color-text)",
+                  border: "1px solid var(--color-border)",
+                }}
+              >
+                <option value="">None — use the conversation only</option>
+                {banks.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                    {b.mission ? ` — ${b.mission.slice(0, 60)}` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>

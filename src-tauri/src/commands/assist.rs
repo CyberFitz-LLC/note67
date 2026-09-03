@@ -71,6 +71,21 @@ pub async fn start_assist(
     })
 }
 
+/// What banks the configured memory service offers.
+///
+/// Its own command rather than part of saving settings: someone changes the
+/// address, presses connect, and chooses — rather than having to know a bank id
+/// before they can type one.
+#[tauri::command]
+pub async fn list_memory_banks(
+    base_url: String,
+) -> Result<Vec<crate::assist::memory::Bank>, String> {
+    if base_url.trim().is_empty() {
+        return Err("Enter the memory service address first.".to_string());
+    }
+    crate::assist::memory::list_banks(&reqwest::Client::new(), base_url.trim()).await
+}
+
 #[tauri::command]
 pub async fn stop_assist(app: AppHandle) -> Result<(), String> {
     runner::stop(&app).await;

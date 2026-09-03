@@ -96,6 +96,85 @@ fn parse(body: RecallResponse) -> Vec<Memory> {
         .collect()
 }
 
+
+/// A memory bank you could ask.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Bank {
+    pub id: String,
+    pub name: String,
+    /// What the bank is for, when it says. Shown beside the name because
+    /// twenty-six bank ids are not a choice anyone can make from memory, and
+    /// picking the wrong one produces suggestions that are confidently about
+    /// the wrong client.
+    pub mission: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BanksResponse {
+    #[serde(default)]
+    banks: Vec<BankEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BankEntry {
+    bank_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mission: Option<String>,
+}
+
+/// Ask what banks exist.
+///
+/// Unlike recall, a failure here is worth reporting: the user pressed connect
+/// and is waiting to choose from a list. Silence would look like an empty
+/// service rather than an unreachable one.
+pub async fn list_banks(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Vec<Bank>, String> {
+    let url = format!("{}/v1/default/banks", base_url.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("could not reach {base_url}: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "{base_url} answered {} when asked for its banks",
+            response.status()
+        ));
+    }
+
+    let body: BanksResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("the bank list could not be read: {e}"))?;
+
+    Ok(parse_banks(body))
+}
+
+fn parse_banks(body: BanksResponse) -> Vec<Bank> {
+    let mut banks: Vec<Bank> = body
+        .banks
+        .into_iter()
+        .filter(|b| !b.bank_id.trim().is_empty())
+        .map(|b| Bank {
+            name: b
+                .name
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| b.bank_id.clone()),
+            id: b.bank_id,
+            mission: b.mission.filter(|m| !m.trim().is_empty()),
+        })
+        .collect();
+    // By name, because the list is long and arrives in whatever order the
+    // service holds it.
+    banks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    banks
+}
+
 /// Render recalled memories for a prompt.
 ///
 /// Labelled as recall rather than folded in with the transcript, so the model
@@ -175,4 +254,50 @@ mod tests {
         // "your records are empty" rather than "recall was not available".
         assert_eq!(as_context(&[]), "");
     }
+    /// Captured from hindsight.jtpa.net on 2026-09-03, trimmed to the fields
+    /// this reads.
+    const REAL_BANKS: &str = r#"{"banks":[
+        {"bank_id":"cfitz","name":"CyberFitz","mission":"Fresh CyberFitz brain",
+         "disposition":{"skepticism":3}},
+        {"bank_id":"avc","name":"AVC — client memory","mission":"Isolated long-term memory"},
+        {"bank_id":"personal","name":"Personal","mission":""},
+        {"bank_id":"john","name":"john"}
+    ]}"#;
+
+    #[test]
+    fn the_real_bank_list_parses_and_is_ordered() {
+        let body: BanksResponse = serde_json::from_str(REAL_BANKS).expect("parses");
+        let banks = parse_banks(body);
+        assert_eq!(banks.len(), 4);
+        // Sorted, because twenty-six banks in service order is a list nobody
+        // can scan.
+        let names: Vec<&str> = banks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["AVC — client memory", "CyberFitz", "john", "Personal"]);
+    }
+
+    #[test]
+    fn a_bank_with_no_name_is_shown_by_its_id() {
+        let body: BanksResponse =
+            serde_json::from_str(r#"{"banks":[{"bank_id":"raw-id"}]}"#).expect("parses");
+        let banks = parse_banks(body);
+        assert_eq!(banks[0].name, "raw-id");
+        assert_eq!(banks[0].id, "raw-id");
+    }
+
+    #[test]
+    fn an_empty_mission_is_absent_rather_than_blank() {
+        // So the picker can leave the line out instead of showing a heading
+        // with nothing under it.
+        let body: BanksResponse = serde_json::from_str(REAL_BANKS).expect("parses");
+        let banks = parse_banks(body);
+        let personal = banks.iter().find(|b| b.id == "personal").unwrap();
+        assert_eq!(personal.mission, None);
+    }
+
+    #[test]
+    fn a_service_with_no_banks_is_an_empty_list_not_an_error() {
+        let body: BanksResponse = serde_json::from_str(r#"{}"#).expect("parses");
+        assert!(parse_banks(body).is_empty());
+    }
+
 }

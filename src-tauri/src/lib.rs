@@ -408,6 +408,7 @@ pub fn run() {
             commands::compact_recordings,
             commands::get_track_levels,
             commands::start_assist,
+            commands::list_memory_banks,
             commands::stop_assist,
             commands::assist_running,
             commands::expand_assist_option,
