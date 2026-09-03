@@ -162,6 +162,27 @@ installation was not authorised for this activity — but it means live
 assistance on an existing installation needs a credential minted with that tool
 in its authority scope, via the AVC App Registry Workbench.
 
+### Minting it
+
+In the AVC App Registry Workbench, provision **BYO** against the DID and
+base64 public key already shown in Settings → General → Meeting Receipts — the
+same identity, not a new one, or every receipt already minted stops relating to
+this installation.
+
+The authority scope must list **both** tools:
+
+    note67.meeting.attest
+    note67.assist.session
+
+Both, not one. A credential naming only the new tool **installs without
+complaint** and then refuses every transcript attestation, reporting the device
+as enrolled while nothing works — the same shape of failure an empty tools list
+once produced, and pinned by a test. A custom scope also needs the **Add**
+button pressed: typed and not added yields `tools: []`.
+
+`data_classes` and `jurisdictions` go in the custom constraints JSON rather
+than a picker; the registry lifts them into the authority scope.
+
 Until then a session runs **unattested and says so**. It does not stop, and it
 does not pretend: a node that is down, or a credential that does not cover
 this, leaves the pane running with the reason shown. Refusing to assist a

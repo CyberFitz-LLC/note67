@@ -444,4 +444,56 @@ mod tests {
         assert!(dir.join("identity.key").exists());
     }
 
+    #[test]
+    fn a_credential_carrying_both_tools_is_usable() {
+        // What live assistance requires. The node compares an action's tool by
+        // equality, so a session needs `note67.assist.session` named
+        // explicitly — but the credential must still carry
+        // `note67.meeting.attest`, or this app refuses it outright and
+        // transcripts stop being attestable.
+        //
+        // Written down as a test because the two are minted together in a
+        // Workbench, by hand, and dropping the first while adding the second is
+        // the easy mistake.
+        let dir = temp();
+        let stored = install(
+            &dir,
+            OURS,
+            &real_credential(
+                OURS,
+                "\"note67.meeting.attest\", \"note67.assist.session\"",
+                FUTURE,
+            ),
+        )
+        .expect("a two-tool credential installs");
+        assert_eq!(standing(&stored, now_ms()), Standing::Active);
+        assert!(stored
+            .authority_scope
+            .tools
+            .iter()
+            .any(|t| t == "note67.assist.session"));
+    }
+
+    #[test]
+    fn a_credential_that_only_names_assistance_cannot_attest_meetings() {
+        // The failure mode of minting a replacement rather than an addition.
+        // It installs. That is the trap: nothing complains at the point where
+        // someone would notice, and the credential reports as enrolled while
+        // every attempt to attest a transcript is refused — with the node
+        // getting the blame, exactly as an empty tools list once did.
+        let dir = temp();
+        let stored = install(
+            &dir,
+            OURS,
+            &real_credential(OURS, "\"note67.assist.session\"", FUTURE),
+        )
+        .expect("installs, which is the problem");
+
+        assert_eq!(
+            standing(&stored, now_ms()),
+            Standing::NotForMeetings,
+            "a credential that drops meeting.attest must not read as usable"
+        );
+    }
+
 }
