@@ -560,10 +560,17 @@ fn process_audio_data(data: &[u8], sample_rate: u32, channels: u16, sample_type:
     // conversion for transcription.
     crate::audio::system_audio::system_level().observe(&float_samples);
 
-    // Push to system audio buffer for live transcription (downsampled to 16kHz mono)
+    // Push to system audio buffer for live transcription (downsampled to 16kHz
+    // mono), bounded for the same reason the microphone buffer is: when nothing
+    // is transcribing, this fills for the length of the recording and the
+    // memory is never read. See recorder::trim_to_recent.
     if let Ok(mut buffer) = get_system_audio_buffer().lock() {
         let downsampled = downsample_to_16k_mono(&float_samples, sample_rate, channels);
         buffer.extend(downsampled);
+        crate::audio::recorder::trim_to_recent(
+            &mut buffer,
+            crate::audio::recorder::MAX_BUFFERED_SAMPLES,
+        );
     }
 }
 

@@ -106,6 +106,10 @@ pub fn take_system_audio_samples() -> Vec<f32> {
 pub fn clear_system_audio_buffer() {
     if let Ok(mut buffer) = get_system_audio_buffer().lock() {
         buffer.clear();
+        crate::audio::recorder::trim_to_recent(
+            &mut buffer,
+            crate::audio::recorder::MAX_BUFFERED_SAMPLES,
+        );
     }
 }
 

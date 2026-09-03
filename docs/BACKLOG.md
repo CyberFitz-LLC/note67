@@ -273,6 +273,26 @@ no appliance is involved at all.
 
 ## Note67 app
 
+- **A capture buffer with no consumer used to grow for the length of the
+  recording.** Reported 2026-09-02 from a two-hour meeting: audio went
+  scratchy, video showed interference, and the machine had to be abandoned
+  mid-call at about ninety minutes. Note67 was the cause, though not for the
+  reason first suspected — nothing compresses during recording, and the
+  playback mix is only rebuilt on stop.
+
+  Only the transcription consumer drains `audio_buffer` and the system buffer.
+  When nothing is transcribing — no model loaded, live transcription never
+  started, or the streaming feed loop having stopped because its socket died —
+  the capture callbacks carried on filling them: roughly 1.6 GB an hour between
+  the two tracks, on a machine also carrying a video call.
+
+  Both buffers are now bounded to about thirty seconds, oldest first. **The
+  bound is not the whole fix**: the streaming feed loop still stops draining
+  when a socket dies while the recording continues, so a dropped recogniser
+  silently costs the rest of the meeting's live transcript. That is worth
+  fixing on its own terms rather than relying on a memory bound to make it
+  survivable.
+
 - **Retranscribing a long meeting can take the appliance down with it.**
   2026-08-26: a diarizing retranscribe of a fifty-minute call rebooted the
   Spark. The cause is on that box — its containers run with no memory limit
