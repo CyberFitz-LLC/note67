@@ -115,6 +115,67 @@ pub fn follow_up_prompt(recent: &[Line], chosen_label: &str, chosen_angle: &str)
     )
 }
 
+
+/// Phrases a model uses when talking to itself rather than answering.
+const DELIBERATION: &[&str] = &[
+    "we need answer",
+    "we need to answer",
+    "the user says",
+    "the user wants",
+    "need produce",
+    "need to produce",
+    "let's count",
+    "let us count",
+    "word count?",
+    "need craft",
+    "need decide if",
+    "maybe omit",
+];
+
+/// Whether a reply is the model thinking rather than the thing asked for.
+///
+/// A live pane showed a model arguing with itself for several thousand words
+/// about an ambiguous phrase, repeating one sentence hundreds of times, and
+/// never reaching a brief. Bounding the reply stops the runaway; this stops
+/// what leaks through when a model narrates its way to an answer and the
+/// narration is what arrives.
+///
+/// Deliberately conservative. Rejecting a real brief is worse than showing an
+/// untidy one, so this wants both a deliberation phrase **and** the length that
+/// makes it a problem — a brief is under 200 words, and this is asked to be.
+pub fn looks_like_deliberation(reply: &str) -> bool {
+    let lowered = reply.to_lowercase();
+    let words = lowered.split_whitespace().count();
+    if words < 220 {
+        return false;
+    }
+    if DELIBERATION.iter().any(|p| lowered.contains(p)) {
+        return true;
+    }
+    // Or the same sentence over and over, which is the shape the runaway took
+    // and which no brief has.
+    repeats_itself(&lowered)
+}
+
+/// True when one sentence dominates the reply by repetition.
+fn repeats_itself(lowered: &str) -> bool {
+    let sentences: Vec<&str> = lowered
+        .split(['.', '?'])
+        .map(str::trim)
+        .filter(|s| s.split_whitespace().count() >= 5)
+        .collect();
+    if sentences.len() < 8 {
+        return false;
+    }
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in &sentences {
+        *counts.entry(*s).or_default() += 1;
+    }
+    counts
+        .values()
+        .any(|n| *n * 4 >= sentences.len() && *n >= 4)
+}
+
 /// One way to respond.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Option_ {
@@ -333,6 +394,49 @@ mod tests {
         assert_eq!(focus_block(""), "");
         assert_eq!(focus_block("   "), "");
         assert!(!brief_prompt(None, &[line("Others", "Hi")], "").contains("concentrate on"));
+    }
+
+    #[test]
+    fn a_model_narrating_its_way_to_an_answer_is_refused() {
+        // Taken from what a live pane actually displayed: the model working out
+        // what to do, at length, instead of the brief it was asked for.
+        let reply = format!(
+            "We need answer user's request. Need produce final brief only, under 200 words. \
+             The user says rewrite brief covering whole meeting including new material. {}",
+            "Need decide if matters and whether to omit unclear points. ".repeat(40)
+        );
+        assert!(looks_like_deliberation(&reply));
+    }
+
+    #[test]
+    fn a_reply_that_repeats_one_sentence_is_refused() {
+        // The runaway's shape: the same line hundreds of times. No brief does
+        // this.
+        let reply = "Maybe that phrase means something else entirely here. ".repeat(60);
+        assert!(looks_like_deliberation(&reply));
+    }
+
+    #[test]
+    fn a_real_brief_is_not_mistaken_for_deliberation() {
+        // The failure that would matter more: rejecting a good brief. This is
+        // long, discursive and mentions what the user wants — and is exactly
+        // what a brief looks like.
+        let reply = "The team agreed the user wants two or three senior architects who \
+             understand AI, can guide the tooling and approve deployments. \
+             "
+        .to_string()
+            + &"They discussed infrastructure as code, GitHub Enterprise, automated pipelines \
+                 and the regulatory boundaries that apply. "
+                .repeat(6);
+        assert!(!looks_like_deliberation(&reply));
+    }
+
+    #[test]
+    fn a_short_reply_is_never_deliberation() {
+        // A brief is under 200 words by instruction, so length is half the
+        // signal — and being wrong about a short reply costs a whole pane.
+        assert!(!looks_like_deliberation("The team agreed to ship on Friday."));
+        assert!(!looks_like_deliberation("We need answer: ship on Friday."));
     }
 
 }

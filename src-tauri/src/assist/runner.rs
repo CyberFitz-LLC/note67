@@ -202,6 +202,22 @@ async fn run(app: AppHandle, note_id: String, source: Option<MemorySource>) {
                 say(&app, Status::Thinking, &mut last_status);
                 let prompt = passes::brief_prompt(brief.as_deref(), &unseen, &focus_now(&app));
                 match generate(&app, &prompt, 0.3).await {
+                    // Refused rather than shown. A pane displaying a model's
+                    // deliberation is worse than one saying it got nothing:
+                    // the deliberation looks like a brief at a glance, and it
+                    // is read mid-meeting.
+                    Ok(text) if passes::looks_like_deliberation(&text) => {
+                        eprintln!("[assist] discarded a brief that was deliberation, not a brief");
+                        say(
+                            &app,
+                            Status::Failed {
+                                reason: "the model talked itself in circles instead of \
+                                         answering — try a shorter focus"
+                                    .to_string(),
+                            },
+                            &mut last_status,
+                        );
+                    }
                     Ok(text) => {
                         say(&app, Status::Ready, &mut last_status);
                         brief = Some(text.clone());

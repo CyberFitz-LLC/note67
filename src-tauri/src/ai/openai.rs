@@ -27,6 +27,15 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     temperature: f32,
     stream: bool,
+    /// A ceiling on the reply.
+    ///
+    /// Absent, a reasoning model can deliberate without limit. One did: asked
+    /// for a 200-word meeting brief, it spent thousands of tokens arguing with
+    /// itself about an ambiguous phrase, repeated the same sentence hundreds of
+    /// times, and never produced an answer at all — and a live pane showed the
+    /// deliberation, because that was the only text that came back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +81,9 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    /// `"length"` when the reply was cut off by the token ceiling.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -329,7 +341,14 @@ impl OpenAiCompatClient {
             .collect())
     }
 
-    fn chat_request(&self, model: &str, prompt: &str, temperature: f32, stream: bool) -> ChatRequest {
+    fn chat_request(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: f32,
+        stream: bool,
+        max_tokens: Option<u32>,
+    ) -> ChatRequest {
         ChatRequest {
             model: model.to_string(),
             // The prompt library is written as single self-contained
@@ -340,6 +359,7 @@ impl OpenAiCompatClient {
             }],
             temperature,
             stream,
+            max_tokens,
         }
     }
 
@@ -376,6 +396,7 @@ impl OpenAiCompatClient {
             }],
             temperature,
             stream: false,
+            max_tokens: Some(1_500),
         };
 
         let url = format!("{}/chat/completions", self.v1_root);
@@ -413,12 +434,13 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         temperature: f32,
+        max_tokens: Option<u32>,
     ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.v1_root);
 
         let response = self
             .authorized(self.client.post(&url))
-            .json(&self.chat_request(model, prompt, temperature, false))
+            .json(&self.chat_request(model, prompt, temperature, false, max_tokens))
             .send()
             .await
             .map_err(|e| self.connect_error(e))?;
@@ -434,18 +456,35 @@ impl OpenAiCompatClient {
 
         // An empty reply is a failure, not a result. Returning "" here is how a
         // model that said nothing became a summary block with nothing in it.
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.text())
-            .ok_or_else(|| {
-                LlmError::InvalidResponse(format!(
-                    "{model} returned an empty reply. If it is served through vLLM with \
-                     --reasoning-parser, check that the parser matches the model: a mismatched \
-                     one routes the whole answer into `reasoning` and leaves `content` null."
-                ))
-            })
+        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+            LlmError::InvalidResponse(format!("{model} returned no choices at all"))
+        })?;
+
+        // A reply cut off by the ceiling, with no content, is deliberation that
+        // never reached an answer. The reasoning fallback exists for a server
+        // that puts the *answer* there, not for showing a model arguing with
+        // itself — which is what a live pane displayed when this was missing.
+        let truncated = choice.finish_reason.as_deref() == Some("length");
+        let had_content = choice
+            .message
+            .content
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty());
+
+        if truncated && !had_content {
+            return Err(LlmError::InvalidResponse(format!(
+                "{model} ran out of room before it produced an answer — it was still thinking. \
+                 A shorter prompt or a higher token limit would help."
+            )));
+        }
+
+        choice.message.text().ok_or_else(|| {
+            LlmError::InvalidResponse(format!(
+                "{model} returned an empty reply. If it is served through vLLM with \
+                 --reasoning-parser, check that the parser matches the model: a mismatched \
+                 one routes the whole answer into `reasoning` and leaves `content` null."
+            ))
+        })
     }
 
     pub async fn generate_stream(
@@ -453,13 +492,14 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         temperature: f32,
+        max_tokens: Option<u32>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.v1_root);
 
         let response = self
             .authorized(self.client.post(&url))
-            .json(&self.chat_request(model, prompt, temperature, true))
+            .json(&self.chat_request(model, prompt, temperature, true, max_tokens))
             .send()
             .await
             .map_err(|e| self.connect_error(e))?;
