@@ -32,6 +32,8 @@ import {
 } from "../hooks/useTranscriptionBackend";
 import { ScreenshotStrip } from "./ScreenshotStrip";
 import { TrackLevelMeters } from "./TrackLevelMeters";
+import { transcriptToText } from "../utils/transcriptText";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { AssistPanes } from "./AssistPanes";
 import { useAssist } from "../hooks/useAssist";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
@@ -102,6 +104,7 @@ export function NoteView({
     useRecordingStore((s) => s.isRecording) && isThisNoteRecording;
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
   const trackLevels = useRecordingStore((s) => s.trackLevels);
+  const [copied, setCopied] = useState(false);
   const assist = useAssist(note.id);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
 
@@ -979,6 +982,41 @@ export function NoteView({
 
           {activeTab === "transcript" && (
             <>
+              {transcript.length > 0 && (
+                <div className="flex justify-end mb-2">
+                  <button
+                    type="button"
+                    title="Copy the whole transcript, with speakers and timestamps"
+                    onClick={async () => {
+                      await writeText(transcriptToText(transcript));
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg"
+                    style={{
+                      backgroundColor: "var(--color-bg-subtle)",
+                      border: "1px solid var(--color-border)",
+                      color: copied ? "#22c55e" : "var(--color-text-secondary)",
+                    }}
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                      />
+                    </svg>
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              )}
               {(isThisNoteRecording || assist.running) && (
                 <div
                   className="mb-4 p-3 rounded-lg"
