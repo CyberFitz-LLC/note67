@@ -107,6 +107,20 @@ impl Utterance {
     }
 }
 
+/// What to subtract from a track's arrival time before placing an utterance.
+///
+/// The microphone path waits `ECHO_GRACE` before judging whether an utterance
+/// was the room's speakers, so its finals arrive that much later than the
+/// system track's for no reason to do with when they were said. Removing it
+/// keeps the two tracks aligned with each other, which is what ordering
+/// depends on.
+fn latency_allowance(source: AudioSource) -> f64 {
+    match source {
+        AudioSource::Mic => ECHO_GRACE.as_secs_f64(),
+        AudioSource::System => 0.0,
+    }
+}
+
 /// Root-mean-square of a frame.
 fn frame_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
@@ -522,9 +536,12 @@ fn spawn_reader(
                     // Partials are redrawn in place and never stored: they are
                     // the recogniser's current guess, and half of them are
                     // wrong by design.
+                    // On the same clock as the final that will replace it, so a
+                    // draft does not jump position the moment it settles.
+                    let at = started.elapsed().as_secs_f64();
                     let segment = TranscriptionSegment {
-                        start_time,
-                        end_time,
+                        start_time: (at - (end_time - start_time).max(0.0)).max(0.0),
+                        end_time: at,
                         text,
                         speaker: Some(speaker_for(source).to_string()),
                     };
@@ -585,9 +602,32 @@ fn spawn_reader(
                         }
                     }
 
+                    // Placed on one shared clock, not on the track's own.
+                    //
+                    // Each track's clock counts what its socket has been sent,
+                    // and Windows loopback delivers nothing while no
+                    // application is playing audio — so the system track's
+                    // offset falls behind the microphone's by however much
+                    // silence has passed. Over half an hour of ordinary
+                    // back-and-forth that drift is minutes, and since the
+                    // transcript is ordered by timestamp the far end's lines
+                    // get stamped further and further into the past and pile up
+                    // above, while the microphone's stay near the bottom. That
+                    // happened in a real call, and it gets worse the longer the
+                    // recording runs.
+                    //
+                    // What both clocks measure reliably is *duration*, so an
+                    // utterance is placed by when it came back and extended
+                    // backwards by how long it ran. Both tracks then share one
+                    // frame and cannot drift apart. It is late by whatever the
+                    // recogniser took, equally for both, which keeps their
+                    // order right — the thing that was actually broken.
+                    let placed_end = started.elapsed().as_secs_f64() - latency_allowance(source);
+                    let placed_start = (placed_end - duration).max(0.0);
+
                     let segment = TranscriptionSegment {
-                        start_time,
-                        end_time,
+                        start_time: placed_start,
+                        end_time: placed_end.max(placed_start),
                         text: text.clone(),
                         speaker: Some(speaker_for(source).to_string()),
                     };
@@ -905,6 +945,58 @@ mod tests {
         assert_eq!(frame_rms(&[]), 0.0);
         assert_eq!(frame_rms(&[0.0; 100]), 0.0);
         assert!(frame_rms(&[0.5; 100]) > 0.4);
+    }
+
+    #[test]
+    fn the_two_tracks_are_placed_on_one_clock() {
+        // The failure this fixes, from a real call: each track was timestamped
+        // by what its own socket had been sent, and Windows loopback sends
+        // nothing while nothing is playing. Half an hour in, the far end's
+        // lines were stamped minutes into the past and piled up above the
+        // microphone's, which sat at the bottom.
+        //
+        // Placing by arrival less duration puts both on the same frame. The
+        // only per-track adjustment is the microphone's echo grace, which is a
+        // delay this code adds rather than anything about when words were said.
+        assert_eq!(latency_allowance(AudioSource::System), 0.0);
+        assert_eq!(
+            latency_allowance(AudioSource::Mic),
+            ECHO_GRACE.as_secs_f64(),
+            "the mic's own hold-back must be removed, or it reads as later speech"
+        );
+    }
+
+    #[test]
+    fn silence_on_one_track_cannot_move_it_relative_to_the_other() {
+        // The property that matters. Both tracks are placed from the same
+        // `Instant`, so however long one has been quiet its next utterance
+        // lands where it actually arrived — the drift has nowhere to
+        // accumulate.
+        let started = Instant::now();
+        let after_quiet = started + Duration::from_secs(1_800);
+
+        let system_at = after_quiet.duration_since(started).as_secs_f64()
+            - latency_allowance(AudioSource::System);
+        let mic_at = after_quiet.duration_since(started).as_secs_f64()
+            - latency_allowance(AudioSource::Mic);
+
+        assert!(
+            (system_at - mic_at).abs() <= ECHO_GRACE.as_secs_f64() + 0.001,
+            "half an hour of silence moved the tracks {} seconds apart",
+            (system_at - mic_at).abs()
+        );
+    }
+
+    #[test]
+    fn an_utterance_never_starts_before_the_recording_did() {
+        // An utterance that ran longer than the session has — possible when a
+        // recogniser reports a duration from before this session began —
+        // would otherwise be placed at a negative time and sort above
+        // everything for ever.
+        let placed_end: f64 = 2.0;
+        let duration: f64 = 30.0;
+        let placed_start = (placed_end - duration).max(0.0);
+        assert_eq!(placed_start, 0.0);
     }
 
 }
