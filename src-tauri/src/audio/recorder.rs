@@ -6,7 +6,15 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
+use std::path::Path;
 use hound::{WavSpec, WavWriter};
+
+/// The writer the capture callback writes through.
+///
+/// Shared so a rotation can swap it without stopping the stream. The inner
+/// `Option` is what makes the swap a pointer move rather than a copy.
+pub type SharedWriter =
+    Arc<std::sync::Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioError;
@@ -71,6 +79,11 @@ pub struct RecordingState {
     /// the thread owns the writer, and hound only writes the header (and hence
     /// the sample count) on finalize.
     pub file_finalized: AtomicBool,
+    /// The writer the running capture is using, so a segment can be rotated
+    /// without stopping the stream. `None` when nothing is recording.
+    pub active_writer: std::sync::Mutex<Option<SharedWriter>>,
+    /// The spec that writer was opened with, needed to open its successor.
+    pub active_spec: std::sync::Mutex<Option<WavSpec>>,
 }
 
 impl RecordingState {
@@ -93,6 +106,8 @@ impl RecordingState {
             current_segment_db_id: AtomicI64::new(0),
             // Nothing has been recorded yet, so there is nothing to wait for.
             file_finalized: AtomicBool::new(true),
+            active_writer: std::sync::Mutex::new(None),
+            active_spec: std::sync::Mutex::new(None),
         }
     }
 
@@ -331,7 +346,15 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
     };
 
     let writer = WavWriter::create(&output_path, spec)?;
-    let writer = Arc::new(std::sync::Mutex::new(Some(writer)));
+    let writer: SharedWriter = Arc::new(std::sync::Mutex::new(Some(writer)));
+
+    // Published so a rotation can reach it. Cleared when the recording ends.
+    if let Ok(mut slot) = state.active_writer.lock() {
+        *slot = Some(writer.clone());
+    }
+    if let Ok(mut slot) = state.active_spec.lock() {
+        *slot = Some(spec);
+    }
 
     let state_for_callback = state.clone();
     let writer_clone = writer.clone();
@@ -392,9 +415,62 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
     {
         let _ = w.finalize();
     }
+    if let Ok(mut slot) = state.active_writer.lock() {
+        *slot = None;
+    }
     state.file_finalized.store(true, Ordering::SeqCst);
 
     Ok(())
+}
+
+/// Start writing to a new file without stopping the recording.
+///
+/// Returns the file just closed.
+///
+/// The order matters and is the whole point. The new writer is created first,
+/// outside the lock; the swap under the lock is a pointer move; and the old
+/// writer is finalised afterwards, off the audio thread. Finalising under the
+/// lock would block the capture callback for as long as it took to rewrite a
+/// header — on the audio thread, mid-recording, which is how a rotation
+/// designed to protect a recording would damage one.
+pub fn rotate_writer(state: &RecordingState, next_path: &Path) -> Result<PathBuf, AudioError> {
+    let spec = state
+        .active_spec
+        .lock()
+        .map_err(|_| AudioError::LockError)?
+        .ok_or_else(|| AudioError::IoError(std::io::Error::other("nothing is recording")))?;
+
+    let shared = state
+        .active_writer
+        .lock()
+        .map_err(|_| AudioError::LockError)?
+        .clone()
+        .ok_or_else(|| AudioError::IoError(std::io::Error::other("nothing is recording")))?;
+
+    let previous = {
+        let path = state.output_path.lock().map_err(|_| AudioError::LockError)?;
+        path.clone()
+            .ok_or_else(|| AudioError::IoError(std::io::Error::other("no current file")))?
+    };
+
+    // Opened before the swap, so the lock is held only for the exchange.
+    let fresh = WavWriter::create(next_path, spec)?;
+
+    let retired = {
+        let mut guard = shared.lock().map_err(|_| AudioError::LockError)?;
+        guard.replace(fresh)
+    };
+
+    // The capture callback is already writing to the new file by here.
+    if let Some(writer) = retired {
+        writer.finalize()?;
+    }
+
+    if let Ok(mut path) = state.output_path.lock() {
+        *path = Some(next_path.to_path_buf());
+    }
+
+    Ok(previous)
 }
 
 /// How many samples either capture buffer may hold.

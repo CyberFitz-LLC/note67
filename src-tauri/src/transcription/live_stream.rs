@@ -28,10 +28,41 @@ use crate::transcription::live::{
     MIC_TARGET_PEAK,
 };
 use crate::transcription::streaming::{
-    self, Recognised, SendOutcome, StreamingSession, CHUNK_SAMPLES, SAMPLE_RATE,
+    self, Recognised, SendOutcome, StreamingSession, CHUNK_MS, CHUNK_SAMPLES, SAMPLE_RATE,
 };
 use crate::transcription::transcriber::TranscriptionSegment;
 use crate::transcription::{is_echo_of_system, TranscriptionError};
+
+/// How far behind the recogniser may fall before audio is skipped.
+///
+/// A live transcript that is an hour behind is not a live transcript. Once the
+/// backlog passes this, sending more only makes it worse — the recogniser
+/// cannot catch up while still being fed at real time, and the deficit
+/// accumulates for the length of the recording. Four hours into a workshop
+/// that was an hour of lag.
+///
+/// Above the longest utterance, so ordinary speech never trips it.
+const LAG_LIMIT_SECS: f64 = 45.0;
+
+/// Feeding resumes once the backlog is back under this.
+///
+/// Hysteresis, not a single threshold: resuming the moment it dips below the
+/// limit would leave it oscillating on the edge, skipping a little audio
+/// continuously rather than a lot once and then recovering.
+const LAG_RESUME_SECS: f64 = 10.0;
+
+/// Whether a track should be fed right now.
+///
+/// `skipping` is the current state, and this returns the next one — separated
+/// out because two thresholds and a remembered state is exactly the kind of
+/// thing that reads as obvious and is wrong.
+pub fn should_skip(backlog_secs: f64, skipping: bool) -> bool {
+    if skipping {
+        backlog_secs > LAG_RESUME_SECS
+    } else {
+        backlog_secs > LAG_LIMIT_SECS
+    }
+}
 
 /// How long a track may be quiet before its utterance is closed.
 ///
@@ -413,6 +444,10 @@ async fn feed_loop(
     let mut warned_behind = false;
     let mut mic_utterance = Utterance::new();
     let mut system_utterance = Utterance::new();
+    let mut mic_skipping = false;
+    let mut system_skipping = false;
+    let mut skipped_secs = 0.0_f64;
+    let mut warned_skipping = false;
 
     loop {
         ticker.tick().await;
@@ -440,7 +475,16 @@ async fn feed_loop(
             let ch = recording_state.channels.load(Ordering::SeqCst) as usize;
             if rate > 0 && ch > 0 {
                 let mono = to_mono_16k(mic_samples, rate, ch);
+                mic_skipping = should_skip(mic_session.backlog_seconds(), mic_skipping);
                 for mut frame in mic_frames.push(&mono) {
+                    if mic_skipping {
+                        // Dropped rather than queued. The words are still in the
+                        // recording and can be transcribed from it later; what
+                        // cannot be recovered is a live transcript that is
+                        // current, and that is the only thing this path is for.
+                        skipped_secs += CHUNK_MS as f64 / 1000.0;
+                        continue;
+                    }
                     gain.apply(&mut frame);
                     let close = mic_utterance.observe(frame_rms(&frame), Instant::now());
                     match mic_session.send(streaming::to_s16le(&frame)) {
@@ -459,7 +503,12 @@ async fn feed_loop(
         // whatever the far end sent, at the level they sent it.
         let system_samples = take_system_audio_samples();
         if !system_samples.is_empty() {
+            system_skipping = should_skip(system_session.backlog_seconds(), system_skipping);
             for frame in system_frames.push(&system_samples) {
+                if system_skipping {
+                    skipped_secs += CHUNK_MS as f64 / 1000.0;
+                    continue;
+                }
                 let close = system_utterance.observe(frame_rms(&frame), Instant::now());
                 match system_session.send(streaming::to_s16le(&frame)) {
                     SendOutcome::Sent => {}
@@ -470,6 +519,19 @@ async fn feed_loop(
                     let _ = system_session.finalize();
                 }
             }
+        }
+
+        // Skipping is worth saying plainly and once: the transcript will have a
+        // hole, and the person reading it should know that rather than discover
+        // it later.
+        if skipped_secs > 0.0 && !warned_skipping {
+            warned_skipping = true;
+            println!("[stream] skipping audio to catch up; the recogniser was too far behind");
+            let _ = app_for_warning.emit(
+                "transcription-falling-behind",
+                "The recogniser fell too far behind, so some audio was skipped to catch the \
+                 transcript up. The recording is complete and can be transcribed again later.",
+            );
         }
 
         // Say so once, as soon as it starts happening, rather than at the end
@@ -490,6 +552,9 @@ async fn feed_loop(
 
     if dropped > 0 {
         println!("[stream] {dropped} frame(s) were dropped because the recogniser was behind");
+    }
+    if skipped_secs > 0.0 {
+        println!("[stream] {skipped_secs:.0}s of audio was skipped to keep the transcript current");
     }
 
     // Push the tails, then drop the sessions — which closes the sockets, and
@@ -997,6 +1062,41 @@ mod tests {
         let duration: f64 = 30.0;
         let placed_start = (placed_end - duration).max(0.0);
         assert_eq!(placed_start, 0.0);
+    }
+
+    #[test]
+    fn ordinary_speech_never_trips_the_lag_limit() {
+        // An utterance can run twenty seconds before it is closed, so the
+        // backlog sits in that range during normal talking. Skipping there
+        // would throw away speech for no reason.
+        assert!(!should_skip(3.0, false));
+        assert!(!should_skip(21.0, false));
+        assert!(!should_skip(44.0, false));
+    }
+
+    #[test]
+    fn a_recogniser_falling_behind_starts_skipping() {
+        // The real failure: four hours into a workshop the transcript was an
+        // hour behind, because audio kept going at real time into a recogniser
+        // that could not keep up.
+        assert!(should_skip(46.0, false));
+        assert!(should_skip(3_600.0, false));
+    }
+
+    #[test]
+    fn skipping_continues_until_it_has_actually_caught_up() {
+        // Hysteresis. Resuming the moment it dips under the limit leaves it
+        // oscillating on the edge, skipping a little continuously instead of a
+        // lot once and then recovering.
+        assert!(should_skip(40.0, true), "still behind, keep skipping");
+        assert!(should_skip(11.0, true));
+        assert!(!should_skip(9.0, true), "caught up, resume");
+    }
+
+    #[test]
+    fn the_two_thresholds_leave_room_between_them() {
+        // If they met, a single frame either side would flip the state.
+        assert!(LAG_RESUME_SECS < LAG_LIMIT_SECS / 2.0);
     }
 
 }

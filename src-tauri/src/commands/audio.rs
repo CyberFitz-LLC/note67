@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,26 @@ pub fn get_recording_status(state: State<AudioState>) -> bool {
 #[tauri::command]
 pub fn get_audio_level(state: State<AudioState>) -> f32 {
     f32::from_bits(state.recording.audio_level.load(Ordering::SeqCst))
+}
+
+/// How long a recording runs before it rolls to a new file, in minutes.
+///
+/// Off by default. Rotation touches the path that writes irreplaceable audio,
+/// and it should be tried on a short recording before an eight-hour one rather
+/// than adopted in the middle of one.
+pub const CHUNK_MINUTES_KEY: &str = "recording_chunk_minutes";
+
+/// Read the rotation interval, or `None` when it is switched off.
+///
+/// A floor of five minutes and a ceiling of two hours: below the floor the
+/// rotations cost more than they save, and above the ceiling the chunk stops
+/// bounding anything that matters.
+pub fn chunk_interval(setting: Option<&str>) -> Option<Duration> {
+    let minutes: u64 = setting?.trim().parse().ok()?;
+    if minutes == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(minutes.clamp(5, 120) * 60))
 }
 
 /// What each track is hearing, as (rms, held peak) per track.
@@ -1634,4 +1655,33 @@ pub fn resume_system_only_recording(
         system_path: Some(system_path.to_string_lossy().to_string()),
         playback_path: None,
     })
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+
+    #[test]
+    fn rotation_is_off_unless_it_was_turned_on() {
+        // It touches the path that writes irreplaceable audio. Off is the only
+        // safe default, and an unset or unreadable value is off.
+        assert_eq!(chunk_interval(None), None);
+        assert_eq!(chunk_interval(Some("")), None);
+        assert_eq!(chunk_interval(Some("0")), None);
+        assert_eq!(chunk_interval(Some("soon")), None);
+    }
+
+    #[test]
+    fn a_sensible_interval_is_taken_as_given() {
+        assert_eq!(chunk_interval(Some("20")), Some(Duration::from_secs(1_200)));
+    }
+
+    #[test]
+    fn absurd_intervals_are_brought_into_range() {
+        // A one-minute chunk rotates more than it records; a day-long one
+        // bounds nothing. Clamped rather than refused, because a number in the
+        // box should do something predictable.
+        assert_eq!(chunk_interval(Some("1")), Some(Duration::from_secs(300)));
+        assert_eq!(chunk_interval(Some("6000")), Some(Duration::from_secs(7_200)));
+    }
 }

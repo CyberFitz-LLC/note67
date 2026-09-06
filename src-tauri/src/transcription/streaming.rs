@@ -246,6 +246,16 @@ pub enum Recognised {
 pub struct StreamingSession {
     outgoing: mpsc::Sender<OutFrame>,
     alive: Arc<AtomicBool>,
+    /// Audio handed to the socket.
+    sent: Arc<std::sync::atomic::AtomicUsize>,
+    /// Audio the recogniser has actually finished with.
+    ///
+    /// The gap between the two is the backlog, and it is the only view this
+    /// client gets of how far behind the far side is. Nothing acknowledges
+    /// audio, so without this the socket accepts everything and a recogniser
+    /// running below real time falls behind for ever — an hour behind after
+    /// four, in a real workshop.
+    finalized: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// What goes down the socket.
@@ -294,6 +304,16 @@ impl StreamingSession {
     /// falls minutes behind after half an hour.
     pub fn finalize(&self) -> SendOutcome {
         self.enqueue(OutFrame::Finalize)
+    }
+
+    /// How much audio has been sent that the recogniser has not finished with.
+    ///
+    /// Includes the utterance currently open, so this sits at a few seconds
+    /// during normal speech and only grows when the far side cannot keep up.
+    pub fn backlog_seconds(&self) -> f64 {
+        let sent = self.sent.load(Ordering::SeqCst);
+        let done = self.finalized.load(Ordering::SeqCst);
+        sent.saturating_sub(done) as f64 / SAMPLE_RATE as f64
     }
 
     fn enqueue(&self, frame: OutFrame) -> SendOutcome {
@@ -351,6 +371,9 @@ pub async fn connect(
     // are gated for silence independently, so a shared counter would timestamp
     // every segment on whichever track happened to be busier.
     let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Advanced by the reader as finals come back, so the feed loop can see how
+    // far behind the recogniser is.
+    let finalized = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Writer: audio out.
     let writer_alive = Arc::clone(&alive);
@@ -412,6 +435,7 @@ pub async fn connect(
     // Reader: recognitions in, with this track's own clock.
     let reader_alive = Arc::clone(&alive);
     let reader_sent = Arc::clone(&sent);
+    let reader_finalized = Arc::clone(&finalized);
     tokio::spawn(async move {
         let mut clock = TrackClock::default();
         let mut last_final = TrackClock::default();
@@ -444,6 +468,7 @@ pub async fn connect(
                         }
                     }
                     last_final = clock;
+                    reader_finalized.store(clock.samples_sent, Ordering::SeqCst);
                 }
                 ServerEvent::Transcript { text, .. } => {
                     let (start_time, end_time) = clock.span_since(&last_final);
@@ -479,6 +504,8 @@ pub async fn connect(
         StreamingSession {
             outgoing: audio_tx,
             alive,
+            sent,
+            finalized,
         },
         out_rx,
     ))
