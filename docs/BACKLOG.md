@@ -344,6 +344,28 @@ likelier revival is local diarization over the existing transcript
 (`sherpa-onnx` has Rust bindings and models measured in tens of megabytes), so
 no appliance is involved at all.
 
+## Transcribing a call can cost the call
+
+Twice now a meeting has had to be moved to another machine mid-call because
+Note67 was transcribing it. Both times the outgoing audio was the first thing
+to fail, and both times it happened around half an hour in — the first from a
+capture buffer that grew without bound (fixed), the second from sustained
+inference on the GPU the meeting client needs to encode a screen share.
+
+The cadence now backs off when passes are slow, which bounds the duty cycle
+rather than the symptom. **It does not make the job free**, and the honest
+position is that a laptop presenting a screen share may not have room to
+transcribe locally at the same time. What would address it properly:
+
+- **A pause control.** There is no way to stop transcribing without stopping
+  recording, and "I am about to present" is exactly when someone would want
+  one. This is the smallest useful thing left undone.
+- **Offloading** — the streaming backend exists and moves the work off the
+  machine entirely, at the cost of depending on an appliance.
+- **Not transcribing live at all.** The recording is complete either way and
+  can be transcribed afterwards, which for a presenter may simply be the right
+  answer.
+
 ## Note67 app
 
 - **A capture buffer with no consumer used to grow for the length of the

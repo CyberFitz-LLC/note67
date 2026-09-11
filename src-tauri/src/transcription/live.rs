@@ -127,6 +127,44 @@ pub struct TranscriptionUpdateEvent {
     pub audio_source: AudioSource,
 }
 
+/// The cadence local transcription aims for.
+pub const BASE_INTERVAL: Duration = Duration::from_secs(3);
+
+/// The slowest it will go when the machine cannot keep up.
+pub const MAX_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The share of each cycle inference may occupy.
+///
+/// Whisper runs on the same GPU the meeting client uses to encode video, and a
+/// screen share is the heaviest thing that client ever does. At a fixed
+/// three-second cadence, two tracks whose passes take more than about a second
+/// and a half each keep that GPU busy continuously — and the first thing to
+/// suffer is the outgoing audio of the call being transcribed. That happened,
+/// twice, and the second time the meeting had to be moved to another machine.
+///
+/// Half leaves as much of the GPU to the call as it takes for itself.
+const TARGET_DUTY: f64 = 0.5;
+
+/// Choose the next interval from how long the last pass took.
+///
+/// Self-regulating rather than configured: the right cadence depends on the
+/// machine, the model and what else is running, none of which this can know in
+/// advance — and all of which change when someone starts presenting.
+pub fn next_interval(pass_took: Duration, current: Duration) -> Duration {
+    let needed = Duration::from_secs_f64(pass_took.as_secs_f64() / TARGET_DUTY);
+
+    if needed > current {
+        // Back off immediately. Being slow to react here is what costs the call
+        // its audio.
+        needed.min(MAX_INTERVAL)
+    } else {
+        // Recover gently, so one quick pass does not undo a backoff that the
+        // machine still needs.
+        let eased = current.mul_f64(0.8);
+        eased.max(needed).max(BASE_INTERVAL)
+    }
+}
+
 /// Start live transcription
 /// Runs every 3 seconds, transcribes accumulated audio in parallel, saves to DB, emits events
 pub async fn start_live_transcription(
@@ -157,7 +195,8 @@ pub async fn start_live_transcription(
     // Spawn the live transcription task
     tokio::spawn(async move {
         let lang = language_clone;
-        let mut ticker = interval(Duration::from_secs(3));
+        let mut cadence = BASE_INTERVAL;
+        let mut ticker = interval(cadence);
 
         loop {
             ticker.tick().await;
@@ -308,7 +347,29 @@ pub async fn start_live_transcription(
             };
 
             // Run both transcriptions in parallel
+            let pass_started = std::time::Instant::now();
             let (mic_result, system_result) = tokio::join!(mic_future, system_future);
+
+            // Give the machine back at least as much as this took. On a laptop
+            // sharing its GPU with a screen share, holding a fixed cadence is
+            // how the call loses its audio.
+            let took = pass_started.elapsed();
+            let next = next_interval(took, cadence);
+            if next != cadence {
+                if next > cadence {
+                    println!(
+                        "[live] transcription is taking {:.1}s; easing to every {:.0}s to leave \
+                         the machine room",
+                        took.as_secs_f64(),
+                        next.as_secs_f64()
+                    );
+                }
+                cadence = next;
+                ticker = interval(cadence);
+                // The first tick of a fresh interval fires immediately, which
+                // would undo the backoff it was just given.
+                ticker.tick().await;
+            }
 
             // Collect all segments for batch DB insert
             let mut db_segments: Vec<NewTranscriptSegment> = Vec::new();
@@ -641,7 +702,11 @@ pub(crate) fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32
 
 #[cfg(test)]
 mod tests {
-    use super::{has_voice_activity, normalize_peak, MIC_MAX_GAIN, MIC_TARGET_PEAK};
+    use super::{
+        has_voice_activity, next_interval, normalize_peak, BASE_INTERVAL, MAX_INTERVAL,
+        MIC_MAX_GAIN, MIC_TARGET_PEAK,
+    };
+    use std::time::Duration;
 
     /// Build a chunk with an explicit peak and RMS.
     ///
@@ -736,4 +801,58 @@ mod tests {
         normalize_peak(&mut s, MIC_TARGET_PEAK, MIC_MAX_GAIN);
         assert_eq!(s, before);
     }
+    #[test]
+    fn a_machine_keeping_up_stays_at_the_base_cadence() {
+        // A fast pass should not make transcription more frequent than it was
+        // designed to be — three seconds of audio per pass is the shape whisper
+        // is being given.
+        let next = next_interval(Duration::from_millis(400), BASE_INTERVAL);
+        assert_eq!(next, BASE_INTERVAL);
+    }
+
+    #[test]
+    fn a_slow_pass_immediately_makes_room() {
+        // The failure this exists for: inference taking most of every cycle
+        // keeps the GPU busy continuously, and the first casualty is the
+        // outgoing audio of the call being transcribed. A meeting had to be
+        // moved to another machine over this — twice.
+        let next = next_interval(Duration::from_secs(4), BASE_INTERVAL);
+        assert!(
+            next >= Duration::from_secs(8),
+            "a four-second pass should leave at least as long again free, got {next:?}"
+        );
+    }
+
+    #[test]
+    fn it_never_backs_off_past_usefulness() {
+        // A transcript updating once a minute is not a live transcript. Past
+        // this the honest answer is that the machine cannot do this job while
+        // doing the call.
+        let next = next_interval(Duration::from_secs(60), BASE_INTERVAL);
+        assert_eq!(next, MAX_INTERVAL);
+    }
+
+    #[test]
+    fn recovery_is_gradual_rather_than_immediate() {
+        // One quick pass does not prove the machine is free — a presenter
+        // pausing between slides would otherwise snap the cadence back and
+        // choke the call again the moment they resumed.
+        let backed_off = Duration::from_secs(12);
+        let next = next_interval(Duration::from_millis(200), backed_off);
+        assert!(next < backed_off, "it should recover");
+        assert!(
+            next > BASE_INTERVAL,
+            "but not all the way in one pass, got {next:?}"
+        );
+    }
+
+    #[test]
+    fn recovery_reaches_the_base_cadence_eventually() {
+        let mut cadence = MAX_INTERVAL;
+        for _ in 0..20 {
+            cadence = next_interval(Duration::from_millis(200), cadence);
+        }
+        assert_eq!(cadence, BASE_INTERVAL);
+    }
+
 }
