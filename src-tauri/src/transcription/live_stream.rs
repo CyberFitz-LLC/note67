@@ -469,6 +469,17 @@ async fn feed_loop(
             break;
         }
 
+        // Paused: the recording carries on, the recogniser hears nothing.
+        //
+        // Drained and discarded so that resuming does not send a backlog of
+        // stale audio the recogniser would transcribe as if it had just been
+        // said.
+        if live_state.is_paused.load(Ordering::SeqCst) {
+            let _ = recording_state.take_audio_buffer();
+            let _ = take_system_audio_samples();
+            continue;
+        }
+
         let mic_samples = recording_state.take_audio_buffer();
         if !mic_samples.is_empty() {
             let rate = recording_state.sample_rate.load(Ordering::SeqCst);

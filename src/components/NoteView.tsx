@@ -105,6 +105,10 @@ export function NoteView({
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
   const trackLevels = useRecordingStore((s) => s.trackLevels);
   const [copied, setCopied] = useState(false);
+  // Transcribing is suspended while the recording continues. The moment someone
+  // most wants this — about to share a screen, machine already struggling — is
+  // exactly when they least want to stop recording.
+  const [transcriptionPaused, setTranscriptionPaused] = useState(false);
   const assist = useAssist(note.id);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
 
@@ -889,6 +893,34 @@ export function NoteView({
                 ? "Listening (system audio only)"
                 : "Recording"}
             </span>
+            {isThisNoteRecording && (
+              <button
+                type="button"
+                title={
+                  transcriptionPaused
+                    ? "Resume transcribing. The recording never stopped."
+                    : "Stop transcribing but keep recording — useful before sharing your screen"
+                }
+                onClick={async () => {
+                  const next = !transcriptionPaused;
+                  await transcriptionApi.setPaused(next);
+                  setTranscriptionPaused(next);
+                }}
+                className="text-xs px-2 py-0.5 rounded-lg flex-shrink-0"
+                style={{
+                  backgroundColor: transcriptionPaused
+                    ? "var(--color-accent, #3b82f6)"
+                    : "var(--color-bg-subtle)",
+                  color: transcriptionPaused ? "white" : "var(--color-text-secondary)",
+                  border: transcriptionPaused
+                    ? "none"
+                    : "1px solid var(--color-border)",
+                }}
+              >
+                {transcriptionPaused ? "Transcribing paused" : "Pause transcribing"}
+              </button>
+            )}
+
             <TrackLevelMeters
               micRms={trackLevels.mic_rms}
               micPeak={trackLevels.mic_peak}

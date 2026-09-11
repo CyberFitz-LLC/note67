@@ -357,9 +357,11 @@ rather than the symptom. **It does not make the job free**, and the honest
 position is that a laptop presenting a screen share may not have room to
 transcribe locally at the same time. What would address it properly:
 
-- **A pause control.** There is no way to stop transcribing without stopping
-  recording, and "I am about to present" is exactly when someone would want
-  one. This is the smallest useful thing left undone.
+- ~~**A pause control.**~~ Added 2026-09-11: a button beside the recording
+  indicator suspends transcribing while the recording continues, on both the
+  local and streaming paths. Buffers are drained and discarded while paused, so
+  resuming does not transcribe a backlog of stale audio as though it had just
+  been said.
 - **Offloading** — the streaming backend exists and moves the work off the
   machine entirely, at the cost of depending on an appliance.
 - **Not transcribing live at all.** The recording is complete either way and

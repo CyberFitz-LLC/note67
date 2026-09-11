@@ -64,6 +64,14 @@ pub(crate) fn normalize_peak(samples: &mut [f32], target_peak: f32, max_gain: f3
 /// Live transcription state
 pub struct LiveTranscriptionState {
     pub is_running: AtomicBool,
+    /// Transcribing is suspended while the recording continues.
+    ///
+    /// Separate from `is_running` on purpose. Stopping transcription has always
+    /// meant stopping the recording, and the moment someone most wants to stop
+    /// transcribing — about to share a screen, with the machine already
+    /// struggling — is precisely the moment they least want to stop recording.
+    /// Two calls were lost to not having this.
+    pub is_paused: AtomicBool,
     /// Offset in seconds for mic segment timestamps
     pub mic_time_offset: Mutex<f64>,
     /// Offset in seconds for system audio segment timestamps
@@ -78,6 +86,7 @@ impl LiveTranscriptionState {
     pub fn new() -> Self {
         Self {
             is_running: AtomicBool::new(false),
+            is_paused: AtomicBool::new(false),
             mic_time_offset: Mutex::new(0.0),
             system_time_offset: Mutex::new(0.0),
             segments: Mutex::new(Vec::new()),
@@ -180,6 +189,9 @@ pub async fn start_live_transcription(
     }
 
     // Reset state
+    // A pause from a previous recording must not carry into this one.
+    live_state.is_paused.store(false, Ordering::SeqCst);
+
     *live_state.mic_time_offset.lock().await = 0.0;
     *live_state.system_time_offset.lock().await = 0.0;
     live_state.segments.lock().await.clear();
@@ -211,6 +223,17 @@ pub async fn start_live_transcription(
             // is owned by the mic recording thread.
             if recording_state_clone.get_phase() != RecordingPhase::Recording {
                 break;
+            }
+
+            // Paused: drain and discard rather than transcribe.
+            //
+            // Drained, not left alone, so the buffers do not sit at their cap
+            // holding minutes-old audio that would be transcribed as current
+            // the moment someone resumed.
+            if live_state_clone.is_paused.load(Ordering::SeqCst) {
+                let _ = recording_state_clone.take_audio_buffer();
+                let _ = take_system_audio_samples();
+                continue;
             }
 
             // Get audio buffers - both mic and system audio

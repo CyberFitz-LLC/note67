@@ -485,6 +485,32 @@ pub async fn start_live_transcription(
         .map_err(|e| e.to_string())
 }
 
+/// Suspend or resume transcribing, without touching the recording.
+///
+/// The recording is unaffected either way: audio keeps being written and
+/// nothing is lost from it, so a stretch that was not transcribed live can
+/// still be transcribed from the file afterwards.
+#[tauri::command]
+pub fn set_live_transcription_paused(
+    state: State<'_, TranscriptionState>,
+    paused: bool,
+) -> Result<(), String> {
+    state
+        .live_state
+        .is_paused
+        .store(paused, Ordering::SeqCst);
+    println!(
+        "[live] transcription {} — the recording is unaffected",
+        if paused { "paused" } else { "resumed" }
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn live_transcription_paused(state: State<'_, TranscriptionState>) -> Result<bool, String> {
+    Ok(state.live_state.is_paused.load(Ordering::SeqCst))
+}
+
 /// Stop live transcription and get final result
 #[tauri::command]
 pub async fn stop_live_transcription(

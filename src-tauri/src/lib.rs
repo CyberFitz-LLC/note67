@@ -448,6 +448,8 @@ pub fn run() {
             commands::get_transcript,
             commands::add_transcript_segment,
             commands::start_live_transcription,
+            commands::set_live_transcription_paused,
+            commands::live_transcription_paused,
             commands::stop_live_transcription,
             commands::is_live_transcribing,
             commands::retranscribe_audio_segment,
