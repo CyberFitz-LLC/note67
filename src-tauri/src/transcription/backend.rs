@@ -18,6 +18,14 @@ pub const BASE_URL_KEY: &str = "transcription_base_url";
 pub const API_KEY_KEY: &str = "transcription_api_key";
 pub const MAX_SPEAKERS_KEY: &str = "transcription_max_speakers";
 pub const STREAM_URL_KEY: &str = "transcription_stream_url";
+pub const OPENAI_MODEL_KEY: &str = "transcription_openai_model";
+
+/// What to ask an OpenAI-compatible recogniser for when nothing is configured.
+///
+/// The endpoint requires a model name and has no notion of a default, so a
+/// blank setting has to become something rather than an empty field the
+/// service rejects.
+pub const DEFAULT_OPENAI_MODEL: &str = "OpenMOSS-Team/MOSS-Transcribe-Diarize";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +41,11 @@ pub enum BackendKind {
     /// leaves the machine continuously rather than as one file afterwards, and
     /// it does not diarize.
     Streaming,
+    /// An OpenAI-compatible recogniser — vLLM, SGLang, or anything speaking
+    /// `/v1/audio/transcriptions`. Like `Remote` it diarizes, but it answers
+    /// in one request instead of a job to poll, which is what that whole
+    /// ecosystem serves.
+    OpenAi,
 }
 
 impl BackendKind {
@@ -45,6 +58,7 @@ impl BackendKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "remote" | "note67_asr" | "note67-asr" => BackendKind::Remote,
             "streaming" | "stream" => BackendKind::Streaming,
+            "openai" | "openai_transcriptions" | "moss" => BackendKind::OpenAi,
             _ => BackendKind::Local,
         }
     }
@@ -54,6 +68,7 @@ impl BackendKind {
             BackendKind::Local => "local",
             BackendKind::Remote => "remote",
             BackendKind::Streaming => "streaming",
+            BackendKind::OpenAi => "openai",
         }
     }
 }
@@ -68,6 +83,12 @@ pub enum Backend {
         /// An upper bound on speakers, when the user knows it. The diarizer
         /// infers the count on its own; this only stops it inventing more.
         max_speakers: Option<u32>,
+    },
+    OpenAi {
+        base_url: String,
+        api_key: Option<String>,
+        /// The model to name in the request. Required by the endpoint.
+        model: String,
     },
     Streaming {
         /// The websocket endpoint. Two connections are opened against it, one
@@ -90,6 +111,7 @@ pub fn resolve(
     api_key: Option<&str>,
     max_speakers: Option<&str>,
     stream_url: Option<&str>,
+    openai_model: Option<&str>,
 ) -> Backend {
     match BackendKind::from_setting(kind) {
         BackendKind::Local => Backend::Local,
@@ -102,6 +124,26 @@ pub fn resolve(
             }
             Backend::Streaming {
                 ws_url: url.trim_end_matches('/').to_string(),
+            }
+        }
+        BackendKind::OpenAi => {
+            let url = base_url.map(str::trim).unwrap_or_default();
+            // Same rule as Remote: a half-written setting must not start
+            // shipping recordings off the machine.
+            if url.is_empty() || !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Backend::Local;
+            }
+            Backend::OpenAi {
+                base_url: url.trim_end_matches('/').to_string(),
+                api_key: api_key
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string),
+                model: openai_model
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or(DEFAULT_OPENAI_MODEL)
+                    .to_string(),
             }
         }
         BackendKind::Remote => {
@@ -185,7 +227,7 @@ mod tests {
 
     #[test]
     fn the_stored_form_round_trips() {
-        for k in [BackendKind::Local, BackendKind::Remote] {
+        for k in [BackendKind::Local, BackendKind::Remote, BackendKind::OpenAi, BackendKind::Streaming] {
             assert_eq!(BackendKind::from_setting(k.as_str()), k);
         }
     }
@@ -197,6 +239,7 @@ mod tests {
             Some("http://192.168.32.223:8010/"),
             Some("secret"),
             Some("8"),
+            None,
             None,
         );
         assert_eq!(
@@ -216,8 +259,8 @@ mod tests {
         // Choosing the backend and not finishing the setting is an ordinary
         // half-done state, and the transcription that has always worked is a
         // better answer than an error.
-        assert_eq!(resolve("remote", None, None, None, None), Backend::Local);
-        assert_eq!(resolve("remote", Some("   "), None, None, None), Backend::Local);
+        assert_eq!(resolve("remote", None, None, None, None, None), Backend::Local);
+        assert_eq!(resolve("remote", Some("   "), None, None, None, None), Backend::Local);
     }
 
     #[test]
@@ -225,14 +268,14 @@ mod tests {
         // Otherwise the first sign of trouble is a confusing request error
         // rather than a setting that was never valid.
         assert_eq!(
-            resolve("remote", Some("192.168.32.223:8010"), None, None, None),
+            resolve("remote", Some("192.168.32.223:8010"), None, None, None, None),
             Backend::Local
         );
     }
 
     #[test]
     fn an_absent_api_key_stays_absent() {
-        let b = resolve("remote", Some("http://x:8010"), Some("  "), None, None);
+        let b = resolve("remote", Some("http://x:8010"), Some("  "), None, None, None);
         assert!(matches!(b, Backend::Remote { api_key: None, .. }));
     }
 
@@ -240,7 +283,7 @@ mod tests {
     fn streaming_is_recognised_and_resolves() {
         assert_eq!(BackendKind::from_setting("streaming"), BackendKind::Streaming);
         assert_eq!(
-            resolve("streaming", None, None, None, Some("ws://192.168.32.223:8080/")),
+            resolve("streaming", None, None, None, Some("ws://192.168.32.223:8080/"), None),
             Backend::Streaming {
                 ws_url: "ws://192.168.32.223:8080".into()
             }
@@ -254,7 +297,7 @@ mod tests {
         // one sends audio continuously while recording.
         for url in [None, Some("  "), Some("192.168.32.223:8080"), Some("http://x:8080")] {
             assert_eq!(
-                resolve("streaming", None, None, None, url),
+                resolve("streaming", None, None, None, url, None),
                 Backend::Local,
                 "{url:?}"
             );
@@ -266,11 +309,57 @@ mod tests {
         // The diarizer infers the count. A zero or unparseable cap should
         // leave it to do that rather than constrain it to nothing.
         for v in ["0", "-3", "lots", ""] {
-            let b = resolve("remote", Some("http://x:8010"), None, Some(v), None);
+            let b = resolve("remote", Some("http://x:8010"), None, Some(v), None, None);
             assert!(
                 matches!(b, Backend::Remote { max_speakers: None, .. }),
                 "{v:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod openai_backend_tests {
+    use super::*;
+
+    #[test]
+    fn the_openai_backend_is_recognised_by_its_names() {
+        for v in ["openai", "OpenAI", " moss ", "openai_transcriptions"] {
+            assert_eq!(BackendKind::from_setting(v), BackendKind::OpenAi, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_openai_url_falls_back_to_local() {
+        // Same rule the other remote backends follow, and for the same reason:
+        // a half-written setting must never start shipping recordings off the
+        // machine on its own.
+        for url in ["", "   ", "192.168.32.13:8011", "ws://host:8011"] {
+            assert_eq!(
+                resolve("openai", Some(url), None, None, None, None),
+                Backend::Local,
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_model_becomes_the_default_rather_than_an_empty_field() {
+        // The endpoint requires a model name; sending an empty one is a 400
+        // the user cannot interpret.
+        let b = resolve("openai", Some("http://192.168.32.13:8011"), None, None, None, Some("  "));
+        match b {
+            Backend::OpenAi { model, .. } => assert_eq!(model, DEFAULT_OPENAI_MODEL),
+            other => panic!("expected OpenAi, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_become_a_double_slash_in_the_path() {
+        let b = resolve("openai", Some("http://host:8011/"), None, None, None, None);
+        match b {
+            Backend::OpenAi { base_url, .. } => assert_eq!(base_url, "http://host:8011"),
+            other => panic!("expected OpenAi, got {other:?}"),
         }
     }
 }

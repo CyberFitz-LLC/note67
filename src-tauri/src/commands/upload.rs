@@ -178,6 +178,10 @@ pub async fn transcribe_uploaded_audio(
         // streaming recogniser has nothing to offer it that the diarizing one
         // does not do better.
         None,
+        db.get_setting(crate::transcription::backend::OPENAI_MODEL_KEY)
+            .ok()
+            .flatten()
+            .as_deref(),
     );
 
     if let crate::transcription::backend::Backend::Remote {

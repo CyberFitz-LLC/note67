@@ -454,6 +454,7 @@ pub async fn start_live_transcription(
         get(backend::API_KEY_KEY).as_deref(),
         get(backend::MAX_SPEAKERS_KEY).as_deref(),
         get(backend::STREAM_URL_KEY).as_deref(),
+        get(backend::OPENAI_MODEL_KEY).as_deref(),
     );
 
     let recording_state = audio_state.recording.clone();
@@ -699,12 +700,109 @@ const MIN_TRANSCRIBABLE_MS: u64 = 1_000;
 /// - The **system** track is everyone else, and is where diarization earns its
 ///   keep. Its labels come back as `Speaker 1..N` — placeholders, which
 ///   `merge::is_generic` already understands, ready to be given real names.
+/// Which diarizing service rebuilds a transcript.
+///
+/// One enum rather than two copies of `retranscribe_remote`: everything around
+/// the call — progress events, echo filtering, forced labels on the mic track,
+/// recording the new chain version — is identical, and only the request shape
+/// differs. Duplicating that would mean fixing every future bug twice.
+pub(crate) enum Recogniser<'a> {
+    /// note67-asr: submit, take a job id, poll until it finishes.
+    Note67Asr {
+        base_url: &'a str,
+        api_key: Option<&'a str>,
+    },
+    /// An OpenAI-compatible endpoint — vLLM, SGLang. One synchronous request.
+    OpenAi {
+        base_url: &'a str,
+        api_key: Option<&'a str>,
+        model: &'a str,
+    },
+}
+
+impl<'a> Recogniser<'a> {
+    fn base_url(&self) -> &str {
+        match self {
+            Recogniser::Note67Asr { base_url, .. } | Recogniser::OpenAi { base_url, .. } => base_url,
+        }
+    }
+
+    async fn health(&self, client: &reqwest::Client) -> Result<(), String> {
+        match self {
+            Recogniser::Note67Asr { base_url, api_key, .. } => {
+                crate::transcription::remote::health(client, base_url, *api_key)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            // No health route is guaranteed on an OpenAI-compatible server, but
+            // listing models is, and a server that can list them has loaded one.
+            Recogniser::OpenAi { base_url, api_key, .. } => {
+                let mut req = client
+                    .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
+                    .timeout(std::time::Duration::from_secs(10));
+                if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
+                    req = req.bearer_auth(k.trim());
+                }
+                match req.send().await {
+                    Ok(r) if r.status().is_success() => Ok(()),
+                    Ok(r) => Err(format!("the service returned {}", r.status())),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        }
+    }
+
+    async fn transcribe(
+        &self,
+        client: &reqwest::Client,
+        bytes: Vec<u8>,
+        filename: &str,
+        audio_secs: f64,
+        // Per track, not per service: the mic carries one voice and the
+        // system track carries everyone else.
+        max_speakers: Option<u32>,
+    ) -> Result<crate::transcription::transcriber::TranscriptionResult, String> {
+        match self {
+            Recogniser::Note67Asr { base_url, api_key } => {
+                crate::transcription::remote::transcribe(
+                    client, base_url, *api_key, bytes, filename, max_speakers,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            Recogniser::OpenAi { base_url, api_key, model } => {
+                crate::transcription::openai::transcribe(
+                    client,
+                    base_url,
+                    *api_key,
+                    model,
+                    bytes,
+                    filename,
+                    audio_secs,
+                    OPENAI_MAX_COMPLETION_TOKENS,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+/// Output budget for one OpenAI-compatible transcription.
+///
+/// Must be sent explicitly: MOSS's own `generation_config.json` caps output at
+/// 5120 tokens, which truncates a busy twenty minutes about a third of the way
+/// through and returns a well-formed partial transcript that nothing flags.
+pub(crate) const OPENAI_MAX_COMPLETION_TOKENS: u32 = 32768;
+
 async fn retranscribe_remote(
     app: &AppHandle,
     db: &Database,
     note_id: &str,
-    base_url: &str,
-    api_key: Option<&str>,
+    recogniser: Recogniser<'_>,
+    // How many voices to look for on the system track. A setting rather than
+    // a property of the service, and not applied to the mic track, which
+    // records one person by construction.
     max_speakers: Option<u32>,
 ) -> Result<RetranscribeResult, String> {
     let client = reqwest::Client::new();
@@ -712,9 +810,10 @@ async fn retranscribe_remote(
     // Asked once, before anything is uploaded. Sending several tracks to a
     // service that is not running produces the same connection error once per
     // track and never says the simple thing.
-    if let Err(e) = crate::transcription::remote::health(&client, base_url, api_key).await {
+    if let Err(e) = recogniser.health(&client).await {
         return Err(format!(
-            "The transcription service at {base_url} is not available, so nothing was changed. {e}"
+            "The transcription service at {} is not available, so nothing was changed. {e}",
+            recogniser.base_url()
         ));
     }
 
@@ -808,15 +907,16 @@ async fn retranscribe_remote(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "audio".to_string());
 
-        match crate::transcription::remote::transcribe(
-            &client,
-            base_url,
-            api_key,
-            bytes,
-            &filename,
-            speakers,
-        )
-        .await
+        // Only the OpenAI path uses this, to notice a truncated transcript;
+        // a missing duration becomes 0.0, which disables that check rather
+        // than failing a transcription over an unreadable header.
+        let audio_secs = crate::audio::codec::duration_ms(&resolved)
+            .map(|ms| ms as f64 / 1000.0)
+            .unwrap_or(0.0);
+
+        match recogniser
+            .transcribe(&client, bytes, &filename, audio_secs, speakers)
+            .await
         {
             Ok(result) => {
                 let mut last_start = 0.0_f64;
@@ -946,24 +1046,32 @@ pub async fn retranscribe_note(
             get(crate::transcription::backend::API_KEY_KEY).as_deref(),
             get(crate::transcription::backend::MAX_SPEAKERS_KEY).as_deref(),
             get(crate::transcription::backend::STREAM_URL_KEY).as_deref(),
+            get(crate::transcription::backend::OPENAI_MODEL_KEY).as_deref(),
         )
     };
 
-    if let crate::transcription::backend::Backend::Remote {
-        base_url,
-        api_key,
-        max_speakers,
-    } = &backend
-    {
-        let result = retranscribe_remote(
-            &app,
-            &db,
-            &note_id,
-            base_url,
-            api_key.as_deref(),
-            *max_speakers,
-        )
-        .await;
+    let speaker_hint = match &backend {
+        crate::transcription::backend::Backend::Remote { max_speakers, .. } => *max_speakers,
+        _ => None,
+    };
+    let remote = match &backend {
+        crate::transcription::backend::Backend::Remote { base_url, api_key, .. } => {
+            Some(Recogniser::Note67Asr {
+                base_url,
+                api_key: api_key.as_deref(),
+            })
+        }
+        crate::transcription::backend::Backend::OpenAi { base_url, api_key, model } => {
+            Some(Recogniser::OpenAi {
+                base_url,
+                api_key: api_key.as_deref(),
+                model,
+            })
+        }
+        _ => None,
+    };
+    if let Some(recogniser) = remote {
+        let result = retranscribe_remote(&app, &db, &note_id, recogniser, speaker_hint).await;
         state.is_transcribing.store(false, Ordering::SeqCst);
         return result;
     }

@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   DEFAULT_CONFIG,
   willStream,
+  willUseOpenAi,
   willUseRemote,
   type TranscriptionConfig,
 } from "../../hooks/useTranscriptionBackend";
@@ -29,7 +30,9 @@ export function TranscriptionBackendSettings({
 
   const remote = draft.backend === "remote";
   const streaming = draft.backend === "streaming";
+  const openai = draft.backend === "openai";
   const willSend = willUseRemote(draft);
+  const willSendOpenAi = willUseOpenAi(draft);
   const willSendLive = willStream(draft);
 
   const field = (
@@ -92,6 +95,11 @@ export function TranscriptionBackendSettings({
               "remote",
               "Send finished recordings to a recogniser",
               "Separates speakers into Speaker 1, Speaker 2… which you can then rename. Live transcription still runs here.",
+            ],
+            [
+              "openai",
+              "Send finished recordings to an OpenAI-compatible recogniser",
+              "For vLLM or SGLang, including MOSS-Transcribe-Diarize. Separates speakers and transcribes in one pass. Live transcription still runs here.",
             ],
             [
               "streaming",
@@ -182,6 +190,54 @@ export function TranscriptionBackendSettings({
           )}
 
           {willSend && (
+            <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+              Uploaded recordings will be sent to this address. Nothing attests
+              that the audio left this machine — receipts describe the
+              transcript, not where its audio has been.
+            </p>
+          )}
+        </div>
+      )}
+
+      {openai && (
+        <div className="space-y-3">
+          {field(
+            "Service address",
+            draft.baseUrl,
+            (baseUrl) => setDraft({ ...draft, baseUrl }),
+            "http://192.168.32.13:8011",
+          )}
+          {field(
+            "Model",
+            draft.openaiModel,
+            (openaiModel) => setDraft({ ...draft, openaiModel }),
+            "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+          )}
+          {field(
+            "API key (optional)",
+            draft.apiKey,
+            (apiKey) => setDraft({ ...draft, apiKey }),
+            "leave empty if the service needs none",
+            "password",
+          )}
+
+          {/* The endpoint has no notion of a default model and rejects an
+              empty one with a 400 nobody can interpret, so a blank box becomes
+              the model this was built against rather than nothing. */}
+          <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+            Left empty, the model defaults to{" "}
+            <code>OpenMOSS-Team/MOSS-Transcribe-Diarize</code>.
+          </p>
+
+          {!willSendOpenAi && (
+            <p className="text-sm" style={{ color: "#eab308" }}>
+              Not usable yet — an address starting <code>http://</code> or{" "}
+              <code>https://</code> is needed. Until then uploads are
+              transcribed on this machine.
+            </p>
+          )}
+
+          {willSendOpenAi && (
             <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
               Uploaded recordings will be sent to this address. Nothing attests
               that the audio left this machine — receipts describe the
