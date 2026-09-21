@@ -6,15 +6,26 @@ divergence cost seven CI cycles on 2026-08-21.
 
 | | Where | Produces | When to use |
 |---|---|---|---|
-| **CI** | `.github/workflows/windows-build.yml` | Both installers, as run artifacts | Normally. Every push to a branch builds both |
+| **CI** | `.github/workflows/windows-build.yml` | The Vulkan installer, as a run artifact | Normally. Every push to a branch builds it |
 | **Local** | `scripts/build-windows-gpu.ps1` | One installer, on your machine | Iterating on native code, or CI is unavailable |
 
 Downloading from CI:
 
 ```powershell
-gh run download --repo CyberFitz-LLC/note67 -n note67-windows-cuda
 gh run download --repo CyberFitz-LLC/note67 -n note67-windows-vulkan
 ```
+
+**CUDA is not built on a push.** It costs about an hour against Vulkan's eight
+minutes and produces an 862 MB installer against 20 MB, and it stopped earning
+that once the daily driver moved to Vulkan and most transcription moved off
+local Whisper. Ask for it explicitly when you want one:
+
+```powershell
+gh workflow run "Windows Build" --repo CyberFitz-LLC/note67 --ref feat/people -f cuda=true
+```
+
+Everything below still applies to that build, and the job is unchanged — this
+is a matter of when it runs, not whether it works.
 
 **The CUDA installer is ~862 MB against Vulkan's ~20 MB**, almost all of it
 cuBLAS. Vulkan is GPU-accelerated on NVIDIA hardware too, so prefer it unless

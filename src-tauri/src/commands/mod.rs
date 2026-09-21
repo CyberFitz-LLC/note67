@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod assist;
 pub mod audio;
 pub mod device_test;
 pub mod exochain;
@@ -9,13 +10,16 @@ pub mod images;
 pub mod import;
 pub mod links;
 pub mod notes;
+pub mod screenshots;
 pub mod settings;
 pub mod tags;
 pub mod transcription;
 pub mod upload;
 
 pub use ai::*;
+pub use assist::*;
 pub use audio::*;
+pub use screenshots::*;
 pub use export::*;
 pub use device_test::*;
 pub use exochain::*;

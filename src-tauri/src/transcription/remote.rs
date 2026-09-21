@@ -30,6 +30,22 @@ pub const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 /// only loads the appliance.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
+/// How many polls in a row may fail to reach the service before a job is
+/// abandoned.
+///
+/// A diarizing pass over an hour of meeting runs for minutes on a busy box, and
+/// the appliance shares that box with whatever else is loaded. A single blip —
+/// a restart, a moment of memory pressure — used to discard the whole job and
+/// report nothing, while the work may well have been continuing on the other
+/// side. Roughly a minute of unreachability at the poll interval, which
+/// survives a restart without waiting indefinitely on a service that has
+/// genuinely gone.
+///
+/// Consecutive, deliberately: reaching the service resets it, so a long job
+/// that hiccups repeatedly is tolerated while one that has truly lost its
+/// service is not.
+pub const MAX_POLL_FAILURES: u32 = 20;
+
 #[derive(Debug, Error)]
 pub enum RemoteError {
     #[error("the transcription service could not be reached: {0}")]
@@ -96,19 +112,20 @@ pub fn progress_of(status: &str) -> Progress {
     }
 }
 
-/// Turn a finished job into the app's own shape.
+/// Turn a finished job into a result.
 ///
-/// A job that produced no segments is an error, not an empty transcript: a
-/// recording that yielded nothing and a service that lost the result are
-/// indistinguishable here, and the harmless reading of the two is the wrong
-/// one to guess.
+/// **A job that finished with no segments is an empty result, not a failure.**
+/// It used to be an error, on the reasoning that a service returning nothing
+/// had gone wrong. Real audio disproved it: a recording is split into segments
+/// and the last one is routinely a short silent tail, which transcribes to
+/// nothing because there is nothing in it. Calling that a failure threw away
+/// the segments that had worked — a whole meeting, correctly transcribed and
+/// diarized, discarded because a two-second tail of silence contained no
+/// speech.
+///
+/// Silence transcribing to nothing is the right answer. What the caller does
+/// with an empty contribution is the caller's decision.
 pub fn to_result(job: &JobStatus) -> Result<TranscriptionResult, RemoteError> {
-    if job.segments.is_empty() {
-        return Err(RemoteError::Failed(
-            "the service returned no transcript segments".into(),
-        ));
-    }
-
     let segments: Vec<TranscriptionSegment> = job
         .segments
         .iter()
@@ -230,6 +247,53 @@ pub async fn poll_once(
 }
 
 /// Submit and wait.
+/// Whether the service is up and holding its models, before anything is sent.
+///
+/// Worth one request first because the alternative is what a real failure
+/// looked like: four tracks uploaded in turn to a service that was not running,
+/// four identical connection errors, and a message that repeated the same fact
+/// four times without ever saying the plain version of it.
+///
+/// A service that answers but reports no models is treated as not ready. It
+/// accepts a job and then cannot do it, which is a slower and more confusing
+/// way to fail.
+pub async fn health(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<(), RemoteError> {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let mut request = client.get(&url);
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| RemoteError::Unreachable(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(RemoteError::Rejected {
+            status: response.status().as_u16(),
+            body: response.text().await.unwrap_or_default(),
+        });
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| RemoteError::Malformed(e.to_string()))?;
+
+    if body.get("models_loaded") == Some(&serde_json::Value::Bool(false)) {
+        return Err(RemoteError::Unreachable(
+            "the service is running but its models are not loaded yet".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn transcribe(
     client: &reqwest::Client,
     base_url: &str,
@@ -240,9 +304,35 @@ pub async fn transcribe(
 ) -> Result<TranscriptionResult, RemoteError> {
     let job_id = submit(client, base_url, api_key, wav, filename, max_speakers).await?;
     let started = std::time::Instant::now();
+    let mut unreachable_polls = 0u32;
 
     loop {
-        let job = poll_once(client, base_url, api_key, &job_id).await?;
+        let job = match poll_once(client, base_url, api_key, &job_id).await {
+            Ok(job) => {
+                unreachable_polls = 0;
+                job
+            }
+            // Not being able to reach the service is not the same as the job
+            // having failed. The work may still be running; only the asking
+            // went wrong.
+            Err(RemoteError::Unreachable(reason)) => {
+                unreachable_polls += 1;
+                if unreachable_polls >= MAX_POLL_FAILURES {
+                    return Err(RemoteError::Unreachable(format!(
+                        "{reason} (unreachable for {} consecutive polls)",
+                        unreachable_polls
+                    )));
+                }
+                if started.elapsed() > MAX_WAIT {
+                    return Err(RemoteError::TimedOut(MAX_WAIT));
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            // Anything else — a rejection, an unreadable answer — is the
+            // service telling us something, and retrying would only repeat it.
+            Err(other) => return Err(other),
+        };
         match progress_of(&job.status) {
             Progress::Done => return to_result(&job),
             Progress::Failed => {
@@ -345,13 +435,24 @@ mod tests {
     }
 
     #[test]
-    fn a_job_with_no_segments_is_an_error() {
-        // A recording that yielded nothing and a service that lost the result
-        // are indistinguishable here, and the harmless reading is the wrong
-        // one to guess.
-        let mut j = job("done", true, &[]);
-        j.segments.clear();
-        assert!(matches!(to_result(&j), Err(RemoteError::Failed(_))));
+    fn a_job_with_no_segments_is_an_empty_result_not_a_failure() {
+        // Reversed after real audio showed the cost. A recording is split into
+        // segments and the last is routinely a short silent tail; treating its
+        // empty transcript as a failure discarded the segments that had
+        // worked. One real meeting came back correctly transcribed and
+        // diarized into seven speakers, and was thrown away because a
+        // two-second tail of silence contained no speech.
+        let job = JobStatus {
+            status: "done".into(),
+            diarized: true,
+            speakers: vec![],
+            full_text: String::new(),
+            segments: vec![],
+            error: None,
+        };
+        let result = to_result(&job).expect("silence is a result, not an error");
+        assert!(result.segments.is_empty());
+        assert!(result.full_text.is_empty());
     }
 
     #[test]
@@ -392,4 +493,26 @@ mod tests {
             serde_json::from_str(r#"{"job_id":"abc123"}"#).unwrap();
         assert_eq!(r.job_id, "abc123");
     }
+    #[test]
+    fn a_service_that_reports_no_models_is_not_ready() {
+        // The shape this guards, taken from the real endpoint: it answers 200
+        // while still loading, accepts a job, and then cannot do it. Treating
+        // that as available turns a clear failure into a slow confusing one.
+        let loading: serde_json::Value =
+            serde_json::from_str(r#"{"status":"ok","models_loaded":false}"#).unwrap();
+        assert_eq!(
+            loading.get("models_loaded"),
+            Some(&serde_json::Value::Bool(false))
+        );
+
+        let ready: serde_json::Value = serde_json::from_str(
+            r#"{"status":"ok","models_loaded":true,"jobs_active":0,"queue_depth":0}"#,
+        )
+        .unwrap();
+        assert_ne!(
+            ready.get("models_loaded"),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+
 }

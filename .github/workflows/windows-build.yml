@@ -14,6 +14,14 @@ name: Windows Build
 on:
   workflow_dispatch:
     inputs:
+      cuda:
+        description: >-
+          Also build the CUDA variant. Off by default: it takes about an hour
+          against Vulkan's eight minutes, produces an 862 MB installer against
+          20 MB, and only helps on NVIDIA hardware running local Whisper.
+        type: boolean
+        required: false
+        default: false
       runner:
         description: >-
           Runner label to build on. Defaults to GitHub-hosted. Point at a
@@ -65,16 +73,32 @@ jobs:
     runs-on: ${{ inputs.runner || 'windows-latest' }}
     strategy:
       fail-fast: false
+      # Which variants to build, decided per run.
+      #
+      # Vulkan always. It drives NVIDIA, AMD and Intel from one binary, falls
+      # back to CPU where there is no Vulkan device, and builds in about eight
+      # minutes into a 20 MB installer.
+      #
+      # CUDA only when a manual run asks for it. It is faster on NVIDIA and
+      # NVIDIA-only, ships the CUDA runtime DLLs, and costs about an hour for
+      # an 862 MB installer. That stopped being worth paying on every push once
+      # the daily driver moved to Vulkan and most transcription moved off local
+      # Whisper entirely.
+      #
+      # An expression rather than a per-leg condition, because the `matrix`
+      # context is not available in a job-level `if` — a condition written that
+      # way reads as valid and silently never excludes anything.
+      #
+      # The CUDA path itself is untouched, and what it took to make that
+      # toolchain work is written down in docs/BUILD.md rather than left to be
+      # rediscovered.
       matrix:
-        include:
-          # Portable: one binary drives NVIDIA, AMD and Intel, and falls back to
-          # CPU when no Vulkan device is present.
-          - variant: vulkan
-            features: gpu-vulkan
-          # Faster on NVIDIA, but the binary is NVIDIA-only and has to ship the
-          # CUDA runtime DLLs.
-          - variant: cuda
-            features: gpu-cuda
+        include: >-
+          ${{ fromJSON(
+            (github.event_name == 'workflow_dispatch' && inputs.cuda)
+              && '[{"variant":"vulkan","features":"gpu-vulkan"},{"variant":"cuda","features":"gpu-cuda"}]'
+              || '[{"variant":"vulkan","features":"gpu-vulkan"}]'
+          ) }}
 
     steps:
       - uses: actions/checkout@v4

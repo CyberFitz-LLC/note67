@@ -18,7 +18,17 @@ export interface Conflict {
   detail: string;
 }
 
+export interface MergeEvidence {
+  matched: number;
+  agreeing: number;
+  baseSegments: number;
+  otherSegments: number;
+  overlapMs: number;
+}
+
 export interface MergeOutcome {
+  /** What the comparison found, present on a refusal as well as a merge. */
+  evidence: MergeEvidence;
   /** How far the other recording's clock was from ours. Null when refused. */
   offsetMs: number | null;
   segmentsNamed: number;

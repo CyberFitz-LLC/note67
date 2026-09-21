@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 
 import { settingsApi } from "../api";
 
-export type TranscriptionBackend = "local" | "remote" | "streaming";
+export type TranscriptionBackend = "local" | "remote" | "streaming" | "openai";
 
 export const BACKEND_KEY = "transcription_backend";
 export const BASE_URL_KEY = "transcription_base_url";
 export const API_KEY_KEY = "transcription_api_key";
 export const MAX_SPEAKERS_KEY = "transcription_max_speakers";
 export const STREAM_URL_KEY = "transcription_stream_url";
+export const OPENAI_MODEL_KEY = "transcription_openai_model";
 
 export interface TranscriptionConfig {
   backend: TranscriptionBackend;
@@ -16,6 +17,7 @@ export interface TranscriptionConfig {
   apiKey: string;
   maxSpeakers: string;
   streamUrl: string;
+  openaiModel: string;
 }
 
 export const DEFAULT_CONFIG: TranscriptionConfig = {
@@ -24,6 +26,7 @@ export const DEFAULT_CONFIG: TranscriptionConfig = {
   apiKey: "",
   maxSpeakers: "",
   streamUrl: "",
+  openaiModel: "",
 };
 
 /**
@@ -36,6 +39,19 @@ export const DEFAULT_CONFIG: TranscriptionConfig = {
  */
 export function willUseRemote(config: TranscriptionConfig): boolean {
   if (config.backend !== "remote") return false;
+  const url = config.baseUrl.trim();
+  return url.startsWith("http://") || url.startsWith("https://");
+}
+
+/**
+ * Whether a saved config would reach an OpenAI-compatible recogniser.
+ *
+ * Same mirror of `resolve` as `willUseRemote`, and the same reason: a
+ * half-finished setting has to read as "not configured" here rather than
+ * looking right and silently transcribing on the local model instead.
+ */
+export function willUseOpenAi(config: TranscriptionConfig): boolean {
+  if (config.backend !== "openai") return false;
   const url = config.baseUrl.trim();
   return url.startsWith("http://") || url.startsWith("https://");
 }
@@ -57,6 +73,7 @@ export function willStream(config: TranscriptionConfig): boolean {
 function readBackend(value: string | null | undefined): TranscriptionBackend {
   if (value === "remote") return "remote";
   if (value === "streaming") return "streaming";
+  if (value === "openai") return "openai";
   return "local";
 }
 
@@ -95,6 +112,7 @@ export function useTranscriptionBackend() {
         API_KEY_KEY,
         MAX_SPEAKERS_KEY,
         STREAM_URL_KEY,
+        OPENAI_MODEL_KEY,
       ])
       .then((values) => {
         if (cancelled) return;
@@ -107,6 +125,7 @@ export function useTranscriptionBackend() {
           apiKey: values[API_KEY_KEY] ?? "",
           maxSpeakers: values[MAX_SPEAKERS_KEY] ?? "",
           streamUrl: values[STREAM_URL_KEY] ?? "",
+          openaiModel: values[OPENAI_MODEL_KEY] ?? "",
         });
       })
       .catch((e) => {
@@ -130,6 +149,7 @@ export function useTranscriptionBackend() {
       await settingsApi.set(API_KEY_KEY, next.apiKey.trim());
       await settingsApi.set(MAX_SPEAKERS_KEY, next.maxSpeakers.trim());
       await settingsApi.set(STREAM_URL_KEY, next.streamUrl.trim());
+      await settingsApi.set(OPENAI_MODEL_KEY, next.openaiModel.trim());
       setConfig(next);
       return true;
     } catch (e) {

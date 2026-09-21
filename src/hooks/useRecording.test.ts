@@ -4,7 +4,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { useRecording } from "./useRecording";
 import { audioApi } from "../api";
 import { RecordingPhase } from "../types";
-import { resetRecordingStore } from "../stores/recordingStore";
+import {
+  resetRecordingStore,
+  useRecordingStore,
+} from "../stores/recordingStore";
 
 vi.mock("../api", () => ({
   audioApi: {
@@ -30,6 +33,7 @@ vi.mock("../api", () => ({
     continueNoteRecording: vi.fn(),
     getRecordingStatus: vi.fn(),
     getAudioLevel: vi.fn(),
+    getTrackLevels: vi.fn(),
   },
 }));
 
@@ -57,6 +61,12 @@ beforeEach(() => {
   // The hook checks recording status once on mount.
   api.getRecordingStatus.mockResolvedValue(false);
   api.getAudioLevel.mockResolvedValue(0);
+  api.getTrackLevels.mockResolvedValue({
+    mic_rms: 0,
+    mic_peak: 0,
+    system_rms: 0,
+    system_peak: 0,
+  });
   api.startRecording.mockResolvedValue("/mic.wav");
   api.stopRecording.mockResolvedValue("/mic.wav");
   api.startDualRecordingWithSegments.mockResolvedValue(dualResult);
@@ -340,10 +350,46 @@ describe("useRecording — continue on an ended note", () => {
 });
 
 describe("useRecording — audio level polling", () => {
+  it("makes both tracks' levels available, not just the microphone", async () => {
+    // The defect this replaced: the only level the UI could see came from
+    // process_audio, which is the input stream's callback, so the meter could
+    // never move for system audio however loud the meeting was. A flat bar
+    // meant "this does not measure that", and looked like "the far end is
+    // silent".
+    vi.useFakeTimers();
+    setInputs({ mic: true, system: true });
+    api.getTrackLevels.mockResolvedValue({
+      mic_rms: 0.1,
+      mic_peak: 0.2,
+      system_rms: 0.4,
+      system_peak: 0.9,
+    });
+
+    const { result } = renderHook(() => useRecording());
+    await act(async () => {
+      await result.current.startRecording("note-1");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+
+    const levels = useRecordingStore.getState().trackLevels;
+    expect(levels.system_rms).toBe(0.4);
+    expect(levels.system_peak).toBe(0.9);
+    expect(levels.mic_rms).toBe(0.1);
+
+    vi.useRealTimers();
+  });
+
   it("polls while recording and stops after stop", async () => {
     vi.useFakeTimers();
     setInputs({ mic: true, system: true });
-    api.getAudioLevel.mockResolvedValue(0.5);
+    api.getTrackLevels.mockResolvedValue({
+      mic_rms: 0.5,
+      mic_peak: 0.6,
+      system_rms: 0.2,
+      system_peak: 0.3,
+    });
 
     const { result } = renderHook(() => useRecording());
 
@@ -354,9 +400,9 @@ describe("useRecording — audio level polling", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
-    expect(api.getAudioLevel).toHaveBeenCalled();
+    expect(api.getTrackLevels).toHaveBeenCalled();
 
-    const callsWhileRecording = api.getAudioLevel.mock.calls.length;
+    const callsWhileRecording = api.getTrackLevels.mock.calls.length;
 
     await act(async () => {
       await result.current.stopRecording();
@@ -366,7 +412,7 @@ describe("useRecording — audio level polling", () => {
     });
 
     // No further polls once the interval is cleared.
-    expect(api.getAudioLevel.mock.calls.length).toBe(callsWhileRecording);
+    expect(api.getTrackLevels.mock.calls.length).toBe(callsWhileRecording);
   });
 
   it("clears the polling interval on unmount", async () => {
@@ -379,12 +425,12 @@ describe("useRecording — audio level polling", () => {
     });
 
     unmount();
-    const callsAtUnmount = api.getAudioLevel.mock.calls.length;
+    const callsAtUnmount = api.getTrackLevels.mock.calls.length;
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(500);
     });
-    expect(api.getAudioLevel.mock.calls.length).toBe(callsAtUnmount);
+    expect(api.getTrackLevels.mock.calls.length).toBe(callsAtUnmount);
   });
 });
 

@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,63 @@ pub fn get_recording_status(state: State<AudioState>) -> bool {
 #[tauri::command]
 pub fn get_audio_level(state: State<AudioState>) -> f32 {
     f32::from_bits(state.recording.audio_level.load(Ordering::SeqCst))
+}
+
+/// How long a recording runs before it rolls to a new file, in minutes.
+///
+/// Off by default. Rotation touches the path that writes irreplaceable audio,
+/// and it should be tried on a short recording before an eight-hour one rather
+/// than adopted in the middle of one.
+pub const CHUNK_MINUTES_KEY: &str = "recording_chunk_minutes";
+
+/// Read the rotation interval, or `None` when it is switched off.
+///
+/// A floor of five minutes and a ceiling of two hours: below the floor the
+/// rotations cost more than they save, and above the ceiling the chunk stops
+/// bounding anything that matters.
+pub fn chunk_interval(setting: Option<&str>) -> Option<Duration> {
+    let minutes: u64 = setting?.trim().parse().ok()?;
+    if minutes == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(minutes.clamp(5, 120) * 60))
+}
+
+/// What each track is hearing, as (rms, held peak) per track.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct TrackLevels {
+    pub mic_rms: f32,
+    pub mic_peak: f32,
+    pub system_rms: f32,
+    pub system_peak: f32,
+}
+
+/// Levels for both tracks at once.
+///
+/// The old single reading was the microphone only — `process_audio` in
+/// recorder.rs is its sole writer and that is the *input* stream's callback, so
+/// the meter could never move for system audio however loud the meeting was.
+/// Someone watching a flat bar had no way to tell "the far end is silent" from
+/// "this meter does not measure the far end", and the second is what was
+/// actually true.
+///
+/// Both come from `audio::levels::LevelMeter`, which holds peaks: a meter
+/// sampled a few times a second misses the transients that matter, so a held
+/// peak is what makes clipping visible at all.
+#[tauri::command]
+pub fn get_track_levels(state: State<AudioState>) -> TrackLevels {
+    let mic_rms = f32::from_bits(state.recording.audio_level.load(Ordering::SeqCst));
+    let system = audio::system_audio::system_level();
+    TrackLevels {
+        mic_rms,
+        // The mic path stores a single RMS rather than feeding a LevelMeter, so
+        // its peak is the best it can honestly report. Reported rather than
+        // faked so the UI can show one bar per track without inventing a
+        // number.
+        mic_peak: mic_rms,
+        system_rms: system.rms(),
+        system_peak: system.peak(),
+    }
 }
 
 /// Check if system audio capture is available on this platform
@@ -577,6 +635,23 @@ pub struct CompactionReport {
     pub files_failed: usize,
     pub bytes_before: u64,
     pub bytes_after: u64,
+    /// What went wrong, and where. A count alone leaves the only explanation in
+    /// a console the user cannot see.
+    pub failures: Vec<CompactionFailure>,
+    /// Files that were on disk with nothing in the database pointing at them.
+    ///
+    /// Deleting a note removes its rows and leaves its audio behind, so these
+    /// accumulate. They are compacted like anything else — the space is real —
+    /// but they are counted separately because nothing will ever play them and
+    /// the honest thing is to say so rather than let them look like part of the
+    /// library.
+    pub orphans: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompactionFailure {
+    pub path: String,
+    pub reason: String,
 }
 
 /// Rewrite every recording in the library as 16 kHz mono FLAC.
@@ -591,8 +666,12 @@ pub struct CompactionReport {
 /// counted, left exactly as it was, and does not stop the pass — one unreadable
 /// recording should not block recovering the rest.
 #[tauri::command]
-pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, String> {
-    let segments = db.all_audio_segments().map_err(|e| e.to_string())?;
+pub fn compact_recordings(app: AppHandle, db: State<Database>) -> Result<CompactionReport, String> {
+    let recordings_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("no app data directory: {e}"))?
+        .join("recordings");
 
     let mut report = CompactionReport {
         files_examined: 0,
@@ -600,62 +679,138 @@ pub fn compact_recordings(db: State<Database>) -> Result<CompactionReport, Strin
         files_failed: 0,
         bytes_before: 0,
         bytes_after: 0,
+        failures: Vec::new(),
+        orphans: 0,
     };
 
-    {
-        for segment in segments {
-            let mic = segment.mic_path.as_ref().map(std::path::PathBuf::from);
-            let system = segment.system_path.as_ref().map(std::path::PathBuf::from);
+    // Walk the directory rather than the database.
+    //
+    // Two earlier passes worked from DB rows and each missed most of the disk,
+    // because plenty of files have no row: deleting a note removes its rows and
+    // leaves the audio, playback mixes exist for notes whose audio_path was
+    // cleared, and uploads leave temporaries. The directory is the only honest
+    // account of what is taking up space.
+    let entries = match std::fs::read_dir(&recordings_dir) {
+        Ok(e) => e,
+        Err(e) => return Err(format!("could not read {}: {e}", recordings_dir.display())),
+    };
 
-            let mut new_mic = mic.clone();
-            let mut new_system = system.clone();
-            let mut changed = false;
+    // What moved, so database rows naming the old path can be corrected after.
+    //
+    // Keyed by file NAME, not by the full path. Matching whole path strings is
+    // what failed in the field: a row and a directory listing can render the
+    // same file differently, the lookup misses, and the row is left naming a
+    // WAV that no longer exists — which surfaces much later as "Audio file not
+    // found" on a recording that is sitting right there. Every one of these
+    // files lives in the same directory, so the name is enough.
+    let mut moved: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-            for (path, out) in [(mic.as_ref(), &mut new_mic), (system.as_ref(), &mut new_system)] {
-                let Some(path) = path else { continue };
-                if !path.exists() {
-                    // A row naming a file that is gone is a pre-existing
-                    // problem, not one to fix by failing here.
-                    continue;
-                }
-                report.files_examined += 1;
-                match audio::codec::compact(path) {
-                    Ok(done) => {
-                        report.bytes_before += done.before_bytes;
-                        report.bytes_after += done.after_bytes;
-                        if done.path != *path {
-                            report.files_compacted += 1;
-                            *out = Some(done.path);
-                            changed = true;
-                        }
-                    }
-                    Err(e) => {
-                        report.files_failed += 1;
-                        eprintln!("[compact] skipped {} — {e}", path.display());
-                    }
+    let key_of = |p: &str| -> String {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| p.to_lowercase())
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+
+        // Already done, or the debris of an interrupted conversion.
+        if ext == "flac" || ext == "partial" {
+            continue;
+        }
+        if !audio::converter::is_supported_format(&path) {
+            continue;
+        }
+
+        report.files_examined += 1;
+        match audio::codec::compact(&path) {
+            Ok(done) => {
+                report.bytes_before += done.before_bytes;
+                report.bytes_after += done.after_bytes;
+                if done.path != path {
+                    report.files_compacted += 1;
+                    moved.insert(
+                        key_of(&path.to_string_lossy()),
+                        done.path.to_string_lossy().to_string(),
+                    );
                 }
             }
+            Err(e) => {
+                report.files_failed += 1;
+                report.failures.push(CompactionFailure {
+                    path: path.display().to_string(),
+                    reason: e.to_string(),
+                });
+                eprintln!("[compact] skipped {} — {e}", path.display());
+            }
+        }
+    }
 
-            if changed && segment.id > 0 {
-                let sys = new_system.as_ref().map(|p| p.to_string_lossy().to_string());
-                let mic_str = new_mic
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys.as_deref()) {
-                    eprintln!("[compact] converted {} but could not record it: {e}", segment.id);
+    // Now correct every database reference to a file that moved. Done after the
+    // conversions rather than alongside them, so a row is only ever updated to
+    // a path that already exists.
+    let mut referenced = std::collections::HashSet::new();
+
+    if let Ok(segments) = db.all_audio_segments() {
+        for segment in segments {
+            let mic = segment.mic_path.clone();
+            let system = segment.system_path.clone();
+            for p in [mic.as_ref(), system.as_ref()].into_iter().flatten() {
+                referenced.insert(key_of(p));
+            }
+            let new_mic = mic.as_ref().and_then(|p| moved.get(&key_of(p))).cloned();
+            let new_system = system.as_ref().and_then(|p| moved.get(&key_of(p))).cloned();
+            if (new_mic.is_some() || new_system.is_some()) && segment.id > 0 {
+                let mic_str = new_mic.or(mic).unwrap_or_default();
+                let sys_str = new_system.or(system);
+                if let Err(e) = db.update_segment_paths(segment.id, &mic_str, sys_str.as_deref()) {
+                    eprintln!("[compact] moved segment {} but could not record it: {e}", segment.id);
                 }
             }
         }
     }
 
+    if let Ok(uploads) = db.all_uploaded_audio() {
+        for (id, path) in uploads {
+            referenced.insert(key_of(&path));
+            if let Some(new_path) = moved.get(&key_of(&path))
+                && let Err(e) = db.update_uploaded_audio_path(id, new_path)
+            {
+                eprintln!("[compact] moved upload {id} but could not record it: {e}");
+            }
+        }
+    }
+
+    if let Ok(notes) = db.all_note_audio_paths() {
+        for (note_id, path) in notes {
+            referenced.insert(key_of(&path));
+            if let Some(new_path) = moved.get(&key_of(&path))
+                && let Err(e) = db.update_note_audio_path(&note_id, new_path)
+            {
+                eprintln!("[compact] moved the playback track for {note_id} but could not record it: {e}");
+            }
+        }
+    }
+
+    report.orphans = moved.keys().filter(|k| !referenced.contains(*k)).count();
+
     println!(
-        "[compact] {} of {} files, {} MB -> {} MB, {} failed",
+        "[compact] {} of {} files, {} MB -> {} MB, {} failed, {} orphaned",
         report.files_compacted,
         report.files_examined,
         report.bytes_before / 1_048_576,
         report.bytes_after / 1_048_576,
-        report.files_failed
+        report.files_failed,
+        report.orphans
     );
 
     Ok(report)
@@ -699,7 +854,17 @@ fn build_note_playback(app: &AppHandle, db: &Database, note_id: &str) -> Option<
 
     let playback_file = recordings_dir.join(format!("{}.wav", note_id));
     match build_playback_track(&inputs, &playback_file) {
-        Ok(()) => Some(playback_file.to_string_lossy().to_string()),
+        // Compacted straight away. The mix is a whole note written out again,
+        // so leaving it as WAV would quietly put a second full-size copy of
+        // every meeting on disk — which is exactly what the first compaction
+        // pass missed. A failure here keeps the WAV, which still plays.
+        Ok(()) => match audio::codec::compact(&playback_file) {
+            Ok(done) => Some(done.path.to_string_lossy().to_string()),
+            Err(e) => {
+                eprintln!("Playback: kept the uncompressed mix ({e})");
+                Some(playback_file.to_string_lossy().to_string())
+            }
+        },
         Err(e) => {
             eprintln!("Playback: failed to build track from {} segment(s): {}", inputs.len(), e);
             None
@@ -1490,4 +1655,33 @@ pub fn resume_system_only_recording(
         system_path: Some(system_path.to_string_lossy().to_string()),
         playback_path: None,
     })
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+
+    #[test]
+    fn rotation_is_off_unless_it_was_turned_on() {
+        // It touches the path that writes irreplaceable audio. Off is the only
+        // safe default, and an unset or unreadable value is off.
+        assert_eq!(chunk_interval(None), None);
+        assert_eq!(chunk_interval(Some("")), None);
+        assert_eq!(chunk_interval(Some("0")), None);
+        assert_eq!(chunk_interval(Some("soon")), None);
+    }
+
+    #[test]
+    fn a_sensible_interval_is_taken_as_given() {
+        assert_eq!(chunk_interval(Some("20")), Some(Duration::from_secs(1_200)));
+    }
+
+    #[test]
+    fn absurd_intervals_are_brought_into_range() {
+        // A one-minute chunk rotates more than it records; a day-long one
+        // bounds nothing. Clamped rather than refused, because a number in the
+        // box should do something predictable.
+        assert_eq!(chunk_interval(Some("1")), Some(Duration::from_secs(300)));
+        assert_eq!(chunk_interval(Some("6000")), Some(Duration::from_secs(7_200)));
+    }
 }

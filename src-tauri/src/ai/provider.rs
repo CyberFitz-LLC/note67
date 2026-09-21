@@ -199,8 +199,51 @@ impl LlmClient {
             LlmClient::Ollama(c) => Ok(c
                 .generate(model, prompt, temperature, context_length)
                 .await?),
-            LlmClient::OpenAiCompat(c) => c.generate(model, prompt, temperature).await,
+            // `context_length` is Ollama's window, not a reply ceiling, so the
+            // OpenAI path gets its own bound. Without one a reasoning model can
+            // deliberate until it runs out of room and never answer.
+            LlmClient::OpenAiCompat(c) => {
+                c.generate(model, prompt, temperature, Self::max_tokens_for(context_length))
+                    .await
+            }
         }
+    }
+
+    /// Ask about an image.
+    ///
+    /// Only the OpenAI-compatible path carries images. Ollama has its own
+    /// shape for this and nothing in the app needs it yet, so rather than
+    /// pretend, it says plainly that it cannot — a caller that silently sent
+    /// the prompt without the picture would get a confident answer about
+    /// nothing.
+    pub async fn generate_with_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        image: &[u8],
+        mime: &str,
+        temperature: f32,
+    ) -> Result<String, LlmError> {
+        match self {
+            LlmClient::OpenAiCompat(c) => {
+                c.generate_with_image(model, prompt, image, mime, temperature)
+                    .await
+            }
+            LlmClient::Ollama(_) => Err(LlmError::InvalidResponse(
+                "Reading screenshots needs an OpenAI-compatible endpoint with a vision model; \
+                 the Ollama provider does not support images here."
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// A ceiling on the reply, derived from whatever the caller asked for.
+    ///
+    /// Generous by default: this bounds runaway deliberation, it is not a
+    /// length target, and cutting a legitimate long answer short would be its
+    /// own defect.
+    fn max_tokens_for(context_length: Option<u32>) -> Option<u32> {
+        Some(context_length.map(|c| c.min(4_096)).unwrap_or(2_048))
     }
 
     pub async fn generate_stream(
@@ -215,7 +258,16 @@ impl LlmClient {
             LlmClient::Ollama(c) => Ok(c
                 .generate_stream(model, prompt, temperature, context_length, tx)
                 .await?),
-            LlmClient::OpenAiCompat(c) => c.generate_stream(model, prompt, temperature, tx).await,
+            LlmClient::OpenAiCompat(c) => {
+                c.generate_stream(
+                    model,
+                    prompt,
+                    temperature,
+                    Self::max_tokens_for(context_length),
+                    tx,
+                )
+                .await
+            }
         }
     }
 }

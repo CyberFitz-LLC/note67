@@ -1,3 +1,4 @@
+mod assist;
 mod ai;
 mod audio;
 mod commands;
@@ -359,6 +360,7 @@ pub fn run() {
                 api.prevent_close();
             }
         })
+        .manage(crate::assist::runner::AssistState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
             show_main_window,
@@ -404,6 +406,16 @@ pub fn run() {
             commands::rebuild_note_playback,
             commands::stop_dual_recording_with_segments,
             commands::compact_recordings,
+            commands::get_track_levels,
+            commands::start_assist,
+            commands::list_memory_banks,
+            commands::stop_assist,
+            commands::assist_running,
+            commands::expand_assist_option,
+            commands::add_screenshot,
+            commands::list_screenshots,
+            commands::delete_screenshot,
+            commands::extract_screenshot_text,
             commands::is_dual_recording,
             // Pause/Resume/Continue recording commands
             commands::get_recording_phase,
@@ -436,6 +448,8 @@ pub fn run() {
             commands::get_transcript,
             commands::add_transcript_segment,
             commands::start_live_transcription,
+            commands::set_live_transcription_paused,
+            commands::live_transcription_paused,
             commands::stop_live_transcription,
             commands::is_live_transcribing,
             commands::retranscribe_audio_segment,

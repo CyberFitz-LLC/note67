@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+use hound::{SampleFormat, WavSpec, WavWriter};
 
 use crate::audio::AudioError;
 
@@ -46,6 +46,8 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
 /// The returned spec keeps this function's old shape, since everything below
 /// works in channels and sample rate.
 fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, WavSpec), AudioError> {
+    // Resolved, so a path stored before compaction still finds its audio.
+    let path = &crate::audio::codec::resolve_existing(path).unwrap_or_else(|| path.to_path_buf());
     let decoded = crate::audio::codec::decode(path)?;
     let spec = WavSpec {
         channels: decoded.channels,
@@ -74,7 +76,7 @@ pub fn build_playback_track(
     let first_mic = segments
         .iter()
         .map(|(mic, _)| mic)
-        .find(|mic| mic.exists())
+        .find(|mic| crate::audio::codec::resolve_existing(mic).is_some())
         .ok_or_else(|| {
             AudioError::IoError(std::io::Error::other("no readable audio segments"))
         })?;
@@ -101,7 +103,7 @@ pub fn build_playback_track(
     };
 
     for (mic_path, system_path) in segments {
-        if !mic_path.exists() {
+        if crate::audio::codec::resolve_existing(mic_path).is_none() {
             eprintln!("Playback: skipping missing segment {}", mic_path.display());
             continue;
         }
@@ -176,6 +178,7 @@ fn normalize_channels_f32(samples: &[f32], from_channels: u16, to_channels: u16)
 
 #[cfg(test)]
 mod tests {
+    use hound::WavReader;
     use super::*;
 
     /// Write a WAV of `frames` frames, every sample set to `amplitude`.

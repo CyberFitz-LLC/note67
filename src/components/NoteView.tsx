@@ -24,6 +24,18 @@ import {
 import { useOllamaStore } from "../stores/ollamaStore";
 import { useWhisperStore } from "../stores/whisperStore";
 import { useRecordingStore } from "../stores/recordingStore";
+import { useScreenshots, imageFromClipboard } from "../hooks/useScreenshots";
+import {
+  DEFAULT_CONFIG,
+  useTranscriptionBackend,
+  willUseRemote,
+} from "../hooks/useTranscriptionBackend";
+import { ScreenshotStrip } from "./ScreenshotStrip";
+import { TrackLevelMeters } from "./TrackLevelMeters";
+import { transcriptToText } from "../utils/transcriptText";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { AssistPanes } from "./AssistPanes";
+import { useAssist } from "../hooks/useAssist";
 import { useLiveTranscriptionStore } from "../stores/liveTranscriptionStore";
 import { useSummaryUiStore } from "../stores/summaryUiStore";
 import { useNoteUiStore } from "../stores/noteUiStore";
@@ -91,7 +103,13 @@ export function NoteView({
   const isRecording =
     useRecordingStore((s) => s.isRecording) && isThisNoteRecording;
   const isPaused = useRecordingStore((s) => s.isPaused) && isThisNoteRecording;
-  const audioLevel = useRecordingStore((s) => s.audioLevel);
+  const trackLevels = useRecordingStore((s) => s.trackLevels);
+  const [copied, setCopied] = useState(false);
+  // Transcribing is suspended while the recording continues. The moment someone
+  // most wants this — about to share a screen, machine already struggling — is
+  // exactly when they least want to stop recording.
+  const [transcriptionPaused, setTranscriptionPaused] = useState(false);
+  const assist = useAssist(note.id);
   const recordingMode = useRecordingStore((s) => s.recordingMode);
 
   // Live transcription is scoped to the recording note, same as above.
@@ -354,33 +372,74 @@ export function NoteView({
 
   // Retranscribe state and handlers
   const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const { config: transcriptionConfig } = useTranscriptionBackend();
+  const {
+    screenshots,
+    add: addScreenshot,
+    extract: extractScreenshot,
+    remove: removeScreenshot,
+    error: screenshotError,
+  } = useScreenshots(note.id);
+
+  // Paste an image anywhere in this note to file it against the meeting.
+  //
+  // Bound to the document rather than a single element, because a screenshot
+  // is pasted wherever the cursor happens to be. Anything that is not an image
+  // is left entirely alone, so ordinary text pasting is untouched.
+  useEffect(() => {
+    const onPaste = async (event: ClipboardEvent) => {
+      const bytes = await imageFromClipboard(event);
+      if (!bytes) return;
+      event.preventDefault();
+      // Positioned by the transcript rather than a wall clock: the end of the
+      // last thing transcribed is where the conversation currently is, which
+      // is exactly where a slide being discussed belongs. It works the same
+      // during a recording and after one, so there is no second clock to keep
+      // in step.
+      const last = transcript[transcript.length - 1];
+      await addScreenshot(bytes, (last?.end_time ?? 0) * 1000);
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  }, [addScreenshot, transcript]);
+  // Why a retranscribe did nothing. It used to fail into console.error, so the
+  // commonest failure — no Whisper model loaded, which is normal on a machine
+  // using a remote recogniser — looked exactly like the button doing nothing.
+  const [retranscribeError, setRetranscribeError] = useState<string | null>(null);
+  // What a completed pass actually produced. Success used to be silent, so a
+  // run that finished and changed nothing looked exactly like one that never
+  // ran — which is precisely the state that took a round of guessing to tell
+  // apart.
+  const [retranscribeOutcome, setRetranscribeOutcome] = useState<string | null>(
+    null,
+  );
 
   const handleRetranscribeAll = useCallback(async () => {
     if (isRetranscribing) return;
     setIsRetranscribing(true);
     // Switch to transcript tab to show progress
     onTabChange("transcript");
+    setRetranscribeError(null);
+    setRetranscribeOutcome(null);
     try {
-      console.log("Starting retranscribe for note:", note.id);
-      console.log("Audio segments:", audioSegments);
-      console.log("Uploads:", uploads);
       const result = await transcriptionApi.retranscribeNote(note.id);
       console.log("Retranscribe result:", result);
+      setRetranscribeOutcome(
+        `Rebuilt ${result.totalSegments} segment${
+          result.totalSegments === 1 ? "" : "s"
+        } from ${result.completedItems} recording${
+          result.completedItems === 1 ? "" : "s"
+        }.`,
+      );
       // Refresh transcripts
       onTranscriptUpdated?.();
     } catch (error) {
       console.error("Retranscribe failed:", error);
+      setRetranscribeError(String(error));
     } finally {
       setIsRetranscribing(false);
     }
-  }, [
-    note.id,
-    isRetranscribing,
-    onTranscriptUpdated,
-    onTabChange,
-    audioSegments,
-    uploads,
-  ]);
+  }, [note.id, isRetranscribing, onTranscriptUpdated, onTabChange]);
 
   // Set titleValue to current note.title when entering edit mode
   const handleEditTitle = () => {
@@ -577,9 +636,32 @@ export function NoteView({
                           />
                         </svg>
                       )}
-                      {isRetranscribing ? "Retranscribing..." : "Retranscribe"}
+                      {isRetranscribing
+                        ? "Retranscribing..."
+                        : willUseRemote(transcriptionConfig ?? DEFAULT_CONFIG)
+                          ? "Retranscribe with speakers"
+                          : "Retranscribe"}
                     </button>
                   )}
+                {retranscribeOutcome && !retranscribeError && (
+                  <span
+                    className="text-xs ml-2"
+                    style={{ color: "var(--color-text-secondary)" }}
+                  >
+                    {retranscribeOutcome}
+                  </span>
+                )}
+                {retranscribeError && (
+                  <span
+                    className="text-xs ml-2"
+                    style={{ color: "#ef4444" }}
+                    title={retranscribeError}
+                  >
+                    {retranscribeError.includes("No model loaded")
+                      ? "Retranscribing needs a local Whisper model — load one in Settings → Whisper."
+                      : retranscribeError.replace(/^Error:\s*/, "")}
+                  </span>
+                )}
               </>
             )}
             {/* Generate/Regenerate button */}
@@ -811,20 +893,41 @@ export function NoteView({
                 ? "Listening (system audio only)"
                 : "Recording"}
             </span>
-            {recordingMode !== "system-only" && (
-              <div
-                className="flex-1 h-1 rounded-full overflow-hidden"
-                style={{ backgroundColor: "rgba(229, 77, 46, 0.2)" }}
+            {isThisNoteRecording && (
+              <button
+                type="button"
+                title={
+                  transcriptionPaused
+                    ? "Resume transcribing. The recording never stopped."
+                    : "Stop transcribing but keep recording — useful before sharing your screen"
+                }
+                onClick={async () => {
+                  const next = !transcriptionPaused;
+                  await transcriptionApi.setPaused(next);
+                  setTranscriptionPaused(next);
+                }}
+                className="text-xs px-2 py-0.5 rounded-lg flex-shrink-0"
+                style={{
+                  backgroundColor: transcriptionPaused
+                    ? "var(--color-accent, #3b82f6)"
+                    : "var(--color-bg-subtle)",
+                  color: transcriptionPaused ? "white" : "var(--color-text-secondary)",
+                  border: transcriptionPaused
+                    ? "none"
+                    : "1px solid var(--color-border)",
+                }}
               >
-                <div
-                  className="h-full rounded-full transition-all duration-100"
-                  style={{
-                    width: `${Math.min(100, audioLevel * 400)}%`,
-                    backgroundColor: "var(--color-accent)",
-                  }}
-                />
-              </div>
+                {transcriptionPaused ? "Transcribing paused" : "Pause transcribing"}
+              </button>
             )}
+
+            <TrackLevelMeters
+              micRms={trackLevels.mic_rms}
+              micPeak={trackLevels.mic_peak}
+              systemRms={trackLevels.system_rms}
+              systemPeak={trackLevels.system_peak}
+              showMic={recordingMode !== "system-only"}
+            />
           </div>
         )}
 
@@ -911,6 +1014,87 @@ export function NoteView({
 
           {activeTab === "transcript" && (
             <>
+              {transcript.length > 0 && (
+                <div className="flex justify-end mb-2">
+                  <button
+                    type="button"
+                    title="Copy the whole transcript, with speakers and timestamps"
+                    onClick={async () => {
+                      await writeText(transcriptToText(transcript));
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg"
+                    style={{
+                      backgroundColor: "var(--color-bg-subtle)",
+                      border: "1px solid var(--color-border)",
+                      color: copied ? "#22c55e" : "var(--color-text-secondary)",
+                    }}
+                  >
+                    <svg
+                      className="w-3.5 h-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                      />
+                    </svg>
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+              )}
+              {(isThisNoteRecording || assist.running) && (
+                <div
+                  className="mb-4 p-3 rounded-lg"
+                  style={{
+                    backgroundColor: "var(--color-bg-subtle)",
+                    border: "1px solid var(--color-border)",
+                  }}
+                >
+                  <AssistPanes
+                    running={assist.running}
+                    status={assist.status}
+                    statusIsProblem={assist.statusIsProblem}
+                    brief={assist.brief}
+                    questions={assist.questions}
+                    options={assist.options}
+                    raw={assist.raw}
+                    asOf={assist.asOf}
+                    meetingSeconds={
+                      transcript.length > 0
+                        ? (transcript[transcript.length - 1]?.end_time ?? 0)
+                        : null
+                    }
+                    receipt={assist.receipt}
+                    attestationNote={assist.attestationNote}
+                    error={assist.error}
+                    onStart={assist.start}
+                    onStop={assist.stop}
+                    onExpand={assist.expand}
+                  />
+                </div>
+              )}
+
+              {screenshotError && (
+                <p className="mb-3 text-sm" style={{ color: "#ef4444" }}>
+                  {screenshotError}
+                </p>
+              )}
+              {screenshots.length > 0 && (
+                <div className="mb-4">
+                  <ScreenshotStrip
+                    screenshots={screenshots}
+                    onExtract={extractScreenshot}
+                    onDelete={removeScreenshot}
+                  />
+                </div>
+              )}
               {(isAutoRetranscribing || isRetranscribing) && (
                 <div
                   className="mb-3 px-3 py-2 rounded-lg flex items-center gap-2 text-xs"

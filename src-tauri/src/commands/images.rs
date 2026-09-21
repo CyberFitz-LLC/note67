@@ -1,5 +1,23 @@
+use std::path::PathBuf;
+
 use tauri::Manager;
 use uuid::Uuid;
+
+/// Where a note's images live.
+///
+/// One convention, used by both body attachments and meeting screenshots, so
+/// `delete_note_attachments` continues to clean up everything a note owns
+/// rather than everything one feature happened to know about.
+pub fn attachments_dir(app: &tauri::AppHandle, note_id: &str) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("attachments")
+        .join(note_id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create attachments dir: {}", e))?;
+    Ok(dir)
+}
 
 /// Save an image to the attachments folder and return the asset URL
 #[tauri::command]

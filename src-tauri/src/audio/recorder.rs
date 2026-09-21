@@ -6,7 +6,15 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Sample, SampleFormat};
+use std::path::Path;
 use hound::{WavSpec, WavWriter};
+
+/// The writer the capture callback writes through.
+///
+/// Shared so a rotation can swap it without stopping the stream. The inner
+/// `Option` is what makes the swap a pointer move rather than a copy.
+pub type SharedWriter =
+    Arc<std::sync::Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
 use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioError;
@@ -71,6 +79,11 @@ pub struct RecordingState {
     /// the thread owns the writer, and hound only writes the header (and hence
     /// the sample count) on finalize.
     pub file_finalized: AtomicBool,
+    /// The writer the running capture is using, so a segment can be rotated
+    /// without stopping the stream. `None` when nothing is recording.
+    pub active_writer: std::sync::Mutex<Option<SharedWriter>>,
+    /// The spec that writer was opened with, needed to open its successor.
+    pub active_spec: std::sync::Mutex<Option<WavSpec>>,
 }
 
 impl RecordingState {
@@ -93,6 +106,8 @@ impl RecordingState {
             current_segment_db_id: AtomicI64::new(0),
             // Nothing has been recorded yet, so there is nothing to wait for.
             file_finalized: AtomicBool::new(true),
+            active_writer: std::sync::Mutex::new(None),
+            active_spec: std::sync::Mutex::new(None),
         }
     }
 
@@ -331,7 +346,15 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
     };
 
     let writer = WavWriter::create(&output_path, spec)?;
-    let writer = Arc::new(std::sync::Mutex::new(Some(writer)));
+    let writer: SharedWriter = Arc::new(std::sync::Mutex::new(Some(writer)));
+
+    // Published so a rotation can reach it. Cleared when the recording ends.
+    if let Ok(mut slot) = state.active_writer.lock() {
+        *slot = Some(writer.clone());
+    }
+    if let Ok(mut slot) = state.active_spec.lock() {
+        *slot = Some(spec);
+    }
 
     let state_for_callback = state.clone();
     let writer_clone = writer.clone();
@@ -392,9 +415,94 @@ fn run_recording(state: Arc<RecordingState>, output_path: PathBuf) -> Result<(),
     {
         let _ = w.finalize();
     }
+    if let Ok(mut slot) = state.active_writer.lock() {
+        *slot = None;
+    }
     state.file_finalized.store(true, Ordering::SeqCst);
 
     Ok(())
+}
+
+/// Start writing to a new file without stopping the recording.
+///
+/// Returns the file just closed.
+///
+/// The order matters and is the whole point. The new writer is created first,
+/// outside the lock; the swap under the lock is a pointer move; and the old
+/// writer is finalised afterwards, off the audio thread. Finalising under the
+/// lock would block the capture callback for as long as it took to rewrite a
+/// header — on the audio thread, mid-recording, which is how a rotation
+/// designed to protect a recording would damage one.
+pub fn rotate_writer(state: &RecordingState, next_path: &Path) -> Result<PathBuf, AudioError> {
+    let spec = state
+        .active_spec
+        .lock()
+        .map_err(|_| AudioError::LockError)?
+        .ok_or_else(|| AudioError::IoError(std::io::Error::other("nothing is recording")))?;
+
+    let shared = state
+        .active_writer
+        .lock()
+        .map_err(|_| AudioError::LockError)?
+        .clone()
+        .ok_or_else(|| AudioError::IoError(std::io::Error::other("nothing is recording")))?;
+
+    let previous = {
+        let path = state.output_path.lock().map_err(|_| AudioError::LockError)?;
+        path.clone()
+            .ok_or_else(|| AudioError::IoError(std::io::Error::other("no current file")))?
+    };
+
+    // Opened before the swap, so the lock is held only for the exchange.
+    let fresh = WavWriter::create(next_path, spec)?;
+
+    let retired = {
+        let mut guard = shared.lock().map_err(|_| AudioError::LockError)?;
+        guard.replace(fresh)
+    };
+
+    // The capture callback is already writing to the new file by here.
+    if let Some(writer) = retired {
+        writer.finalize()?;
+    }
+
+    if let Ok(mut path) = state.output_path.lock() {
+        *path = Some(next_path.to_path_buf());
+    }
+
+    Ok(previous)
+}
+
+/// How many samples either capture buffer may hold.
+///
+/// Thirty seconds at 48 kHz stereo — comfortably more than any consumer needs
+/// between drains (whisper takes every three seconds, the streaming feed every
+/// hundred milliseconds) and bounded at about eleven megabytes rather than
+/// unbounded.
+pub const MAX_BUFFERED_SAMPLES: usize = 48_000 * 2 * 30;
+
+/// Drop the oldest samples so a buffer stays near `limit`.
+///
+/// Only once it has drifted a quarter past the limit, not on every call.
+/// Draining from the front moves the whole remaining buffer, and this runs
+/// inside the capture callback — trimming on every callback would put an
+/// eleven-megabyte memmove on the audio thread hundreds of times a second,
+/// which is the same kind of fault as the leak it is fixing. With the slack it
+/// happens roughly once every seven seconds instead.
+///
+/// Drains rather than clears: a brief stall should cost the stalled consumer
+/// nothing, and only a sustained one should lose audio.
+pub fn trim_to_recent(buffer: &mut Vec<f32>, limit: usize) {
+    let slack = limit / 4;
+    if buffer.len() > limit + slack {
+        let excess = buffer.len() - limit;
+        buffer.drain(..excess);
+    }
+}
+
+/// The most either buffer can hold, slack included.
+pub fn buffer_ceiling(limit: usize) -> usize {
+    limit + limit / 4
 }
 
 fn process_audio(
@@ -411,9 +519,23 @@ fn process_audio(
     let rms = (sum / data.len() as f32).sqrt();
     state.audio_level.store(rms.to_bits(), Ordering::SeqCst);
 
-    // Copy samples to buffer for live transcription
+    // Copy samples to buffer for live transcription, bounded.
+    //
+    // This buffer is filled by the capture callback and emptied by whoever is
+    // transcribing. When nothing is — no model loaded, live transcription not
+    // started, or the streaming feed loop having stopped because its socket
+    // died — it used to grow for as long as the recording ran. At 48 kHz
+    // stereo that is over a gigabyte an hour of memory nobody would ever read,
+    // and on a machine also carrying a video call the result is a machine that
+    // starts stuttering about ninety minutes in. That happened, in a real
+    // two-hour meeting, and the recording is not what failed — the rest of the
+    // computer did.
+    //
+    // Bounded, and the oldest goes first: a consumer that has stalled wants the
+    // current audio, not a backlog it can never catch up on.
     if let Ok(mut buffer) = state.audio_buffer.lock() {
         buffer.extend_from_slice(data);
+        trim_to_recent(&mut buffer, MAX_BUFFERED_SAMPLES);
     }
 
     // Write to WAV file
@@ -534,4 +656,84 @@ mod tests {
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
+    #[test]
+    fn a_buffer_nobody_is_reading_stops_growing() {
+        // The bug this exists for, from a real two-hour meeting: only the
+        // streaming feed loop drains this buffer, it stops when its socket
+        // dies, and the capture callback carries on. At 48 kHz stereo that is
+        // over a gigabyte an hour of memory nothing will ever read — and the
+        // machine, which was also carrying a video call, began stuttering
+        // around ninety minutes in.
+        // Two hours of capture, fed a second at a time. A second per iteration
+        // rather than a callback's worth keeps the test quick while still
+        // driving the buffer far past its limit — the invariant is about size,
+        // not about chunking.
+        let mut buffer: Vec<f32> = Vec::new();
+        let one_second = vec![0.1f32; 48_000 * 2];
+        for _ in 0..7_200 {
+            buffer.extend_from_slice(&one_second);
+            trim_to_recent(&mut buffer, MAX_BUFFERED_SAMPLES);
+        }
+        assert!(
+            buffer.len() <= buffer_ceiling(MAX_BUFFERED_SAMPLES),
+            "two hours of unread capture grew to {} samples",
+            buffer.len()
+        );
+    }
+
+    #[test]
+    fn trimming_is_rare_enough_for_an_audio_callback() {
+        // Draining moves the whole buffer, so doing it on every callback would
+        // put an eleven-megabyte memmove on the audio thread hundreds of times
+        // a second. Counted, because "it is bounded" and "it is cheap" are
+        // different claims and this needs both.
+        let mut buffer: Vec<f32> = vec![0.0; MAX_BUFFERED_SAMPLES];
+        let mut trims = 0;
+        let chunk = vec![0.1f32; 1024];
+        for _ in 0..2_000 {
+            let before = buffer.len();
+            buffer.extend_from_slice(&chunk);
+            trim_to_recent(&mut buffer, MAX_BUFFERED_SAMPLES);
+            if buffer.len() < before + chunk.len() {
+                trims += 1;
+            }
+        }
+        assert!(
+            trims <= 2,
+            "trimmed {trims} times in 2000 callbacks; that belongs off the audio thread"
+        );
+    }
+
+    #[test]
+    fn the_bound_is_about_eleven_megabytes_not_gigabytes() {
+        // Stated in the units that matter. Thirty seconds is generous next to
+        // the three-second whisper cycle and the hundred-millisecond streaming
+        // one, and it is what makes the failure survivable rather than fatal.
+        let bytes = buffer_ceiling(MAX_BUFFERED_SAMPLES) * std::mem::size_of::<f32>();
+        assert!(bytes < 20 * 1024 * 1024, "{bytes} bytes is too much to hold");
+        assert!(bytes > 4 * 1024 * 1024, "{bytes} bytes is too little to be useful");
+    }
+
+    #[test]
+    fn a_brief_stall_costs_the_consumer_nothing() {
+        // Trimming drops the oldest rather than clearing, so a consumer that
+        // paused for a second still gets everything it missed.
+        let mut buffer: Vec<f32> = vec![0.5; 48_000];
+        trim_to_recent(&mut buffer, MAX_BUFFERED_SAMPLES);
+        assert_eq!(buffer.len(), 48_000, "a second of audio was discarded");
+    }
+
+    #[test]
+    fn trimming_keeps_the_newest_audio() {
+        // A stalled consumer wants the current conversation, not a backlog it
+        // can never catch up on.
+        let mut buffer: Vec<f32> = Vec::new();
+        buffer.extend(std::iter::repeat_n(1.0, MAX_BUFFERED_SAMPLES));
+        buffer.extend(std::iter::repeat_n(2.0, MAX_BUFFERED_SAMPLES / 2));
+        trim_to_recent(&mut buffer, MAX_BUFFERED_SAMPLES);
+
+        assert_eq!(buffer.len(), MAX_BUFFERED_SAMPLES);
+        assert_eq!(*buffer.last().unwrap(), 2.0, "the newest audio was dropped");
+    }
+
 }

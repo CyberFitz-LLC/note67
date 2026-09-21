@@ -141,6 +141,62 @@ pub fn build_request(
     })
 }
 
+/// The domain for an assist-session action.
+///
+/// Its own domain, so a session receipt can never collide with a transcript
+/// receipt for the same note. The meeting-attest domain is frozen — changing
+/// it would orphan every receipt already minted — and this sits beside it
+/// rather than reaching into it.
+pub const ASSIST_SESSION_DOMAIN: &str = "note67.action.v1|assist-session|";
+
+/// The tool an assist session asks for.
+///
+/// **The node compares tools by equality**, so a credential whose authority
+/// scope does not list this exact string yields a denial, not a warning. That
+/// is the correct outcome — it says the installation was not authorised for
+/// this activity — but it means adding live assistance to an existing
+/// installation requires a credential that names it.
+pub const ASSIST_SESSION_TOOL: &str = "note67.assist.session";
+
+pub fn assist_action_id(note_id: &str) -> Hash256 {
+    let mut hasher = Sha256::new();
+    hasher.update(ASSIST_SESSION_DOMAIN.as_bytes());
+    hasher.update(note_id.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    Hash256::from_bytes(digest)
+}
+
+/// Build the request that attests one live-assistance session.
+///
+/// One per session rather than one per pass. Continuous summarisation is a
+/// single governed activity that begins when it is switched on; a receipt for
+/// every ninety-second pass would say nothing the first does not, and would
+/// produce a chain nobody could read.
+pub fn build_session_request(
+    credential: &AutonomousVolitionCredential,
+    key: &SigningKey,
+    note_id: &str,
+    now: Timestamp,
+) -> Result<EmitRequest, String> {
+    let mut action = build_action(note_id, &credential.subject_did);
+    action.action_id = assist_action_id(note_id);
+    action.tool = Some(ASSIST_SESSION_TOOL.to_string());
+    action.action_name = Some(ASSIST_SESSION_TOOL.to_string());
+
+    let payload = signature_payload(credential, &action, &now)?;
+    let signature = key.sign(&payload);
+
+    Ok(EmitRequest {
+        validation: ValidationRequest {
+            credential: credential.clone(),
+            action: Some(action),
+            now,
+        },
+        subject_signature: Signature::Ed25519(signature.to_bytes()),
+        subject_public_key: Some(PublicKey::from_bytes(key.verifying_key().to_bytes())),
+    })
+}
+
 pub fn now() -> Timestamp {
     Timestamp {
         physical_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,

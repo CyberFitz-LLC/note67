@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   DEFAULT_CONFIG,
   willStream,
+  willUseOpenAi,
   willUseRemote,
   type TranscriptionConfig,
 } from "../../hooks/useTranscriptionBackend";
@@ -29,7 +30,9 @@ export function TranscriptionBackendSettings({
 
   const remote = draft.backend === "remote";
   const streaming = draft.backend === "streaming";
+  const openai = draft.backend === "openai";
   const willSend = willUseRemote(draft);
+  const willSendOpenAi = willUseOpenAi(draft);
   const willSendLive = willStream(draft);
 
   const field = (
@@ -94,6 +97,11 @@ export function TranscriptionBackendSettings({
               "Separates speakers into Speaker 1, Speaker 2… which you can then rename. Live transcription still runs here.",
             ],
             [
+              "openai",
+              "Send finished recordings to an OpenAI-compatible recogniser",
+              "For vLLM or SGLang, including MOSS-Transcribe-Diarize. Separates speakers and transcribes in one pass. Live transcription still runs here.",
+            ],
+            [
               "streaming",
               "Stream live audio to a recogniser",
               "Better live transcription, but the microphone and meeting audio are sent continuously while you record, and speakers are not identified.",
@@ -155,11 +163,20 @@ export function TranscriptionBackendSettings({
             "password",
           )}
           {field(
-            "Most speakers to expect (optional)",
+            "Most speakers to expect",
             draft.maxSpeakers,
             (maxSpeakers) => setDraft({ ...draft, maxSpeakers }),
-            "e.g. 8 — leave empty to let it work this out",
+            "e.g. 12 — leave empty and the service caps at 8",
           )}
+
+          {/* The old wording said an empty box let the service "work it out".
+              It does not: it falls back to a limit of 8 and merges everyone
+              past it, so a ten-person call quietly comes back as eight voices
+              and nothing says why. */}
+          <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+            Left empty, the recogniser allows at most 8 speakers and merges any
+            beyond that — set this above the largest meeting you record.
+          </p>
 
           {/* The Rust side falls back to local for a URL it cannot use. Saying
               so here is the difference between "not finished yet" and a
@@ -173,6 +190,54 @@ export function TranscriptionBackendSettings({
           )}
 
           {willSend && (
+            <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+              Uploaded recordings will be sent to this address. Nothing attests
+              that the audio left this machine — receipts describe the
+              transcript, not where its audio has been.
+            </p>
+          )}
+        </div>
+      )}
+
+      {openai && (
+        <div className="space-y-3">
+          {field(
+            "Service address",
+            draft.baseUrl,
+            (baseUrl) => setDraft({ ...draft, baseUrl }),
+            "http://192.168.32.13:8011",
+          )}
+          {field(
+            "Model",
+            draft.openaiModel,
+            (openaiModel) => setDraft({ ...draft, openaiModel }),
+            "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+          )}
+          {field(
+            "API key (optional)",
+            draft.apiKey,
+            (apiKey) => setDraft({ ...draft, apiKey }),
+            "leave empty if the service needs none",
+            "password",
+          )}
+
+          {/* The endpoint has no notion of a default model and rejects an
+              empty one with a 400 nobody can interpret, so a blank box becomes
+              the model this was built against rather than nothing. */}
+          <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+            Left empty, the model defaults to{" "}
+            <code>OpenMOSS-Team/MOSS-Transcribe-Diarize</code>.
+          </p>
+
+          {!willSendOpenAi && (
+            <p className="text-sm" style={{ color: "#eab308" }}>
+              Not usable yet — an address starting <code>http://</code> or{" "}
+              <code>https://</code> is needed. Until then uploads are
+              transcribed on this machine.
+            </p>
+          )}
+
+          {willSendOpenAi && (
             <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
               Uploaded recordings will be sent to this address. Nothing attests
               that the audio left this machine — receipts describe the

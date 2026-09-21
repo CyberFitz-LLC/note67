@@ -244,8 +244,29 @@ pub enum Recognised {
 /// Audio goes in through `send`, recognitions come out through the receiver
 /// returned by `connect`. Dropping the session closes the socket.
 pub struct StreamingSession {
-    audio: mpsc::Sender<Vec<u8>>,
+    outgoing: mpsc::Sender<OutFrame>,
     alive: Arc<AtomicBool>,
+    /// Audio handed to the socket.
+    sent: Arc<std::sync::atomic::AtomicUsize>,
+    /// Audio the recogniser has actually finished with.
+    ///
+    /// The gap between the two is the backlog, and it is the only view this
+    /// client gets of how far behind the far side is. Nothing acknowledges
+    /// audio, so without this the socket accepts everything and a recogniser
+    /// running below real time falls behind for ever — an hour behind after
+    /// four, in a real workshop.
+    finalized: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// What goes down the socket.
+///
+/// Audio, or a request to close the current utterance. Finalize has to travel
+/// the same queue rather than being sent directly, or it would overtake audio
+/// still waiting to go and cut an utterance short of its own last words.
+#[derive(Debug)]
+enum OutFrame {
+    Audio(Vec<u8>),
+    Finalize,
 }
 
 impl StreamingSession {
@@ -258,16 +279,52 @@ impl StreamingSession {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Queue a chunk. Returns false once the socket is gone.
+    /// Queue a chunk.
     ///
     /// Never blocks the capture loop: audio arrives on a real-time thread, and
-    /// waiting on a network send there would drop samples. A full queue means
-    /// the recogniser is behind, which is worth reporting rather than hiding.
-    pub fn send(&self, pcm: Vec<u8>) -> bool {
+    /// waiting on a network send there would drop samples.
+    ///
+    /// The two ways this can fail are not the same thing and must not be
+    /// treated as one. A dead socket means stop; a full queue means the
+    /// recogniser is behind and audio is being lost. Returning a plain `false`
+    /// for both made back-pressure look like a disconnect, and the only thing
+    /// it produced was a log line claiming the recogniser had "stopped
+    /// accepting audio" while it was simply overloaded.
+    pub fn send(&self, pcm: Vec<u8>) -> SendOutcome {
+        self.enqueue(OutFrame::Audio(pcm))
+    }
+
+    /// Close the current utterance.
+    ///
+    /// This recogniser returns a final **only** when asked, so without this a
+    /// meeting is one utterance: partials that are ever-growing prefixes of the
+    /// whole conversation, a single final at the end, and every timestamp at
+    /// zero because nothing ever advanced. It also grows the recogniser's own
+    /// working state without bound, which is why a transcript that starts crisp
+    /// falls minutes behind after half an hour.
+    pub fn finalize(&self) -> SendOutcome {
+        self.enqueue(OutFrame::Finalize)
+    }
+
+    /// How much audio has been sent that the recogniser has not finished with.
+    ///
+    /// Includes the utterance currently open, so this sits at a few seconds
+    /// during normal speech and only grows when the far side cannot keep up.
+    pub fn backlog_seconds(&self) -> f64 {
+        let sent = self.sent.load(Ordering::SeqCst);
+        let done = self.finalized.load(Ordering::SeqCst);
+        sent.saturating_sub(done) as f64 / SAMPLE_RATE as f64
+    }
+
+    fn enqueue(&self, frame: OutFrame) -> SendOutcome {
         if !self.is_alive() {
-            return false;
+            return SendOutcome::Disconnected;
         }
-        self.audio.try_send(pcm).is_ok()
+        match self.outgoing.try_send(frame) {
+            Ok(()) => SendOutcome::Sent,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => SendOutcome::Behind,
+            Err(_) => SendOutcome::Disconnected,
+        }
     }
 }
 
@@ -277,6 +334,17 @@ impl StreamingSession {
 /// discards whatever was still being decoded — which is always the end of the
 /// meeting, the part people go back to.
 pub const FINALIZE_GRACE: Duration = Duration::from_millis(1500);
+
+/// What happened to a chunk handed to a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    Sent,
+    /// The recogniser is not keeping up and this audio was dropped. The
+    /// recording continues; the transcript will have a hole.
+    Behind,
+    /// The socket is gone. The session has to stop.
+    Disconnected,
+}
 
 /// How many chunks may queue before the sender gives up.
 ///
@@ -294,7 +362,7 @@ pub async fn connect(
         .map_err(|e| format!("could not open a {label} stream: {e}"))?;
     let (mut write, mut read) = socket.split();
 
-    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(QUEUE_CHUNKS);
+    let (audio_tx, mut audio_rx) = mpsc::channel::<OutFrame>(QUEUE_CHUNKS);
     let (out_tx, out_rx) = mpsc::channel::<Recognised>(64);
     let alive = Arc::new(AtomicBool::new(true));
 
@@ -303,24 +371,42 @@ pub async fn connect(
     // are gated for silence independently, so a shared counter would timestamp
     // every segment on whichever track happened to be busier.
     let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Advanced by the reader as finals come back, so the feed loop can see how
+    // far behind the recogniser is.
+    let finalized = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     // Writer: audio out.
     let writer_alive = Arc::clone(&alive);
     let writer_sent = Arc::clone(&sent);
     tokio::spawn(async move {
-        while let Some(pcm) = audio_rx.recv().await {
-            // Two bytes per sample, s16le.
-            let samples = pcm.len() / 2;
-            if write
-                .send(tokio_tungstenite::tungstenite::Message::Binary(pcm))
-                .await
-                .is_err()
-            {
-                break;
+        while let Some(frame) = audio_rx.recv().await {
+            match frame {
+                OutFrame::Audio(pcm) => {
+                    // Two bytes per sample, s16le.
+                    let samples = pcm.len() / 2;
+                    if write
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(pcm))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    // Advanced only after the send succeeds, so the clock never
+                    // claims audio the recogniser was not given.
+                    writer_sent.fetch_add(samples, Ordering::SeqCst);
+                }
+                OutFrame::Finalize => {
+                    if write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            finalize_frame(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
-            // Advanced only after the send succeeds, so the clock never claims
-            // audio the recogniser was not given.
-            writer_sent.fetch_add(samples, Ordering::SeqCst);
         }
         // Ask for the last utterance before going. A final that never arrives
         // is speech the user said and the transcript will not contain.
@@ -349,6 +435,7 @@ pub async fn connect(
     // Reader: recognitions in, with this track's own clock.
     let reader_alive = Arc::clone(&alive);
     let reader_sent = Arc::clone(&sent);
+    let reader_finalized = Arc::clone(&finalized);
     tokio::spawn(async move {
         let mut clock = TrackClock::default();
         let mut last_final = TrackClock::default();
@@ -381,6 +468,7 @@ pub async fn connect(
                         }
                     }
                     last_final = clock;
+                    reader_finalized.store(clock.samples_sent, Ordering::SeqCst);
                 }
                 ServerEvent::Transcript { text, .. } => {
                     let (start_time, end_time) = clock.span_since(&last_final);
@@ -414,8 +502,10 @@ pub async fn connect(
 
     Ok((
         StreamingSession {
-            audio: audio_tx,
+            outgoing: audio_tx,
             alive,
+            sent,
+            finalized,
         },
         out_rx,
     ))
@@ -460,7 +550,7 @@ mod socket_tests {
 
             tokio::spawn(async move {
                 for frame in samples.chunks(CHUNK_SAMPLES) {
-                    if !session.send(to_s16le(frame)) {
+                    if session.send(to_s16le(frame)) == SendOutcome::Disconnected {
                         break;
                     }
                     // Paced like real time: firing a backlog at a streaming
@@ -588,6 +678,57 @@ mod socket_tests {
         // loop feeding audio nowhere.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!session.is_alive());
-        assert!(!session.send(vec![0, 0]), "a dead session accepts no audio");
+        assert_eq!(
+            session.send(vec![0, 0]),
+            SendOutcome::Disconnected,
+            "a dead session must report disconnection, not back-pressure"
+        );
     }
+    #[tokio::test]
+    async fn a_recogniser_that_cannot_keep_up_reads_as_behind_not_as_gone() {
+        // The distinction this exists for: under back-pressure the session is
+        // perfectly alive, and treating a full queue as a disconnect made a
+        // slow recogniser look like a broken one — while audio was quietly
+        // dropped and the transcript fell minutes behind.
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("handshake");
+            // Accepts the connection and then reads nothing, so the client's
+            // queue fills — a recogniser that is up but overloaded.
+            let _ = ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"ready"}"#.into(),
+            ));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let (session, _rx) = connect(&format!("ws://{addr}"), "test")
+            .await
+            .expect("connect");
+
+        let chunk = vec![0u8; CHUNK_SAMPLES * 2];
+        let mut behind = 0;
+        for _ in 0..(QUEUE_CHUNKS * 20) {
+            match session.send(chunk.clone()) {
+                SendOutcome::Behind => behind += 1,
+                SendOutcome::Disconnected => {
+                    panic!("back-pressure was reported as a disconnection")
+                }
+                SendOutcome::Sent => {}
+            }
+        }
+
+        assert!(behind > 0, "the queue never filled, so nothing was tested");
+        assert!(
+            session.is_alive(),
+            "the session must stay alive while merely overloaded"
+        );
+    }
+
 }

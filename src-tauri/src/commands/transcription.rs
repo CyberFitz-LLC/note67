@@ -454,6 +454,7 @@ pub async fn start_live_transcription(
         get(backend::API_KEY_KEY).as_deref(),
         get(backend::MAX_SPEAKERS_KEY).as_deref(),
         get(backend::STREAM_URL_KEY).as_deref(),
+        get(backend::OPENAI_MODEL_KEY).as_deref(),
     );
 
     let recording_state = audio_state.recording.clone();
@@ -483,6 +484,32 @@ pub async fn start_live_transcription(
     live::start_live_transcription(app, note_id, language, recording_state, live_state, whisper_ctx)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Suspend or resume transcribing, without touching the recording.
+///
+/// The recording is unaffected either way: audio keeps being written and
+/// nothing is lost from it, so a stretch that was not transcribed live can
+/// still be transcribed from the file afterwards.
+#[tauri::command]
+pub fn set_live_transcription_paused(
+    state: State<'_, TranscriptionState>,
+    paused: bool,
+) -> Result<(), String> {
+    state
+        .live_state
+        .is_paused
+        .store(paused, Ordering::SeqCst);
+    println!(
+        "[live] transcription {} — the recording is unaffected",
+        if paused { "paused" } else { "resumed" }
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn live_transcription_paused(state: State<'_, TranscriptionState>) -> Result<bool, String> {
+    Ok(state.live_state.is_paused.load(Ordering::SeqCst))
 }
 
 /// Stop live transcription and get final result
@@ -648,6 +675,351 @@ pub async fn retranscribe_audio_segment(
 }
 
 /// Retranscribe all audio sources in a note
+
+/// Below this, a segment is a tail rather than a recording.
+///
+/// Two seconds and change is what a stopped recording leaves behind, and no
+/// meeting turns on a sub-second utterance that a segmentation boundary happened
+/// to isolate. Erring short: skipping real speech is worse than one wasted
+/// request.
+const MIN_TRANSCRIBABLE_MS: u64 = 1_000;
+
+/// Rebuild a note's transcript using the remote diarizing recogniser.
+///
+/// The reason this exists rather than always using local Whisper: whisper.cpp
+/// cannot tell speakers apart at all, so a ten-person call comes back as one
+/// undifferentiated wall of "Others". The remote service diarizes, and running
+/// it over a finished recording is the only way this app can put `Speaker 1..N`
+/// against a meeting it recorded itself.
+///
+/// The two tracks are treated differently and deliberately:
+///
+/// - The **microphone** is one person by construction, so its segments are
+///   labelled "You". Diarizing a single-speaker track invents distinctions that
+///   are not there.
+/// - The **system** track is everyone else, and is where diarization earns its
+///   keep. Its labels come back as `Speaker 1..N` — placeholders, which
+///   `merge::is_generic` already understands, ready to be given real names.
+/// Which diarizing service rebuilds a transcript.
+///
+/// One enum rather than two copies of `retranscribe_remote`: everything around
+/// the call — progress events, echo filtering, forced labels on the mic track,
+/// recording the new chain version — is identical, and only the request shape
+/// differs. Duplicating that would mean fixing every future bug twice.
+pub(crate) enum Recogniser<'a> {
+    /// note67-asr: submit, take a job id, poll until it finishes.
+    Note67Asr {
+        base_url: &'a str,
+        api_key: Option<&'a str>,
+    },
+    /// An OpenAI-compatible endpoint — vLLM, SGLang. One synchronous request.
+    OpenAi {
+        base_url: &'a str,
+        api_key: Option<&'a str>,
+        model: &'a str,
+    },
+}
+
+impl<'a> Recogniser<'a> {
+    fn base_url(&self) -> &str {
+        match self {
+            Recogniser::Note67Asr { base_url, .. } | Recogniser::OpenAi { base_url, .. } => base_url,
+        }
+    }
+
+    async fn health(&self, client: &reqwest::Client) -> Result<(), String> {
+        match self {
+            Recogniser::Note67Asr { base_url, api_key, .. } => {
+                crate::transcription::remote::health(client, base_url, *api_key)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            // No health route is guaranteed on an OpenAI-compatible server, but
+            // listing models is, and a server that can list them has loaded one.
+            Recogniser::OpenAi { base_url, api_key, .. } => {
+                let mut req = client
+                    .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
+                    .timeout(std::time::Duration::from_secs(10));
+                if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
+                    req = req.bearer_auth(k.trim());
+                }
+                match req.send().await {
+                    Ok(r) if r.status().is_success() => Ok(()),
+                    Ok(r) => Err(format!("the service returned {}", r.status())),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        }
+    }
+
+    async fn transcribe(
+        &self,
+        client: &reqwest::Client,
+        bytes: Vec<u8>,
+        filename: &str,
+        audio_secs: f64,
+        // Per track, not per service: the mic carries one voice and the
+        // system track carries everyone else.
+        max_speakers: Option<u32>,
+    ) -> Result<crate::transcription::transcriber::TranscriptionResult, String> {
+        match self {
+            Recogniser::Note67Asr { base_url, api_key } => {
+                crate::transcription::remote::transcribe(
+                    client, base_url, *api_key, bytes, filename, max_speakers,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            Recogniser::OpenAi { base_url, api_key, model } => {
+                crate::transcription::openai::transcribe(
+                    client,
+                    base_url,
+                    *api_key,
+                    model,
+                    bytes,
+                    filename,
+                    audio_secs,
+                    OPENAI_MAX_COMPLETION_TOKENS,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+/// Output budget for one OpenAI-compatible transcription.
+///
+/// Must be sent explicitly: MOSS's own `generation_config.json` caps output at
+/// 5120 tokens, which truncates a busy twenty minutes about a third of the way
+/// through and returns a well-formed partial transcript that nothing flags.
+pub(crate) const OPENAI_MAX_COMPLETION_TOKENS: u32 = 32768;
+
+async fn retranscribe_remote(
+    app: &AppHandle,
+    db: &Database,
+    note_id: &str,
+    recogniser: Recogniser<'_>,
+    // How many voices to look for on the system track. A setting rather than
+    // a property of the service, and not applied to the mic track, which
+    // records one person by construction.
+    max_speakers: Option<u32>,
+) -> Result<RetranscribeResult, String> {
+    let client = reqwest::Client::new();
+
+    // Asked once, before anything is uploaded. Sending several tracks to a
+    // service that is not running produces the same connection error once per
+    // track and never says the simple thing.
+    if let Err(e) = recogniser.health(&client).await {
+        return Err(format!(
+            "The transcription service at {} is not available, so nothing was changed. {e}",
+            recogniser.base_url()
+        ));
+    }
+
+    let segments = db.get_audio_segments(note_id).map_err(|e| e.to_string())?;
+    let uploads = db.get_uploaded_audio(note_id).map_err(|e| e.to_string())?;
+
+    let mut rebuilt: Vec<NewTranscriptSegment> = Vec::new();
+    let mut failed_items: Vec<String> = Vec::new();
+    let mut total_segments_created = 0usize;
+    let total_items = segments.len() + uploads.len();
+    let mut completed_items = 0usize;
+
+    // (name, path, label to force, speakers to look for)
+    //
+    // The speaker count is not the same for every track, and getting it wrong
+    // is expensive rather than merely inaccurate. Diarization is the heavy part
+    // of this service — it dominates the run time and the memory — and asking
+    // it to separate speakers on a track that has exactly one is pure cost.
+    // A microphone records one person by construction, so it asks for one.
+    let mut jobs: Vec<(String, PathBuf, Option<String>, Option<u32>)> = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let Some(mic) = &segment.mic_path {
+            jobs.push((
+                format!("Recording {} (you)", index + 1),
+                PathBuf::from(mic),
+                Some("You".to_string()),
+                Some(1),
+            ));
+        }
+        if let Some(system) = &segment.system_path {
+            // Everyone else, and the only track where diarization earns what it
+            // costs.
+            jobs.push((
+                format!("Recording {} (others)", index + 1),
+                PathBuf::from(system),
+                None,
+                max_speakers,
+            ));
+        }
+    }
+    for upload in &uploads {
+        jobs.push((
+            upload.original_filename.clone(),
+            PathBuf::from(&upload.file_path),
+            Some(upload.speaker_label.clone()),
+            Some(1),
+        ));
+    }
+
+    for (item_name, path, forced_label, speakers) in jobs {
+        let _ = app.emit(
+            "retranscribe-progress",
+            serde_json::json!({
+                "noteId": note_id,
+                "totalItems": total_items,
+                "completedItems": completed_items,
+                "currentItem": item_name,
+            }),
+        );
+
+        // Resolved, because a path stored before compaction names a WAV that is
+        // now a FLAC.
+        let Some(resolved) = crate::audio::codec::resolve_existing(&path) else {
+            failed_items.push(format!("{item_name}: the audio is missing"));
+            completed_items += 1;
+            continue;
+        };
+
+        // A recording is split into segments and the last is routinely a short
+        // silent tail. Uploading one buys a round trip to be told there is no
+        // speech in it — and on a memory-constrained appliance, a needless job
+        // is not free. Skipped rather than sent, and skipping is not failing.
+        if let Some(ms) = crate::audio::codec::duration_ms(&resolved)
+            && ms < MIN_TRANSCRIBABLE_MS
+        {
+            println!("[retranscribe] skipping {item_name}: only {ms} ms of audio");
+            completed_items += 1;
+            continue;
+        }
+
+        let bytes = match std::fs::read(&resolved) {
+            Ok(b) => b,
+            Err(e) => {
+                failed_items.push(format!("{item_name}: {e}"));
+                completed_items += 1;
+                continue;
+            }
+        };
+        let filename = resolved
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "audio".to_string());
+
+        // Only the OpenAI path uses this, to notice a truncated transcript;
+        // a missing duration becomes 0.0, which disables that check rather
+        // than failing a transcription over an unreadable header.
+        let audio_secs = crate::audio::codec::duration_ms(&resolved)
+            .map(|ms| ms as f64 / 1000.0)
+            .unwrap_or(0.0);
+
+        match recogniser
+            .transcribe(&client, bytes, &filename, audio_secs, speakers)
+            .await
+        {
+            Ok(result) => {
+                let mut last_start = 0.0_f64;
+                for seg in &result.segments {
+                    if should_skip_segment(&seg.text, seg.start_time, seg.end_time) {
+                        continue;
+                    }
+                    let (start_time, end_time) =
+                        clamp_monotonic(seg.start_time, seg.end_time, &mut last_start);
+                    let speaker = forced_label
+                        .clone()
+                        .or_else(|| seg.speaker.clone())
+                        // A diarizer that returned nothing leaves the track
+                        // label, which is weaker but true.
+                        .or_else(|| Some("Others".to_string()));
+                    rebuilt.push(
+                        NewTranscriptSegment::new(note_id, start_time, end_time, &seg.text)
+                            .with_speaker(speaker)
+                            .with_source_type("recording"),
+                    );
+                    total_segments_created += 1;
+                }
+            }
+            Err(e) => failed_items.push(format!("{item_name}: {e}")),
+        }
+
+        completed_items += 1;
+    }
+
+    // Nothing is replaced unless every track came back.
+    //
+    // Each track is half a conversation: the microphone is you, the system
+    // track is everyone else. Swapping in a transcript built from whichever
+    // half succeeded would silently delete the other half — and it would look
+    // like a successful retranscription, which is the worst way to lose a
+    // meeting. The existing transcript stays until there is a complete one to
+    // put in its place.
+    if !failed_items.is_empty() || rebuilt.is_empty() {
+        let detail = if failed_items.is_empty() {
+            "no audio produced any text".to_string()
+        } else {
+            failed_items.join("; ")
+        };
+        return Err(format!(
+            "Retranscription did not complete, so the existing transcript was left untouched. \
+             {detail}"
+        ));
+    }
+
+    rebuilt.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
+    db.replace_transcript_segments(note_id, &rebuilt)
+        .map_err(|e| format!("Failed to save the rebuilt transcript: {e}"))?;
+
+    // Extend the chain, exactly as the local path does.
+    //
+    // Missing this is worse than it looks: the transcript is replaced and the
+    // chain still describes what it used to be, so the content and the record
+    // of the content disagree — in an app whose product is that record. It also
+    // looked to the user like nothing had happened, because the version list is
+    // where a retranscription becomes visible.
+    //
+    // `Recorded`, not `Merged`: the audio is ours and was fed to a recogniser
+    // we chose on hardware we own. `Merged` is for borrowed names, and
+    // "Speaker 1" is not a name.
+    //
+    // Logged rather than propagated, matching the local path: the transcript
+    // was replaced successfully, and failing here would report a completed pass
+    // as failed.
+    match db.record_transcript_version(
+        note_id,
+        crate::exochain::Origin::Recorded,
+        crate::exochain::Reason::Retranscribe,
+    ) {
+        Ok(Some(v)) => println!(
+            "[retranscribe] transcript v{} recorded for {note_id} ({})",
+            v.version, v.content_hash
+        ),
+        Ok(None) => println!("[retranscribe] transcript unchanged for {note_id}; no new version"),
+        Err(e) => eprintln!("Failed to record the transcript version for {note_id}: {e}"),
+    }
+
+    // And say it has finished. Without this the progress indicator has no
+    // completion to wait for and simply stops moving, which reads as a pass
+    // that quietly died.
+    let _ = app.emit(
+        "retranscribe-progress",
+        serde_json::json!({
+            "noteId": note_id,
+            "totalItems": total_items,
+            "completedItems": completed_items,
+            "currentItem": "",
+            "isComplete": true,
+        }),
+    );
+
+    Ok(RetranscribeResult {
+        total_items,
+        completed_items,
+        failed_items,
+        total_segments: total_segments_created,
+    })
+}
+
 #[tauri::command]
 pub async fn retranscribe_note(
     note_id: String,
@@ -658,6 +1030,50 @@ pub async fn retranscribe_note(
     // Check if already transcribing
     if state.is_transcribing.swap(true, Ordering::SeqCst) {
         return Err("Already transcribing. Please wait for the current transcription to finish.".to_string());
+    }
+
+    // Which recogniser rebuilds this transcript.
+    //
+    // Checked before the Whisper model is demanded, because the remote path
+    // needs no local model — and on a machine using a remote recogniser there
+    // is unlikely to be one. Insisting on it first is what made retranscribe
+    // fail on exactly the setup that most needs it.
+    let backend = {
+        let get = |key: &str| db.get_setting(key).ok().flatten();
+        crate::transcription::backend::resolve(
+            &get(crate::transcription::backend::BACKEND_KEY).unwrap_or_default(),
+            get(crate::transcription::backend::BASE_URL_KEY).as_deref(),
+            get(crate::transcription::backend::API_KEY_KEY).as_deref(),
+            get(crate::transcription::backend::MAX_SPEAKERS_KEY).as_deref(),
+            get(crate::transcription::backend::STREAM_URL_KEY).as_deref(),
+            get(crate::transcription::backend::OPENAI_MODEL_KEY).as_deref(),
+        )
+    };
+
+    let speaker_hint = match &backend {
+        crate::transcription::backend::Backend::Remote { max_speakers, .. } => *max_speakers,
+        _ => None,
+    };
+    let remote = match &backend {
+        crate::transcription::backend::Backend::Remote { base_url, api_key, .. } => {
+            Some(Recogniser::Note67Asr {
+                base_url,
+                api_key: api_key.as_deref(),
+            })
+        }
+        crate::transcription::backend::Backend::OpenAi { base_url, api_key, model } => {
+            Some(Recogniser::OpenAi {
+                base_url,
+                api_key: api_key.as_deref(),
+                model,
+            })
+        }
+        _ => None,
+    };
+    if let Some(recogniser) = remote {
+        let result = retranscribe_remote(&app, &db, &note_id, recogniser, speaker_hint).await;
+        state.is_transcribing.store(false, Ordering::SeqCst);
+        return result;
     }
 
     // Get the transcriber

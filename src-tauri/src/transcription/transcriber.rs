@@ -99,14 +99,15 @@ impl Transcriber {
     }
 
     fn transcribe_internal(&self, audio_path: &Path) -> Result<TranscriptionResult, TranscriptionError> {
-        if !audio_path.exists() {
-            return Err(TranscriptionError::AudioNotFound(
-                audio_path.to_string_lossy().to_string(),
-            ));
-        }
+        // Resolved rather than taken as given: a path stored before compaction
+        // names a WAV that has since become a FLAC, and reporting that as
+        // missing audio sends someone looking for a recording that is right
+        // there.
+        let audio_path = crate::audio::codec::resolve_existing(audio_path).ok_or_else(|| {
+            TranscriptionError::AudioNotFound(audio_path.to_string_lossy().to_string())
+        })?;
 
-        // Read the WAV file and convert to f32 samples
-        let samples = self.load_audio(audio_path)?;
+        let samples = self.load_audio(&audio_path)?;
 
         // Serialised against live transcription, which shares this context.
         let _inference = crate::transcription::lock_inference();

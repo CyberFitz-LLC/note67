@@ -28,10 +28,137 @@ use crate::transcription::live::{
     MIC_TARGET_PEAK,
 };
 use crate::transcription::streaming::{
-    self, Recognised, StreamingSession, CHUNK_SAMPLES, SAMPLE_RATE,
+    self, Recognised, SendOutcome, StreamingSession, CHUNK_MS, CHUNK_SAMPLES, SAMPLE_RATE,
 };
 use crate::transcription::transcriber::TranscriptionSegment;
 use crate::transcription::{is_echo_of_system, TranscriptionError};
+
+/// How far behind the recogniser may fall before audio is skipped.
+///
+/// A live transcript that is an hour behind is not a live transcript. Once the
+/// backlog passes this, sending more only makes it worse — the recogniser
+/// cannot catch up while still being fed at real time, and the deficit
+/// accumulates for the length of the recording. Four hours into a workshop
+/// that was an hour of lag.
+///
+/// Above the longest utterance, so ordinary speech never trips it.
+const LAG_LIMIT_SECS: f64 = 45.0;
+
+/// Feeding resumes once the backlog is back under this.
+///
+/// Hysteresis, not a single threshold: resuming the moment it dips below the
+/// limit would leave it oscillating on the edge, skipping a little audio
+/// continuously rather than a lot once and then recovering.
+const LAG_RESUME_SECS: f64 = 10.0;
+
+/// Whether a track should be fed right now.
+///
+/// `skipping` is the current state, and this returns the next one — separated
+/// out because two thresholds and a remembered state is exactly the kind of
+/// thing that reads as obvious and is wrong.
+pub fn should_skip(backlog_secs: f64, skipping: bool) -> bool {
+    if skipping {
+        backlog_secs > LAG_RESUME_SECS
+    } else {
+        backlog_secs > LAG_LIMIT_SECS
+    }
+}
+
+/// How long a track may be quiet before its utterance is closed.
+///
+/// The natural boundary in speech, and the one that gives a transcript its
+/// shape: without it a meeting is a single utterance, because this recogniser
+/// only returns a final when asked.
+const SILENCE_CLOSES_UTTERANCE: Duration = Duration::from_millis(900);
+
+/// The longest an utterance may run before being closed regardless.
+///
+/// A backstop for someone who simply does not pause. Twenty seconds keeps
+/// segments readable and keeps the recogniser's working state bounded — an
+/// utterance that grows for an hour is what turns a crisp transcript into one
+/// running minutes behind.
+const MAX_UTTERANCE: Duration = Duration::from_secs(20);
+
+/// Below this, a frame counts as silence for the purpose of closing an
+/// utterance. Deliberately lower than the transcription voice gate: this only
+/// decides where to put a boundary, so it should err towards hearing speech.
+const SILENCE_RMS: f32 = 0.01;
+
+/// Tracks when one socket's current utterance should be closed.
+#[derive(Debug)]
+struct Utterance {
+    /// When speech was last heard on this track.
+    last_voice: Option<Instant>,
+    /// When the current utterance began.
+    started: Option<Instant>,
+}
+
+impl Utterance {
+    fn new() -> Self {
+        Self {
+            last_voice: None,
+            started: None,
+        }
+    }
+
+    /// Note a frame, and say whether the utterance should now be closed.
+    fn observe(&mut self, rms: f32, now: Instant) -> bool {
+        if rms > SILENCE_RMS {
+            self.last_voice = Some(now);
+            if self.started.is_none() {
+                self.started = Some(now);
+            }
+            // Long enough that it must be broken somewhere, and here is as good
+            // as anywhere.
+            if self.started.is_some_and(|s| now.duration_since(s) >= MAX_UTTERANCE) {
+                self.reset();
+                return true;
+            }
+            return false;
+        }
+
+        // Silence. Only closes something that was actually open — otherwise a
+        // quiet meeting would send a finalize every tick and ask the recogniser
+        // for an endless run of empty finals.
+        let open = self.started.is_some();
+        let quiet_long_enough = self
+            .last_voice
+            .is_some_and(|v| now.duration_since(v) >= SILENCE_CLOSES_UTTERANCE);
+
+        if open && quiet_long_enough {
+            self.reset();
+            return true;
+        }
+        false
+    }
+
+    fn reset(&mut self) {
+        self.started = None;
+        self.last_voice = None;
+    }
+}
+
+/// What to subtract from a track's arrival time before placing an utterance.
+///
+/// The microphone path waits `ECHO_GRACE` before judging whether an utterance
+/// was the room's speakers, so its finals arrive that much later than the
+/// system track's for no reason to do with when they were said. Removing it
+/// keeps the two tracks aligned with each other, which is what ordering
+/// depends on.
+fn latency_allowance(source: AudioSource) -> f64 {
+    match source {
+        AudioSource::Mic => ECHO_GRACE.as_secs_f64(),
+        AudioSource::System => 0.0,
+    }
+}
+
+/// Root-mean-square of a frame.
+fn frame_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+}
 
 /// How long a settled microphone utterance is held before it is judged an echo.
 ///
@@ -286,6 +413,7 @@ pub async fn start_streaming_transcription(
     );
 
     tokio::spawn(feed_loop(
+        app.clone(),
         note_id,
         recording_state,
         live_state,
@@ -298,6 +426,7 @@ pub async fn start_streaming_transcription(
 
 /// Drains capture into the two sockets, one frame at a time.
 async fn feed_loop(
+    app_for_warning: AppHandle,
     note_id: String,
     recording_state: Arc<RecordingState>,
     live_state: Arc<LiveTranscriptionState>,
@@ -308,6 +437,17 @@ async fn feed_loop(
     let mut mic_frames = FrameBuffer::default();
     let mut system_frames = FrameBuffer::default();
     let mut gain = MicGain::default();
+    // Frames the recogniser was too far behind to take. Counted rather than
+    // ignored: this is audio the transcript will not contain, and silence about
+    // it is how a meeting comes back with holes nobody can explain.
+    let mut dropped: u64 = 0;
+    let mut warned_behind = false;
+    let mut mic_utterance = Utterance::new();
+    let mut system_utterance = Utterance::new();
+    let mut mic_skipping = false;
+    let mut system_skipping = false;
+    let mut skipped_secs = 0.0_f64;
+    let mut warned_skipping = false;
 
     loop {
         ticker.tick().await;
@@ -329,17 +469,42 @@ async fn feed_loop(
             break;
         }
 
+        // Paused: the recording carries on, the recogniser hears nothing.
+        //
+        // Drained and discarded so that resuming does not send a backlog of
+        // stale audio the recogniser would transcribe as if it had just been
+        // said.
+        if live_state.is_paused.load(Ordering::SeqCst) {
+            let _ = recording_state.take_audio_buffer();
+            let _ = take_system_audio_samples();
+            continue;
+        }
+
         let mic_samples = recording_state.take_audio_buffer();
         if !mic_samples.is_empty() {
             let rate = recording_state.sample_rate.load(Ordering::SeqCst);
             let ch = recording_state.channels.load(Ordering::SeqCst) as usize;
             if rate > 0 && ch > 0 {
                 let mono = to_mono_16k(mic_samples, rate, ch);
+                mic_skipping = should_skip(mic_session.backlog_seconds(), mic_skipping);
                 for mut frame in mic_frames.push(&mono) {
+                    if mic_skipping {
+                        // Dropped rather than queued. The words are still in the
+                        // recording and can be transcribed from it later; what
+                        // cannot be recovered is a live transcript that is
+                        // current, and that is the only thing this path is for.
+                        skipped_secs += CHUNK_MS as f64 / 1000.0;
+                        continue;
+                    }
                     gain.apply(&mut frame);
-                    if !mic_session.send(streaming::to_s16le(&frame)) {
-                        println!("[stream] the microphone recogniser stopped accepting audio");
-                        break;
+                    let close = mic_utterance.observe(frame_rms(&frame), Instant::now());
+                    match mic_session.send(streaming::to_s16le(&frame)) {
+                        SendOutcome::Sent => {}
+                        SendOutcome::Behind => dropped += 1,
+                        SendOutcome::Disconnected => break,
+                    }
+                    if close {
+                        let _ = mic_session.finalize();
                     }
                 }
             }
@@ -349,13 +514,58 @@ async fn feed_loop(
         // whatever the far end sent, at the level they sent it.
         let system_samples = take_system_audio_samples();
         if !system_samples.is_empty() {
+            system_skipping = should_skip(system_session.backlog_seconds(), system_skipping);
             for frame in system_frames.push(&system_samples) {
-                if !system_session.send(streaming::to_s16le(&frame)) {
-                    println!("[stream] the system-audio recogniser stopped accepting audio");
-                    break;
+                if system_skipping {
+                    skipped_secs += CHUNK_MS as f64 / 1000.0;
+                    continue;
+                }
+                let close = system_utterance.observe(frame_rms(&frame), Instant::now());
+                match system_session.send(streaming::to_s16le(&frame)) {
+                    SendOutcome::Sent => {}
+                    SendOutcome::Behind => dropped += 1,
+                    SendOutcome::Disconnected => break,
+                }
+                if close {
+                    let _ = system_session.finalize();
                 }
             }
         }
+
+        // Skipping is worth saying plainly and once: the transcript will have a
+        // hole, and the person reading it should know that rather than discover
+        // it later.
+        if skipped_secs > 0.0 && !warned_skipping {
+            warned_skipping = true;
+            println!("[stream] skipping audio to catch up; the recogniser was too far behind");
+            let _ = app_for_warning.emit(
+                "transcription-falling-behind",
+                "The recogniser fell too far behind, so some audio was skipped to catch the \
+                 transcript up. The recording is complete and can be transcribed again later.",
+            );
+        }
+
+        // Say so once, as soon as it starts happening, rather than at the end
+        // when the meeting is over and nothing can be done about it.
+        if dropped > 0 && !warned_behind {
+            warned_behind = true;
+            println!(
+                "[stream] the recogniser is not keeping up — audio is being dropped and the \
+                 transcript will fall behind"
+            );
+            let _ = app_for_warning.emit(
+                "transcription-falling-behind",
+                "The recogniser is not keeping up. The transcript is behind and some audio is \
+                 being lost — the recording itself is unaffected.",
+            );
+        }
+    }
+
+    if dropped > 0 {
+        println!("[stream] {dropped} frame(s) were dropped because the recogniser was behind");
+    }
+    if skipped_secs > 0.0 {
+        println!("[stream] {skipped_secs:.0}s of audio was skipped to keep the transcript current");
     }
 
     // Push the tails, then drop the sessions — which closes the sockets, and
@@ -363,10 +573,10 @@ async fn feed_loop(
     // still comes back.
     if let Some(mut frame) = mic_frames.flush() {
         gain.apply(&mut frame);
-        mic_session.send(streaming::to_s16le(&frame));
+        let _ = mic_session.send(streaming::to_s16le(&frame));
     }
     if let Some(frame) = system_frames.flush() {
-        system_session.send(streaming::to_s16le(&frame));
+        let _ = system_session.send(streaming::to_s16le(&frame));
     }
 
     // Give the finals a moment to come back before the readers see the socket
@@ -402,9 +612,12 @@ fn spawn_reader(
                     // Partials are redrawn in place and never stored: they are
                     // the recogniser's current guess, and half of them are
                     // wrong by design.
+                    // On the same clock as the final that will replace it, so a
+                    // draft does not jump position the moment it settles.
+                    let at = started.elapsed().as_secs_f64();
                     let segment = TranscriptionSegment {
-                        start_time,
-                        end_time,
+                        start_time: (at - (end_time - start_time).max(0.0)).max(0.0),
+                        end_time: at,
                         text,
                         speaker: Some(speaker_for(source).to_string()),
                     };
@@ -465,9 +678,32 @@ fn spawn_reader(
                         }
                     }
 
+                    // Placed on one shared clock, not on the track's own.
+                    //
+                    // Each track's clock counts what its socket has been sent,
+                    // and Windows loopback delivers nothing while no
+                    // application is playing audio — so the system track's
+                    // offset falls behind the microphone's by however much
+                    // silence has passed. Over half an hour of ordinary
+                    // back-and-forth that drift is minutes, and since the
+                    // transcript is ordered by timestamp the far end's lines
+                    // get stamped further and further into the past and pile up
+                    // above, while the microphone's stay near the bottom. That
+                    // happened in a real call, and it gets worse the longer the
+                    // recording runs.
+                    //
+                    // What both clocks measure reliably is *duration*, so an
+                    // utterance is placed by when it came back and extended
+                    // backwards by how long it ran. Both tracks then share one
+                    // frame and cannot drift apart. It is late by whatever the
+                    // recogniser took, equally for both, which keeps their
+                    // order right — the thing that was actually broken.
+                    let placed_end = started.elapsed().as_secs_f64() - latency_allowance(source);
+                    let placed_start = (placed_end - duration).max(0.0);
+
                     let segment = TranscriptionSegment {
-                        start_time,
-                        end_time,
+                        start_time: placed_start,
+                        end_time: placed_end.max(placed_start),
                         text: text.clone(),
                         speaker: Some(speaker_for(source).to_string()),
                     };
@@ -696,6 +932,182 @@ mod tests {
     fn nothing_is_echo_when_the_meeting_has_said_nothing() {
         let w = EchoWindow::default();
         assert!(!is_echo_of_system("just thinking aloud", 0.0, 3.0, &w.snapshot()));
+    }
+
+    fn at(base: Instant, ms: u64) -> Instant {
+        base + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_pause_in_speech_closes_the_utterance() {
+        // The boundary that gives a transcript its shape. Without it a whole
+        // meeting is one utterance: partials that are ever-growing prefixes of
+        // the entire conversation, a single final at the end, and every
+        // timestamp at zero. That is what a real hour-long meeting produced.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+
+        assert!(!u.observe(0.2, base), "speech should not close anything");
+        assert!(!u.observe(0.0, at(base, 300)), "a short gap is not a boundary");
+        assert!(
+            u.observe(0.0, at(base, 1_000)),
+            "a second of silence should close the utterance"
+        );
+    }
+
+    #[test]
+    fn silence_before_anything_was_said_asks_for_nothing() {
+        // Otherwise a quiet meeting sends a finalize every tick and the
+        // recogniser answers with an endless run of empty finals.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        for tick in 0..50 {
+            assert!(
+                !u.observe(0.0, at(base, tick * 100)),
+                "silence closed an utterance that never opened"
+            );
+        }
+    }
+
+    #[test]
+    fn one_pause_closes_once_not_repeatedly() {
+        // After closing, the next silence must not close again — each close is
+        // a request to the recogniser and repeating it wastes the round trip
+        // and litters the transcript with empty finals.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        u.observe(0.2, base);
+        assert!(u.observe(0.0, at(base, 1_000)));
+        assert!(!u.observe(0.0, at(base, 2_000)));
+        assert!(!u.observe(0.0, at(base, 5_000)));
+    }
+
+    #[test]
+    fn someone_who_never_pauses_is_still_broken_up() {
+        // The backstop. Twenty minutes of unbroken speech is one unreadable
+        // segment, and it grows the recogniser's working state until the
+        // transcript falls minutes behind — which is what happened after about
+        // half an hour of a real meeting.
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        let mut closes = 0;
+        for tick in 0..600 {
+            if u.observe(0.3, at(base, tick * 100)) {
+                closes += 1;
+            }
+        }
+        assert!(
+            closes >= 2,
+            "a minute of continuous speech produced {closes} boundaries"
+        );
+    }
+
+    #[test]
+    fn speech_resumes_a_new_utterance_after_a_close() {
+        let base = Instant::now();
+        let mut u = Utterance::new();
+        u.observe(0.2, base);
+        assert!(u.observe(0.0, at(base, 1_000)));
+
+        assert!(!u.observe(0.2, at(base, 2_000)), "new speech should not close");
+        assert!(
+            u.observe(0.0, at(base, 3_100)),
+            "the next pause should close the new utterance"
+        );
+    }
+
+    #[test]
+    fn rms_is_zero_for_no_audio_and_positive_for_some() {
+        assert_eq!(frame_rms(&[]), 0.0);
+        assert_eq!(frame_rms(&[0.0; 100]), 0.0);
+        assert!(frame_rms(&[0.5; 100]) > 0.4);
+    }
+
+    #[test]
+    fn the_two_tracks_are_placed_on_one_clock() {
+        // The failure this fixes, from a real call: each track was timestamped
+        // by what its own socket had been sent, and Windows loopback sends
+        // nothing while nothing is playing. Half an hour in, the far end's
+        // lines were stamped minutes into the past and piled up above the
+        // microphone's, which sat at the bottom.
+        //
+        // Placing by arrival less duration puts both on the same frame. The
+        // only per-track adjustment is the microphone's echo grace, which is a
+        // delay this code adds rather than anything about when words were said.
+        assert_eq!(latency_allowance(AudioSource::System), 0.0);
+        assert_eq!(
+            latency_allowance(AudioSource::Mic),
+            ECHO_GRACE.as_secs_f64(),
+            "the mic's own hold-back must be removed, or it reads as later speech"
+        );
+    }
+
+    #[test]
+    fn silence_on_one_track_cannot_move_it_relative_to_the_other() {
+        // The property that matters. Both tracks are placed from the same
+        // `Instant`, so however long one has been quiet its next utterance
+        // lands where it actually arrived — the drift has nowhere to
+        // accumulate.
+        let started = Instant::now();
+        let after_quiet = started + Duration::from_secs(1_800);
+
+        let system_at = after_quiet.duration_since(started).as_secs_f64()
+            - latency_allowance(AudioSource::System);
+        let mic_at = after_quiet.duration_since(started).as_secs_f64()
+            - latency_allowance(AudioSource::Mic);
+
+        assert!(
+            (system_at - mic_at).abs() <= ECHO_GRACE.as_secs_f64() + 0.001,
+            "half an hour of silence moved the tracks {} seconds apart",
+            (system_at - mic_at).abs()
+        );
+    }
+
+    #[test]
+    fn an_utterance_never_starts_before_the_recording_did() {
+        // An utterance that ran longer than the session has — possible when a
+        // recogniser reports a duration from before this session began —
+        // would otherwise be placed at a negative time and sort above
+        // everything for ever.
+        let placed_end: f64 = 2.0;
+        let duration: f64 = 30.0;
+        let placed_start = (placed_end - duration).max(0.0);
+        assert_eq!(placed_start, 0.0);
+    }
+
+    #[test]
+    fn ordinary_speech_never_trips_the_lag_limit() {
+        // An utterance can run twenty seconds before it is closed, so the
+        // backlog sits in that range during normal talking. Skipping there
+        // would throw away speech for no reason.
+        assert!(!should_skip(3.0, false));
+        assert!(!should_skip(21.0, false));
+        assert!(!should_skip(44.0, false));
+    }
+
+    #[test]
+    fn a_recogniser_falling_behind_starts_skipping() {
+        // The real failure: four hours into a workshop the transcript was an
+        // hour behind, because audio kept going at real time into a recogniser
+        // that could not keep up.
+        assert!(should_skip(46.0, false));
+        assert!(should_skip(3_600.0, false));
+    }
+
+    #[test]
+    fn skipping_continues_until_it_has_actually_caught_up() {
+        // Hysteresis. Resuming the moment it dips under the limit leaves it
+        // oscillating on the edge, skipping a little continuously instead of a
+        // lot once and then recovering.
+        assert!(should_skip(40.0, true), "still behind, keep skipping");
+        assert!(should_skip(11.0, true));
+        assert!(!should_skip(9.0, true), "caught up, resume");
+    }
+
+    #[test]
+    fn the_two_thresholds_leave_room_between_them() {
+        // If they met, a single frame either side would flip the state.
+        assert!(LAG_RESUME_SECS < LAG_LIMIT_SECS / 2.0);
     }
 
 }

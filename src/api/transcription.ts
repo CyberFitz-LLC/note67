@@ -124,6 +124,15 @@ export const transcriptionApi = {
   },
 
   /** Retranscribe all audio sources in a note */
+  /** Suspend transcribing without stopping the recording. */
+  setPaused: (paused: boolean): Promise<void> => {
+    return invoke("set_live_transcription_paused", { paused });
+  },
+
+  isPaused: (): Promise<boolean> => {
+    return invoke("live_transcription_paused");
+  },
+
   retranscribeNote: (noteId: string): Promise<RetranscribeResult> => {
     return invoke("retranscribe_note", { noteId });
   },

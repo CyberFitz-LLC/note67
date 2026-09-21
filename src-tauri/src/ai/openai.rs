@@ -27,12 +27,50 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     temperature: f32,
     stream: bool,
+    /// A ceiling on the reply.
+    ///
+    /// Absent, a reasoning model can deliberate without limit. One did: asked
+    /// for a 200-word meeting brief, it spent thousands of tokens arguing with
+    /// itself about an ambiguous phrase, repeated the same sentence hundreds of
+    /// times, and never produced an answer at all — and a live pane showed the
+    /// deliberation, because that was the only text that came back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    content: ChatContent,
+}
+
+/// A message body, which is either plain text or a sequence of parts.
+///
+/// Untagged, because the wire format is not a choice we get to make: the
+/// OpenAI-compatible shape is a bare string for text and an array of typed
+/// parts once an image is involved, and a server will reject the wrong one.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ChatContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrl {
+    /// A `data:` URL. Images are inlined rather than hosted: this app has no
+    /// server to serve them from, and a screenshot of a meeting is not
+    /// something to put behind a public URL even if it did.
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +81,9 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatResponseMessage,
+    /// `"length"` when the reply was cut off by the token ceiling.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,18 +341,92 @@ impl OpenAiCompatClient {
             .collect())
     }
 
-    fn chat_request(&self, model: &str, prompt: &str, temperature: f32, stream: bool) -> ChatRequest {
+    fn chat_request(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: f32,
+        stream: bool,
+        max_tokens: Option<u32>,
+    ) -> ChatRequest {
         ChatRequest {
             model: model.to_string(),
             // The prompt library is written as single self-contained
             // instructions, so it maps to one user message.
             messages: vec![ChatMessage {
                 role: "user",
-                content: prompt.to_string(),
+                content: ChatContent::Text(prompt.to_string()),
             }],
             temperature,
             stream,
+            max_tokens,
         }
+    }
+
+    /// Ask about an image.
+    ///
+    /// Separate from `generate` rather than an optional argument, because a
+    /// model that cannot see returns something confidently wrong rather than an
+    /// error — so the caller needs to have chosen this deliberately.
+    pub async fn generate_with_image(
+        &self,
+        model: &str,
+        prompt: &str,
+        image: &[u8],
+        mime: &str,
+        temperature: f32,
+    ) -> Result<String, LlmError> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(image);
+
+        let request = ChatRequest {
+            model: model.to_string(),
+            messages: vec![ChatMessage {
+                role: "user",
+                content: ChatContent::Parts(vec![
+                    ContentPart::Text {
+                        text: prompt.to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: format!("data:{mime};base64,{encoded}"),
+                        },
+                    },
+                ]),
+            }],
+            temperature,
+            stream: false,
+            max_tokens: Some(1_500),
+        };
+
+        let url = format!("{}/chat/completions", self.v1_root);
+        let response = self
+            .authorized(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| self.connect_error(e))?;
+
+        if !response.status().is_success() {
+            return Err(self.status_error(response, model).await);
+        }
+
+        let parsed: ChatResponse = response
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+
+        parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.text())
+            .ok_or_else(|| {
+                LlmError::InvalidResponse(format!(
+                    "{model} returned nothing for the image. Not every model can see — check \
+                     that this one accepts images."
+                ))
+            })
     }
 
     pub async fn generate(
@@ -319,12 +434,13 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         temperature: f32,
+        max_tokens: Option<u32>,
     ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.v1_root);
 
         let response = self
             .authorized(self.client.post(&url))
-            .json(&self.chat_request(model, prompt, temperature, false))
+            .json(&self.chat_request(model, prompt, temperature, false, max_tokens))
             .send()
             .await
             .map_err(|e| self.connect_error(e))?;
@@ -340,18 +456,35 @@ impl OpenAiCompatClient {
 
         // An empty reply is a failure, not a result. Returning "" here is how a
         // model that said nothing became a summary block with nothing in it.
-        parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.text())
-            .ok_or_else(|| {
-                LlmError::InvalidResponse(format!(
-                    "{model} returned an empty reply. If it is served through vLLM with \
-                     --reasoning-parser, check that the parser matches the model: a mismatched \
-                     one routes the whole answer into `reasoning` and leaves `content` null."
-                ))
-            })
+        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+            LlmError::InvalidResponse(format!("{model} returned no choices at all"))
+        })?;
+
+        // A reply cut off by the ceiling, with no content, is deliberation that
+        // never reached an answer. The reasoning fallback exists for a server
+        // that puts the *answer* there, not for showing a model arguing with
+        // itself — which is what a live pane displayed when this was missing.
+        let truncated = choice.finish_reason.as_deref() == Some("length");
+        let had_content = choice
+            .message
+            .content
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty());
+
+        if truncated && !had_content {
+            return Err(LlmError::InvalidResponse(format!(
+                "{model} ran out of room before it produced an answer — it was still thinking. \
+                 A shorter prompt or a higher token limit would help."
+            )));
+        }
+
+        choice.message.text().ok_or_else(|| {
+            LlmError::InvalidResponse(format!(
+                "{model} returned an empty reply. If it is served through vLLM with \
+                 --reasoning-parser, check that the parser matches the model: a mismatched \
+                 one routes the whole answer into `reasoning` and leaves `content` null."
+            ))
+        })
     }
 
     pub async fn generate_stream(
@@ -359,13 +492,14 @@ impl OpenAiCompatClient {
         model: &str,
         prompt: &str,
         temperature: f32,
+        max_tokens: Option<u32>,
         tx: mpsc::Sender<String>,
     ) -> Result<String, LlmError> {
         let url = format!("{}/chat/completions", self.v1_root);
 
         let response = self
             .authorized(self.client.post(&url))
-            .json(&self.chat_request(model, prompt, temperature, true))
+            .json(&self.chat_request(model, prompt, temperature, true, max_tokens))
             .send()
             .await
             .map_err(|e| self.connect_error(e))?;

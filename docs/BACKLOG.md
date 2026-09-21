@@ -155,11 +155,12 @@ missing. Ordered by what unblocks what.
 
 Two real defects found 2026-08-12, both matching what a live meeting showed:
 
-1. **The level meter only ever measured the microphone.** `process_audio` in
-   `recorder.rs` is the only writer of `audio_level`, and it is the *input*
-   stream's callback. The Windows loopback path never touches it. So changing
-   the system-audio device could not move the meter — the meter was not
-   measuring that track.
+1. ~~**The level meter only ever measured the microphone.**~~ Fixed 2026-08-26.
+   `process_audio` in `recorder.rs` was the only writer of `audio_level`, and
+   it is the *input* stream's callback, so the meter could never move for
+   system audio. The recording bar now shows one meter per track, both fed
+   from `audio::levels::LevelMeter` — which the loopback path had been writing
+   to all along.
 2. **The device is bound when the stream opens.** `run_recording` reads the
    preference once and calls `open_input_device`. Changing it mid-recording
    writes to a mutex nothing re-reads until the next recording, so the change
@@ -247,7 +248,163 @@ Notes on doing it properly:
   spot exactly where the most human-meaningful change happens.
 - Merging (above) is the cheapest large win here: Teams already knows the names.
 
+## Structured notes, after seeing Teams Facilitator
+
+Observed 2026-09-03 in a real Teams meeting and reported as "the best note
+taking thing I've seen so far": screenshots captured automatically and
+**organised by topic**, summaries of the thinking, an outline of what was
+discussed.
+
+Worth separating what is close from what is a different product, because they
+look alike in a demo and are not alike to build.
+
+**Topic segmentation is the keystone, and we are nearest to it.** Everything
+else Facilitator does well is downstream of dividing a meeting into topics:
+"screenshots by topic" and "a summary per topic" both fall out of it once the
+divisions exist, and the transcript stops being a wall of text. The live brief
+already reads a running meeting and says what is being discussed — it just
+throws the structure away and keeps the prose. Asking the same pass for
+boundaries as well as a summary is a small change to a prompt and a large
+change to what the note looks like afterwards.
+
+The hard part is not detecting a topic change. It is that the divisions have to
+be **stable**: a boundary that moves every ninety seconds as the model
+reconsiders makes a note that cannot be read while the meeting is still
+running. Once a topic has closed it should stay closed, which means the pass
+proposes new boundaries rather than re-segmenting the whole meeting each time —
+the same accumulator shape the brief already uses, for the same reason.
+
+**Organising what we already capture is then mostly presentation.** Screenshots
+carry the meeting position they were pasted at, and transcript segments carry
+times. Both can be placed under a topic by timestamp without any new capture,
+new model call, or new storage. This is the cheapest large win in the whole
+idea.
+
+**Automatic screenshots are a different product.** Teams can do it because it
+*is* the meeting client and already holds the shared-screen stream. Note67 sees
+system audio, not video, so the equivalent is periodically capturing the
+screen — which is a materially different privacy claim from recording a call,
+belongs in `SCOPING.md` on its own row rather than under an existing one, and
+on the machine that runs it competes with the video encode that has already
+caused trouble once. Worth doing deliberately or not at all.
+
+**What Facilitator has that we structurally cannot.** It knows the participant
+list, who is speaking from the call's own metadata, and when someone joined or
+left. We have two audio tracks and whatever a diarizer can infer. Any comparison
+should be honest about that: the note can be as well organised, but attribution
+will not be as good until [`people/DESIGN.md`](people/DESIGN.md) lands, and
+even then it is inference rather than knowledge.
+
+**Order, if this is picked up:** topics from the existing brief pass; then place
+the screenshots and transcript already captured under them; then consider
+capture. Nothing before the first of those is worth building, and the first is
+worth building whether or not the rest ever is.
+
+## A pattern worth naming: silence as a failure mode
+
+Four times in this project a feature has had nothing to show and said nothing
+about why, and each time it cost a round of guessing against a live system:
+
+- an empty summary block, where the model had returned nothing and the app
+  saved it;
+- a retranscribe that appeared to do nothing, having failed into
+  `console.error`;
+- a retranscription that completed and reported neither success nor what it
+  produced;
+- live assistance sitting on "Listening…" for ten minutes with no way to tell
+  an empty transcript from a failing model.
+
+`assist::status` is the shape of the answer: when a feature has nothing to
+show, it should say **which kind of nothing it has**. Every one of these had
+its explanation in an `eprintln!` or a `console.error` that a release build
+shows nobody, which is the same as not having one.
+
+Worth applying wherever something long-running can produce nothing.
+
+## Live meeting assistance
+
+**Design written 2026-08-29: [`live-assist/DESIGN.md`](live-assist/DESIGN.md).**
+Two panes beside a running meeting — a rolling brief and reactive suggestions
+drawing on Hindsight recall — with the response options offered as buttons that
+steer a second, focused pass. Four open questions there, of which the memory
+bank and the receipt-per-session ruling both block a start.
+
+## Retranscription with a remote recogniser — parked 2026-08-29
+
+Built and never made to work end to end. It crashed the appliance twice, and
+on the run that did complete, the client did not apply the result. The failures
+were mostly memory on the appliance rather than the client, but the feature
+never delivered a diarized transcript to a user.
+
+**Parked rather than removed**: `retranscribe_remote` and its path still work
+if the appliance has room, and the useful half — diarizing a finished recording
+to get speakers a live recogniser cannot — is worth reviving another way.
+[`live-assist/DESIGN.md`](live-assist/DESIGN.md) does not depend on it. The
+likelier revival is local diarization over the existing transcript
+(`sherpa-onnx` has Rust bindings and models measured in tens of megabytes), so
+no appliance is involved at all.
+
+## Transcribing a call can cost the call
+
+Twice now a meeting has had to be moved to another machine mid-call because
+Note67 was transcribing it. Both times the outgoing audio was the first thing
+to fail, and both times it happened around half an hour in — the first from a
+capture buffer that grew without bound (fixed), the second from sustained
+inference on the GPU the meeting client needs to encode a screen share.
+
+The cadence now backs off when passes are slow, which bounds the duty cycle
+rather than the symptom. **It does not make the job free**, and the honest
+position is that a laptop presenting a screen share may not have room to
+transcribe locally at the same time. What would address it properly:
+
+- ~~**A pause control.**~~ Added 2026-09-11: a button beside the recording
+  indicator suspends transcribing while the recording continues, on both the
+  local and streaming paths. Buffers are drained and discarded while paused, so
+  resuming does not transcribe a backlog of stale audio as though it had just
+  been said.
+- **Offloading** — the streaming backend exists and moves the work off the
+  machine entirely, at the cost of depending on an appliance.
+- **Not transcribing live at all.** The recording is complete either way and
+  can be transcribed afterwards, which for a presenter may simply be the right
+  answer.
+
 ## Note67 app
+
+- **A capture buffer with no consumer used to grow for the length of the
+  recording.** Reported 2026-09-02 from a two-hour meeting: audio went
+  scratchy, video showed interference, and the machine had to be abandoned
+  mid-call at about ninety minutes. Note67 was the cause, though not for the
+  reason first suspected — nothing compresses during recording, and the
+  playback mix is only rebuilt on stop.
+
+  Only the transcription consumer drains `audio_buffer` and the system buffer.
+  When nothing is transcribing — no model loaded, live transcription never
+  started, or the streaming feed loop having stopped because its socket died —
+  the capture callbacks carried on filling them: roughly 1.6 GB an hour between
+  the two tracks, on a machine also carrying a video call.
+
+  Both buffers are now bounded to about thirty seconds, oldest first. **The
+  bound is not the whole fix**: the streaming feed loop still stops draining
+  when a socket dies while the recording continues, so a dropped recogniser
+  silently costs the rest of the meeting's live transcript. That is worth
+  fixing on its own terms rather than relying on a memory bound to make it
+  survivable.
+
+- **Retranscribing a long meeting can take the appliance down with it.**
+  2026-08-26: a diarizing retranscribe of a fifty-minute call rebooted the
+  Spark. The cause is on that box — its containers run with no memory limit
+  (`Memory=0`), so when NeMo diarization asked for headroom that a resident
+  27B model had already taken, the kernel had no container to sacrifice and
+  the machine went instead. Memory limits on the containers are the fix, and
+  they are not ours to set.
+
+  What we changed is the half of the load that was never needed: the
+  microphone track asks for one speaker rather than diarizing a recording that
+  has one person in it by construction. That roughly halves the heavy work.
+  It reduces the risk; it does not remove it, and nothing in this app can —
+  a client cannot see how much memory an appliance has left. Chunking long
+  audio would bound it, at the cost of speaker identity across chunk
+  boundaries, which is the whole point of diarizing.
 
 - **Manual transcript edits do not create a version.** `Reason::Edit` exists and
   nothing produces it, because the app has no transcript editing surface. When
@@ -263,10 +420,28 @@ Notes on doing it properly:
 - **Chunking is tuned for a 4096 context.** `MAX_CONTENT_LENGTH` and
   `split_into_chunks` predate configurable providers, so a long-context model
   gets more round-trips than it needs. Works, wastes time.
-- **Recordings are never pruned.** Still true, but much less pressing since
-  2026-08-21: recordings are stored as 16 kHz mono FLAC, about an eighth of
-  what they took, and Settings → System will compact an existing library. What
-  remains is that nothing ever deletes anything.
+- **Recordings can be left unfinalized, and used to be unreadable.** hound
+  writes the WAV header with placeholder lengths and patches them on
+  `finalize()`; if the app dies first the samples are all on disk and every
+  decoder refuses the file. Nine such files turned up in one real library.
+  `codec::recover_unfinalized_wav` now reads them, so the audio is not lost.
+
+  The cause was app crashes, which John reports have largely stopped. Nothing
+  prevents the state and nothing announces it — a recording that ends this way
+  is invisible until something reads it — but with recovery in place the
+  practical harm is gone, so this is **not** worth building crash detection
+  for. If unfinalized files start appearing again in fresh recordings, that is
+  the signal that something is crashing once more, and it is worth chasing
+  then rather than now.
+- **Deleting a note leaves its audio on disk, for ever.** The rows go — the
+  FK cascades — and the files are never touched. Compaction now reports how
+  many it found that nothing references, which on one real library was a large
+  fraction of the directory. Shrinking them is not the same as removing them,
+  and removing them is a deletion path that does not exist yet.
+- **Recordings are never pruned.** Much less pressing since 2026-08-21:
+  recordings are 16 kHz mono FLAC, about an eighth of what they took, and
+  Settings → System compacts an existing library. What remains is that nothing
+  ever deletes anything.
 - **DOCX transcript import.** VTT covers Teams; DOCX is the other export and
   yields poorer structure.
 
