@@ -31,6 +31,7 @@ export function TranscriptionBackendSettings({
   const remote = draft.backend === "remote";
   const streaming = draft.backend === "streaming";
   const openai = draft.backend === "openai";
+  const localNemo = draft.backend === "local_nemo";
   const willSend = willUseRemote(draft);
   const willSendOpenAi = willUseOpenAi(draft);
   const willSendLive = willStream(draft);
@@ -95,6 +96,11 @@ export function TranscriptionBackendSettings({
               "remote",
               "Send finished recordings to a recogniser",
               "Separates speakers into Speaker 1, Speaker 2… which you can then rename. Live transcription still runs here.",
+            ],
+            [
+              "local_nemo",
+              "Transcribe on this machine, with speakers",
+              "Uses NeMo-Speech.cpp locally. Separates speakers and adds punctuation, and the audio never leaves this computer. Needs a one-time download.",
             ],
             [
               "openai",
@@ -196,6 +202,34 @@ export function TranscriptionBackendSettings({
               transcript, not where its audio has been.
             </p>
           )}
+        </div>
+      )}
+
+      {localNemo && (
+        <div className="space-y-3">
+          {field(
+            "Path to nemo-speech",
+            draft.nemoPath,
+            (nemoPath) => setDraft({ ...draft, nemoPath }),
+            "leave empty to look for it on PATH",
+          )}
+          {field(
+            "Speech model",
+            draft.nemoAsrModel,
+            (nemoAsrModel) => setDraft({ ...draft, nemoAsrModel }),
+            "nemotron-3.5",
+          )}
+          {field(
+            "Speaker model",
+            draft.nemoDiarModel,
+            (nemoDiarModel) => setDraft({ ...draft, nemoDiarModel }),
+            "sortformer — type off to disable speaker separation",
+          )}
+
+          <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+            Models download themselves the first time they are used, to this
+            computer's cache. Nothing is sent anywhere.
+          </p>
         </div>
       )}
 

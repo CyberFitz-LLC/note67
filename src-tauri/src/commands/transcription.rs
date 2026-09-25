@@ -455,6 +455,7 @@ pub async fn start_live_transcription(
         get(backend::MAX_SPEAKERS_KEY).as_deref(),
         get(backend::STREAM_URL_KEY).as_deref(),
         get(backend::OPENAI_MODEL_KEY).as_deref(),
+        None,
     );
 
     let recording_state = audio_state.recording.clone();
@@ -712,6 +713,13 @@ pub(crate) enum Recogniser<'a> {
         base_url: &'a str,
         api_key: Option<&'a str>,
     },
+    /// NeMo-Speech.cpp as a child process on this machine. Diarizes without
+    /// the audio leaving the device.
+    LocalNemo {
+        exe: std::path::PathBuf,
+        asr_model: &'a str,
+        diar_model: Option<&'a str>,
+    },
     /// An OpenAI-compatible endpoint — vLLM, SGLang. One synchronous request.
     OpenAi {
         base_url: &'a str,
@@ -724,11 +732,30 @@ impl<'a> Recogniser<'a> {
     fn base_url(&self) -> &str {
         match self {
             Recogniser::Note67Asr { base_url, .. } | Recogniser::OpenAi { base_url, .. } => base_url,
+            Recogniser::LocalNemo { .. } => "this machine",
         }
     }
 
     async fn health(&self, client: &reqwest::Client) -> Result<(), String> {
         match self {
+            // Asking the binary for its version is the whole check: a missing
+            // runtime is the one failure worth catching before uploading
+            // anything, and there is no service to be down.
+            Recogniser::LocalNemo { exe, .. } => {
+                match tokio::process::Command::new(exe).arg("--version").output().await {
+                    Ok(o) if o.status.success() => Ok(()),
+                    Ok(o) => Err(format!(
+                        "it exited with {}: {}",
+                        o.status,
+                        String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or_default()
+                    )),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+                        "{} was not found. Install NeMo-Speech.cpp, or set its path in Settings.",
+                        exe.display()
+                    )),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
             Recogniser::Note67Asr { base_url, api_key, .. } => {
                 crate::transcription::remote::health(client, base_url, *api_key)
                     .await
@@ -763,6 +790,34 @@ impl<'a> Recogniser<'a> {
         max_speakers: Option<u32>,
     ) -> Result<crate::transcription::transcriber::TranscriptionResult, String> {
         match self {
+            Recogniser::LocalNemo { exe, asr_model, diar_model } => {
+                // The CLI rejects FLAC, so stored audio is decoded to a WAV
+                // beside it. During a recording this costs nothing — the
+                // recorder writes WAV and only compacts to FLAC afterwards.
+                let dir = std::env::temp_dir();
+                let stem = format!("note67-nemo-{}-{filename}", std::process::id());
+                // The caller hands over bytes, not a path, so the source is
+                // staged before it can be decoded.
+                let src = dir.join(&stem);
+                let tmp = dir.join(format!("{stem}.16k.wav"));
+                std::fs::write(&src, &bytes).map_err(|e| e.to_string())?;
+                let decoded = crate::audio::codec::decode_to_16k_mono(&src)
+                    .map_err(|e| e.to_string())
+                    .and_then(|samples| {
+                        crate::audio::codec::write_wav_16k_mono(&samples, &tmp)
+                            .map_err(|e| e.to_string())
+                    });
+                let _ = std::fs::remove_file(&src);
+                decoded?;
+                let out = crate::transcription::nemo::transcribe(
+                    exe, &tmp, asr_model, *diar_model,
+                )
+                .await
+                .map_err(|e| e.to_string());
+                let _ = std::fs::remove_file(&tmp);
+                let _ = max_speakers; // the model's capacity decides, not us
+                out
+            }
             Recogniser::Note67Asr { base_url, api_key } => {
                 crate::transcription::remote::transcribe(
                     client, base_url, *api_key, bytes, filename, max_speakers,
@@ -1047,6 +1102,11 @@ pub async fn retranscribe_note(
             get(crate::transcription::backend::MAX_SPEAKERS_KEY).as_deref(),
             get(crate::transcription::backend::STREAM_URL_KEY).as_deref(),
             get(crate::transcription::backend::OPENAI_MODEL_KEY).as_deref(),
+            Some((
+                &get(crate::transcription::nemo::NEMO_PATH_KEY).unwrap_or_default(),
+                &get(crate::transcription::nemo::NEMO_ASR_MODEL_KEY).unwrap_or_default(),
+                &get(crate::transcription::nemo::NEMO_DIAR_MODEL_KEY).unwrap_or_default(),
+            )),
         )
     };
 
@@ -1059,6 +1119,13 @@ pub async fn retranscribe_note(
             Some(Recogniser::Note67Asr {
                 base_url,
                 api_key: api_key.as_deref(),
+            })
+        }
+        crate::transcription::backend::Backend::LocalNemo { exe, asr_model, diar_model } => {
+            Some(Recogniser::LocalNemo {
+                exe: crate::transcription::nemo::resolve_exe(Some(exe)),
+                asr_model,
+                diar_model: diar_model.as_deref(),
             })
         }
         crate::transcription::backend::Backend::OpenAi { base_url, api_key, model } => {

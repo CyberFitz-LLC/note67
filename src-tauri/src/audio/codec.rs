@@ -904,3 +904,62 @@ mod tests {
     }
 
 }
+
+/// Write 16 kHz mono samples as a PCM WAV.
+///
+/// For the local recogniser, which rejects FLAC outright and asks for exactly
+/// this — `-ac 1 -ar 16000 -c:a pcm_s16le`. Costs nothing during a recording,
+/// where the WAV already exists and is only compacted to FLAC afterwards; this
+/// is for re-transcribing something already stored.
+pub fn write_wav_16k_mono(samples: &[f32], path: &Path) -> Result<(), AudioError> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)
+        .map_err(|e| AudioError::IoError(std::io::Error::other(format!("could not create {}: {e}", path.display()))))?;
+    for &s in samples {
+        // Rounded, not truncated: truncation biases every sample toward zero,
+        // which is a quiet but real pull towards silence across a long file.
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+        writer
+            .write_sample(v)
+            .map_err(|e| AudioError::IoError(std::io::Error::other(format!("could not write {}: {e}", path.display()))))?;
+    }
+    writer
+        .finalize()
+        .map_err(|e| AudioError::IoError(std::io::Error::other(format!("could not finalise {}: {e}", path.display()))))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod wav_tests {
+    use super::*;
+
+    #[test]
+    fn a_written_wav_reads_back_at_the_right_rate_and_length() {
+        let dir = std::env::temp_dir().join(format!("n67wav{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.wav");
+        let samples: Vec<f32> = (0..16_000).map(|i| ((i as f32) / 100.0).sin() * 0.5).collect();
+        write_wav_16k_mono(&samples, &p).unwrap();
+
+        let decoded = decode_to_16k_mono(&p).unwrap();
+        assert_eq!(decoded.len(), samples.len(), "one second in, one second out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_recording_still_produces_a_readable_file() {
+        // An encoder that writes an unreadable file for empty input is not a
+        // theoretical worry — that exact bug reached production once.
+        let dir = std::env::temp_dir().join(format!("n67wave{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("empty.wav");
+        write_wav_16k_mono(&[], &p).unwrap();
+        assert!(decode_to_16k_mono(&p).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
