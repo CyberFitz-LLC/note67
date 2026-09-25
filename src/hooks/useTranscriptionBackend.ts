@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { settingsApi } from "../api";
 
-export type TranscriptionBackend = "local" | "remote" | "streaming" | "openai";
+export type TranscriptionBackend = "local" | "remote" | "streaming" | "openai" | "local_nemo";
 
 export const BACKEND_KEY = "transcription_backend";
 export const BASE_URL_KEY = "transcription_base_url";
@@ -10,6 +10,9 @@ export const API_KEY_KEY = "transcription_api_key";
 export const MAX_SPEAKERS_KEY = "transcription_max_speakers";
 export const STREAM_URL_KEY = "transcription_stream_url";
 export const OPENAI_MODEL_KEY = "transcription_openai_model";
+export const NEMO_PATH_KEY = "transcription_nemo_path";
+export const NEMO_ASR_MODEL_KEY = "transcription_nemo_asr_model";
+export const NEMO_DIAR_MODEL_KEY = "transcription_nemo_diar_model";
 
 export interface TranscriptionConfig {
   backend: TranscriptionBackend;
@@ -18,6 +21,9 @@ export interface TranscriptionConfig {
   maxSpeakers: string;
   streamUrl: string;
   openaiModel: string;
+  nemoPath: string;
+  nemoAsrModel: string;
+  nemoDiarModel: string;
 }
 
 export const DEFAULT_CONFIG: TranscriptionConfig = {
@@ -27,6 +33,9 @@ export const DEFAULT_CONFIG: TranscriptionConfig = {
   maxSpeakers: "",
   streamUrl: "",
   openaiModel: "",
+  nemoPath: "",
+  nemoAsrModel: "",
+  nemoDiarModel: "",
 };
 
 /**
@@ -74,6 +83,7 @@ function readBackend(value: string | null | undefined): TranscriptionBackend {
   if (value === "remote") return "remote";
   if (value === "streaming") return "streaming";
   if (value === "openai") return "openai";
+  if (value === "local_nemo") return "local_nemo";
   return "local";
 }
 
@@ -113,6 +123,9 @@ export function useTranscriptionBackend() {
         MAX_SPEAKERS_KEY,
         STREAM_URL_KEY,
         OPENAI_MODEL_KEY,
+        NEMO_PATH_KEY,
+        NEMO_ASR_MODEL_KEY,
+        NEMO_DIAR_MODEL_KEY,
       ])
       .then((values) => {
         if (cancelled) return;
@@ -126,6 +139,9 @@ export function useTranscriptionBackend() {
           maxSpeakers: values[MAX_SPEAKERS_KEY] ?? "",
           streamUrl: values[STREAM_URL_KEY] ?? "",
           openaiModel: values[OPENAI_MODEL_KEY] ?? "",
+          nemoPath: values[NEMO_PATH_KEY] ?? "",
+          nemoAsrModel: values[NEMO_ASR_MODEL_KEY] ?? "",
+          nemoDiarModel: values[NEMO_DIAR_MODEL_KEY] ?? "",
         });
       })
       .catch((e) => {
@@ -150,6 +166,9 @@ export function useTranscriptionBackend() {
       await settingsApi.set(MAX_SPEAKERS_KEY, next.maxSpeakers.trim());
       await settingsApi.set(STREAM_URL_KEY, next.streamUrl.trim());
       await settingsApi.set(OPENAI_MODEL_KEY, next.openaiModel.trim());
+      await settingsApi.set(NEMO_PATH_KEY, next.nemoPath.trim());
+      await settingsApi.set(NEMO_ASR_MODEL_KEY, next.nemoAsrModel.trim());
+      await settingsApi.set(NEMO_DIAR_MODEL_KEY, next.nemoDiarModel.trim());
       setConfig(next);
       return true;
     } catch (e) {

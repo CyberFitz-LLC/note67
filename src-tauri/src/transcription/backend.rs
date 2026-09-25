@@ -46,6 +46,9 @@ pub enum BackendKind {
     /// in one request instead of a job to poll, which is what that whole
     /// ecosystem serves.
     OpenAi,
+    /// NeMo-Speech.cpp, on this machine. Diarizes like the remote backends but
+    /// the audio never leaves the device — the only option that does both.
+    LocalNemo,
 }
 
 impl BackendKind {
@@ -59,6 +62,7 @@ impl BackendKind {
             "remote" | "note67_asr" | "note67-asr" => BackendKind::Remote,
             "streaming" | "stream" => BackendKind::Streaming,
             "openai" | "openai_transcriptions" | "moss" => BackendKind::OpenAi,
+            "local_nemo" | "nemo" | "nemo-speech" => BackendKind::LocalNemo,
             _ => BackendKind::Local,
         }
     }
@@ -69,6 +73,7 @@ impl BackendKind {
             BackendKind::Remote => "remote",
             BackendKind::Streaming => "streaming",
             BackendKind::OpenAi => "openai",
+            BackendKind::LocalNemo => "local_nemo",
         }
     }
 }
@@ -83,6 +88,15 @@ pub enum Backend {
         /// An upper bound on speakers, when the user knows it. The diarizer
         /// infers the count on its own; this only stops it inventing more.
         max_speakers: Option<u32>,
+    },
+    LocalNemo {
+        /// Where the runtime is. Blank means "resolve `nemo-speech` on PATH",
+        /// which is where the official installer puts it.
+        exe: String,
+        asr_model: String,
+        /// `None` turns diarization off, which makes this strictly worse than
+        /// the Whisper path it replaces — so it is only ever None deliberately.
+        diar_model: Option<String>,
     },
     OpenAi {
         base_url: String,
@@ -112,6 +126,7 @@ pub fn resolve(
     max_speakers: Option<&str>,
     stream_url: Option<&str>,
     openai_model: Option<&str>,
+    nemo: Option<(&str, &str, &str)>,
 ) -> Backend {
     match BackendKind::from_setting(kind) {
         BackendKind::Local => Backend::Local,
@@ -124,6 +139,27 @@ pub fn resolve(
             }
             Backend::Streaming {
                 ws_url: url.trim_end_matches('/').to_string(),
+            }
+        }
+        BackendKind::LocalNemo => {
+            let (exe, asr, diar) = nemo.unwrap_or(("", "", ""));
+            Backend::LocalNemo {
+                // Unlike the remote backends there is no URL to get wrong, so
+                // there is nothing to fall back from: a blank path just means
+                // look on PATH.
+                exe: exe.trim().to_string(),
+                asr_model: {
+                    let m = asr.trim();
+                    if m.is_empty() { super::nemo::DEFAULT_ASR_MODEL.to_string() } else { m.to_string() }
+                },
+                diar_model: {
+                    let d = diar.trim();
+                    // "off" is spelled explicitly so an empty setting cannot
+                    // silently disable the thing this backend is for.
+                    if d.eq_ignore_ascii_case("off") { None }
+                    else if d.is_empty() { Some(super::nemo::DEFAULT_DIAR_MODEL.to_string()) }
+                    else { Some(d.to_string()) }
+                },
             }
         }
         BackendKind::OpenAi => {
@@ -227,7 +263,7 @@ mod tests {
 
     #[test]
     fn the_stored_form_round_trips() {
-        for k in [BackendKind::Local, BackendKind::Remote, BackendKind::OpenAi, BackendKind::Streaming] {
+        for k in [BackendKind::Local, BackendKind::Remote, BackendKind::OpenAi, BackendKind::Streaming, BackendKind::LocalNemo] {
             assert_eq!(BackendKind::from_setting(k.as_str()), k);
         }
     }
@@ -239,6 +275,7 @@ mod tests {
             Some("http://192.168.32.223:8010/"),
             Some("secret"),
             Some("8"),
+            None,
             None,
             None,
         );
@@ -259,8 +296,8 @@ mod tests {
         // Choosing the backend and not finishing the setting is an ordinary
         // half-done state, and the transcription that has always worked is a
         // better answer than an error.
-        assert_eq!(resolve("remote", None, None, None, None, None), Backend::Local);
-        assert_eq!(resolve("remote", Some("   "), None, None, None, None), Backend::Local);
+        assert_eq!(resolve("remote", None, None, None, None, None, None), Backend::Local);
+        assert_eq!(resolve("remote", Some("   "), None, None, None, None, None), Backend::Local);
     }
 
     #[test]
@@ -268,14 +305,14 @@ mod tests {
         // Otherwise the first sign of trouble is a confusing request error
         // rather than a setting that was never valid.
         assert_eq!(
-            resolve("remote", Some("192.168.32.223:8010"), None, None, None, None),
+            resolve("remote", Some("192.168.32.223:8010"), None, None, None, None, None),
             Backend::Local
         );
     }
 
     #[test]
     fn an_absent_api_key_stays_absent() {
-        let b = resolve("remote", Some("http://x:8010"), Some("  "), None, None, None);
+        let b = resolve("remote", Some("http://x:8010"), Some("  "), None, None, None, None);
         assert!(matches!(b, Backend::Remote { api_key: None, .. }));
     }
 
@@ -283,7 +320,7 @@ mod tests {
     fn streaming_is_recognised_and_resolves() {
         assert_eq!(BackendKind::from_setting("streaming"), BackendKind::Streaming);
         assert_eq!(
-            resolve("streaming", None, None, None, Some("ws://192.168.32.223:8080/"), None),
+            resolve("streaming", None, None, None, Some("ws://192.168.32.223:8080/"), None, None),
             Backend::Streaming {
                 ws_url: "ws://192.168.32.223:8080".into()
             }
@@ -297,7 +334,7 @@ mod tests {
         // one sends audio continuously while recording.
         for url in [None, Some("  "), Some("192.168.32.223:8080"), Some("http://x:8080")] {
             assert_eq!(
-                resolve("streaming", None, None, None, url, None),
+                resolve("streaming", None, None, None, url, None, None),
                 Backend::Local,
                 "{url:?}"
             );
@@ -309,7 +346,7 @@ mod tests {
         // The diarizer infers the count. A zero or unparseable cap should
         // leave it to do that rather than constrain it to nothing.
         for v in ["0", "-3", "lots", ""] {
-            let b = resolve("remote", Some("http://x:8010"), None, Some(v), None, None);
+            let b = resolve("remote", Some("http://x:8010"), None, Some(v), None, None, None);
             assert!(
                 matches!(b, Backend::Remote { max_speakers: None, .. }),
                 "{v:?}"
@@ -336,7 +373,7 @@ mod openai_backend_tests {
         // machine on its own.
         for url in ["", "   ", "192.168.32.13:8011", "ws://host:8011"] {
             assert_eq!(
-                resolve("openai", Some(url), None, None, None, None),
+                resolve("openai", Some(url), None, None, None, None, None),
                 Backend::Local,
                 "{url:?}"
             );
@@ -347,7 +384,7 @@ mod openai_backend_tests {
     fn a_blank_model_becomes_the_default_rather_than_an_empty_field() {
         // The endpoint requires a model name; sending an empty one is a 400
         // the user cannot interpret.
-        let b = resolve("openai", Some("http://192.168.32.13:8011"), None, None, None, Some("  "));
+        let b = resolve("openai", Some("http://192.168.32.13:8011"), None, None, None, Some("  "), None);
         match b {
             Backend::OpenAi { model, .. } => assert_eq!(model, DEFAULT_OPENAI_MODEL),
             other => panic!("expected OpenAi, got {other:?}"),
@@ -356,7 +393,7 @@ mod openai_backend_tests {
 
     #[test]
     fn a_trailing_slash_does_not_become_a_double_slash_in_the_path() {
-        let b = resolve("openai", Some("http://host:8011/"), None, None, None, None);
+        let b = resolve("openai", Some("http://host:8011/"), None, None, None, None, None);
         match b {
             Backend::OpenAi { base_url, .. } => assert_eq!(base_url, "http://host:8011"),
             other => panic!("expected OpenAi, got {other:?}"),

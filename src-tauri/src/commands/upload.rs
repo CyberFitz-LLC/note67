@@ -182,6 +182,7 @@ pub async fn transcribe_uploaded_audio(
             .ok()
             .flatten()
             .as_deref(),
+        None,
     );
 
     if let crate::transcription::backend::Backend::Remote {
