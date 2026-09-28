@@ -68,20 +68,37 @@ jobs:
           scripts\windows\build.ps1 -Backend vulkan -Profile core `
             -BuildDir "${{ github.workspace }}\build\windows-vulkan"
 
-      - name: Prove the binary runs and knows the V3 diarizer
-        # A binary that builds but cannot name the new model would silently
-        # fall back to Sortformer V2 — the thing this build exists to replace.
+      - name: Package bin and share
+        # The binary finds its model index at <exe>\..\share\nemo-speech\
+        # model-index.json. The first artifact shipped bin\ alone and could not
+        # resolve a single model by name, because the check below ran inside
+        # the source checkout where the index happens to sit. So the package is
+        # assembled separately, and checked from somewhere the source is not.
         shell: pwsh
         run: |
-          $exe = "build\windows-vulkan\bin\nemo-speech.exe"
+          $pkg = Join-Path $env:RUNNER_TEMP 'nemo-speech'
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item -Recurse build\windows-vulkan\bin (Join-Path $pkg 'bin')
+          Copy-Item -Recurse build\windows-vulkan\share (Join-Path $pkg 'share')
+          Get-ChildItem -Recurse $pkg | Select-Object -ExpandProperty FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "NEMO_SPEECH_PKG=$pkg"
+
+      - name: Prove the packaged binary knows the V3 diarizer
+        # A binary that cannot name the new model would silently fall back to
+        # Sortformer V2 — the thing this build exists to replace. Run from the
+        # package, with cwd outside the checkout, so a missing file fails here.
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          $exe = Join-Path $env:NEMO_SPEECH_PKG 'bin\nemo-speech.exe'
           & $exe --version
           $list = & $exe model list | Out-String
           $list
-          if ($list -notmatch 'Nemotron-3-Diarization') { throw 'model index does not list Nemotron-3-Diarization' }
+          if ($list -notmatch 'Nemotron-3-Diarization') { throw 'packaged model index does not list Nemotron-3-Diarization' }
 
       - name: Upload runtime
         uses: actions/upload-artifact@v4
         with:
           name: nemo-speech-windows-vulkan-${{ env.NEMO_SPEECH_REF }}
-          path: build/windows-vulkan/bin/
+          path: ${{ env.NEMO_SPEECH_PKG }}
           retention-days: 30
