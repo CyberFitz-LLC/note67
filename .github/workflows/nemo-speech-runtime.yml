@@ -50,15 +50,21 @@ jobs:
             if (-not (Get-Command $tool.Key -ErrorAction SilentlyContinue)) { $packages += $tool.Value }
           }
           choco install -y --no-progress @packages
-          $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-          $user = [Environment]::GetEnvironmentVariable('Path', 'User')
-          "$machine;$user" -split ';' | Where-Object { $_ } | ForEach-Object { Add-Content -Path $env:GITHUB_PATH -Value $_ }
+          # Deliberately NOT republishing the machine/user PATH to GITHUB_PATH,
+          # though upstream's job does. build.ps1 already prepends machine+user
+          # to the process PATH, so republishing carries three copies. On a
+          # GitHub-hosted runner, whose PATH is long to begin with, that passes
+          # cmd.exe's 8191-character limit, vcvars64.bat fails with its output
+          # discarded, and the build dies on "cl not on PATH".
           $vulkan = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
           if ($vulkan) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$vulkan" }
 
       - name: Configure and build
         shell: pwsh
         run: |
+          $m = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $u = [Environment]::GetEnvironmentVariable('Path', 'User')
+          Write-Host "PATH length the build will see: $(("$m;$u;$env:Path").Length) (cmd.exe limit 8191)"
           scripts\windows\build.ps1 -Backend vulkan -Profile core `
             -BuildDir "${{ github.workspace }}\build\windows-vulkan"
 
