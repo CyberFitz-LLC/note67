@@ -2,6 +2,7 @@ pub mod live_stream;
 pub mod live;
 pub mod model;
 pub mod backend;
+pub mod nemo;
 pub mod openai;
 pub mod remote;
 pub mod streaming;
