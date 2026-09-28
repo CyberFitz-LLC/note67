@@ -1,0 +1,81 @@
+# Build the NeMo-Speech.cpp runtime that the local recogniser backend spawns.
+#
+# Not part of the app build and not bundled: the installer stays ~20 MB and the
+# runtime is fetched separately, like a Whisper model. This exists because
+# NVIDIA's v0.1.0 release predates Nemotron-3 Diarization (upstream #50, made
+# the default in #52), and upstream CI builds Windows binaries on every main
+# push without publishing them. So we build the exact commit ourselves.
+#
+# Mirrors upstream's own windows-vulkan job (.github/workflows/gpu.yml) rather
+# than inventing a build: same script, same profile, same prerequisites.
+name: nemo-speech runtime
+
+on:
+  push:
+    branches: [build/nemo-speech-v3]
+    paths: [.github/workflows/nemo-speech-runtime.yml]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: NeMo-Speech.cpp commit to build
+        default: 97a15afa5caa9bce5baaa86c1184103877af4101
+
+env:
+  # 97a15af = "make Nemotron 3 Diarization the default diarizer" (#52).
+  NEMO_SPEECH_REF: ${{ inputs.ref || '97a15afa5caa9bce5baaa86c1184103877af4101' }}
+
+jobs:
+  windows-vulkan:
+    # Vulkan, not CUDA: one binary drives the NVIDIA, Intel and AMD GPUs across
+    # the fleet, needs no CUDA runtime DLLs, and matches how Note67 itself ships.
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout NeMo-Speech.cpp at the pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/NeMo-Speech.cpp
+          ref: ${{ env.NEMO_SPEECH_REF }}
+          persist-credentials: false
+
+      - name: Initialize submodules
+        run: git submodule update --init --depth 1 ggml llama.cpp
+
+      - name: Install build prerequisites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @('vulkan-sdk')
+          foreach ($tool in @{ cmake = 'cmake'; ninja = 'ninja'; python = 'python' }.GetEnumerator()) {
+            if (-not (Get-Command $tool.Key -ErrorAction SilentlyContinue)) { $packages += $tool.Value }
+          }
+          choco install -y --no-progress @packages
+          $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+          "$machine;$user" -split ';' | Where-Object { $_ } | ForEach-Object { Add-Content -Path $env:GITHUB_PATH -Value $_ }
+          $vulkan = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine')
+          if ($vulkan) { Add-Content -Path $env:GITHUB_ENV -Value "VULKAN_SDK=$vulkan" }
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          scripts\windows\build.ps1 -Backend vulkan -Profile core `
+            -BuildDir "${{ github.workspace }}\build\windows-vulkan"
+
+      - name: Prove the binary runs and knows the V3 diarizer
+        # A binary that builds but cannot name the new model would silently
+        # fall back to Sortformer V2 — the thing this build exists to replace.
+        shell: pwsh
+        run: |
+          $exe = "build\windows-vulkan\bin\nemo-speech.exe"
+          & $exe --version
+          $list = & $exe model list | Out-String
+          $list
+          if ($list -notmatch 'Nemotron-3-Diarization') { throw 'model index does not list Nemotron-3-Diarization' }
+
+      - name: Upload runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: nemo-speech-windows-vulkan-${{ env.NEMO_SPEECH_REF }}
+          path: build/windows-vulkan/bin/
+          retention-days: 30
