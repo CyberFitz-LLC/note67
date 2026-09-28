@@ -223,12 +223,20 @@ export function TranscriptionBackendSettings({
             "Speaker model",
             draft.nemoDiarModel,
             (nemoDiarModel) => setDraft({ ...draft, nemoDiarModel }),
-            "sortformer — type off to disable speaker separation",
+            "leave empty for the runtime's default — type off to disable",
+          )}
+          {field(
+            "Device",
+            draft.nemoDevice,
+            (nemoDevice) => setDraft({ ...draft, nemoDevice }),
+            "leave empty to use the discrete GPU — or e.g. vulkan:1, cpu",
           )}
 
           <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
             Models download themselves the first time they are used, to this
-            computer's cache. Nothing is sent anywhere.
+            computer's cache. Nothing is sent anywhere. Left empty, the device
+            is the discrete graphics card — on a laptop that also has Intel
+            graphics, that is the difference between minutes and hours.
           </p>
         </div>
       )}

@@ -97,6 +97,10 @@ pub enum Backend {
         /// `None` turns diarization off, which makes this strictly worse than
         /// the Whisper path it replaces — so it is only ever None deliberately.
         diar_model: Option<String>,
+        /// `None` means "ask the runtime which GPU is discrete". Left to
+        /// itself the runtime takes device 0, which is the iGPU on every
+        /// Precision in the fleet.
+        device: Option<String>,
     },
     OpenAi {
         base_url: String,
@@ -126,7 +130,7 @@ pub fn resolve(
     max_speakers: Option<&str>,
     stream_url: Option<&str>,
     openai_model: Option<&str>,
-    nemo: Option<(&str, &str, &str)>,
+    nemo: Option<(&str, &str, &str, &str)>,
 ) -> Backend {
     match BackendKind::from_setting(kind) {
         BackendKind::Local => Backend::Local,
@@ -142,7 +146,7 @@ pub fn resolve(
             }
         }
         BackendKind::LocalNemo => {
-            let (exe, asr, diar) = nemo.unwrap_or(("", "", ""));
+            let (exe, asr, diar, device) = nemo.unwrap_or(("", "", "", ""));
             Backend::LocalNemo {
                 // Unlike the remote backends there is no URL to get wrong, so
                 // there is nothing to fall back from: a blank path just means
@@ -160,6 +164,7 @@ pub fn resolve(
                     else if d.is_empty() { Some(super::nemo::DEFAULT_DIAR_MODEL.to_string()) }
                     else { Some(d.to_string()) }
                 },
+                device: Some(device.trim()).filter(|d| !d.is_empty()).map(str::to_string),
             }
         }
         BackendKind::OpenAi => {

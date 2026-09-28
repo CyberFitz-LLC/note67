@@ -13,6 +13,7 @@ export const OPENAI_MODEL_KEY = "transcription_openai_model";
 export const NEMO_PATH_KEY = "transcription_nemo_path";
 export const NEMO_ASR_MODEL_KEY = "transcription_nemo_asr_model";
 export const NEMO_DIAR_MODEL_KEY = "transcription_nemo_diar_model";
+export const NEMO_DEVICE_KEY = "transcription_nemo_device";
 
 export interface TranscriptionConfig {
   backend: TranscriptionBackend;
@@ -24,6 +25,7 @@ export interface TranscriptionConfig {
   nemoPath: string;
   nemoAsrModel: string;
   nemoDiarModel: string;
+  nemoDevice: string;
 }
 
 export const DEFAULT_CONFIG: TranscriptionConfig = {
@@ -36,6 +38,7 @@ export const DEFAULT_CONFIG: TranscriptionConfig = {
   nemoPath: "",
   nemoAsrModel: "",
   nemoDiarModel: "",
+  nemoDevice: "",
 };
 
 /**
@@ -126,6 +129,7 @@ export function useTranscriptionBackend() {
         NEMO_PATH_KEY,
         NEMO_ASR_MODEL_KEY,
         NEMO_DIAR_MODEL_KEY,
+        NEMO_DEVICE_KEY,
       ])
       .then((values) => {
         if (cancelled) return;
@@ -142,6 +146,7 @@ export function useTranscriptionBackend() {
           nemoPath: values[NEMO_PATH_KEY] ?? "",
           nemoAsrModel: values[NEMO_ASR_MODEL_KEY] ?? "",
           nemoDiarModel: values[NEMO_DIAR_MODEL_KEY] ?? "",
+          nemoDevice: values[NEMO_DEVICE_KEY] ?? "",
         });
       })
       .catch((e) => {
@@ -169,6 +174,7 @@ export function useTranscriptionBackend() {
       await settingsApi.set(NEMO_PATH_KEY, next.nemoPath.trim());
       await settingsApi.set(NEMO_ASR_MODEL_KEY, next.nemoAsrModel.trim());
       await settingsApi.set(NEMO_DIAR_MODEL_KEY, next.nemoDiarModel.trim());
+      await settingsApi.set(NEMO_DEVICE_KEY, next.nemoDevice.trim());
       setConfig(next);
       return true;
     } catch (e) {

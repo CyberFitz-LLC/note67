@@ -25,13 +25,21 @@ use super::transcriber::{TranscriptionResult, TranscriptionSegment};
 pub const NEMO_PATH_KEY: &str = "transcription_nemo_path";
 pub const NEMO_ASR_MODEL_KEY: &str = "transcription_nemo_asr_model";
 pub const NEMO_DIAR_MODEL_KEY: &str = "transcription_nemo_diar_model";
+pub const NEMO_DEVICE_KEY: &str = "transcription_nemo_device";
 
 /// What to ask for when nothing is configured.
 ///
 /// Indexed names rather than paths: the CLI resolves them against its own
 /// cache and fetches what is missing, with a SHA-256 check it performs itself.
 pub const DEFAULT_ASR_MODEL: &str = "nemotron-3.5";
-pub const DEFAULT_DIAR_MODEL: &str = "sortformer";
+/// Empty means "the runtime's own default diarizer", and is deliberate.
+///
+/// Naming a model here would pin it. "sortformer" still resolves to Sortformer
+/// V2 even on builds whose default is Nemotron-3 Diarization — and V2 split a
+/// single speaker's microphone into two voices where Nemotron-3 found one. So
+/// the default follows the runtime: V2 on the v0.1.0 release, Nemotron-3 on
+/// anything built from upstream #52 onwards.
+pub const DEFAULT_DIAR_MODEL: &str = "";
 
 /// How long one transcription may take.
 ///
@@ -163,7 +171,12 @@ pub fn parse_output(stdout: &str) -> Result<TranscriptionResult, NemoError> {
 ///
 /// Separated from running it so the shape can be tested without a binary on
 /// the machine.
-pub fn command_args(wav: &Path, asr_model: &str, diar_model: Option<&str>) -> Vec<String> {
+pub fn command_args(
+    wav: &Path,
+    asr_model: &str,
+    diar_model: Option<&str>,
+    device: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "transcribe".to_string(),
         wav.to_string_lossy().to_string(),
@@ -176,8 +189,16 @@ pub fn command_args(wav: &Path, asr_model: &str, diar_model: Option<&str>) -> Ve
     // the one thing this backend exists to provide.
     if let Some(d) = diar_model {
         args.push("--diarize".to_string());
-        args.push("--diar-model".to_string());
-        args.push(d.to_string());
+        // Only when one is named: passing a model pins it, and an empty name
+        // means "follow the runtime's default".
+        if !d.trim().is_empty() {
+            args.push("--diar-model".to_string());
+            args.push(d.trim().to_string());
+        }
+    }
+    if let Some(dev) = device.map(str::trim).filter(|d| !d.is_empty()) {
+        args.push("--device".to_string());
+        args.push(dev.to_string());
     }
     args
 }
@@ -186,6 +207,45 @@ pub fn command_args(wav: &Path, asr_model: &str, diar_model: Option<&str>) -> Ve
 ///
 /// A configured path wins; otherwise the name is left for the OS to resolve on
 /// PATH, which is where the official installer puts it.
+/// Choose the discrete GPU from `nemo-speech --json doctor`.
+///
+/// Left to itself the runtime picks device 0, and on every Precision in this
+/// fleet device 0 is the Intel iGPU. Measured on a 30-minute recording: 6,747 s
+/// on the iGPU against 313 s on the Quadro — slower than real time, so an hour
+/// of meeting would take four and load the machine the whole way.
+///
+/// Chosen by the `type` the runtime reports rather than by index, because the
+/// enumeration order is the machine's and not ours. `None` when there is no
+/// discrete GPU, which leaves the runtime's own choice in place.
+pub fn discrete_device(doctor_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(doctor_json.trim()).ok()?;
+    v.get("devices")?.as_array()?.iter().find_map(|d| {
+        if d.get("type")?.as_str()? != "gpu" {
+            return None;
+        }
+        // "Vulkan1" -> "vulkan:1", "CUDA0" -> "cuda:0": the CLI's own spelling.
+        let name = d.get("name")?.as_str()?;
+        let split = name.find(|c: char| c.is_ascii_digit())?;
+        let (backend, index) = name.split_at(split);
+        let backend = backend.to_ascii_lowercase();
+        (matches!(backend.as_str(), "vulkan" | "cuda") && index.chars().all(|c| c.is_ascii_digit()))
+            .then(|| format!("{backend}:{index}"))
+    })
+}
+
+/// Ask the runtime which GPU is discrete. Any failure falls back to `None`,
+/// the runtime's own choice — a slow transcription is better than none.
+pub async fn detect_device(exe: &Path) -> Option<String> {
+    let out = tokio::process::Command::new(exe)
+        .args(["--json", "doctor"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    discrete_device(&String::from_utf8_lossy(&out.stdout))
+}
+
 pub fn resolve_exe(configured: Option<&str>) -> PathBuf {
     match configured.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
@@ -204,12 +264,13 @@ pub async fn transcribe(
     wav: &Path,
     asr_model: &str,
     diar_model: Option<&str>,
+    device: Option<&str>,
 ) -> Result<TranscriptionResult, NemoError> {
     if !wav.exists() {
         return Err(NemoError::Audio(format!("{} does not exist", wav.display())));
     }
 
-    let args = command_args(wav, asr_model, diar_model);
+    let args = command_args(wav, asr_model, diar_model, device);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(TIMEOUT_SECS),
         tokio::process::Command::new(exe)
@@ -313,10 +374,10 @@ mod tests {
     fn diarization_is_requested_explicitly() {
         // Without --diarize the CLI returns no speakers at all, which is the
         // entire reason this backend exists.
-        let args = command_args(Path::new("/tmp/a.wav"), "nemotron-3.5", Some("sortformer"));
+        let args = command_args(Path::new("/tmp/a.wav"), "nemotron-3.5", Some("sortformer"), None);
         assert!(args.contains(&"--diarize".to_string()));
         assert!(args.contains(&"json".to_string()));
-        let plain = command_args(Path::new("/tmp/a.wav"), "nemotron-3.5", None);
+        let plain = command_args(Path::new("/tmp/a.wav"), "nemotron-3.5", None, None);
         assert!(!plain.contains(&"--diarize".to_string()));
     }
 
@@ -332,5 +393,55 @@ mod tests {
         let words = [w("a", 9.0, 3.0, Some(1))];
         let segs = segments_from_words(&words);
         assert!(segs[0].end_time >= segs[0].start_time);
+    }
+
+    /// Verbatim device list from the runtime on JOHNS-EXTRA15.
+    const DOCTOR: &str = r#"{"devices":[
+        {"index":0,"name":"Vulkan0","type":"integrated-gpu","description":"Intel(R) UHD Graphics P630"},
+        {"index":1,"name":"Vulkan1","type":"gpu","description":"Quadro RTX 5000 with Max-Q Design"},
+        {"index":2,"name":"CPU","type":"cpu","description":"Intel(R) Xeon(R) W-10855M"}]}"#;
+
+    #[test]
+    fn the_discrete_gpu_is_chosen_over_the_integrated_one_listed_first() {
+        // Device 0 is the iGPU on every Precision in the fleet, and running there
+        // was 21x slower — slower than real time.
+        assert_eq!(discrete_device(DOCTOR).as_deref(), Some("vulkan:1"));
+    }
+
+    #[test]
+    fn a_machine_without_a_discrete_gpu_leaves_the_choice_to_the_runtime() {
+        let igpu_only = r#"{"devices":[{"name":"Vulkan0","type":"integrated-gpu"},{"name":"CPU","type":"cpu"}]}"#;
+        assert_eq!(discrete_device(igpu_only), None);
+    }
+
+    #[test]
+    fn a_cuda_build_is_spelled_the_way_the_cli_expects() {
+        let cuda = r#"{"devices":[{"name":"CUDA0","type":"gpu"}]}"#;
+        assert_eq!(discrete_device(cuda).as_deref(), Some("cuda:0"));
+    }
+
+    #[test]
+    fn unreadable_doctor_output_falls_back_rather_than_failing() {
+        for bad in ["", "not json", r#"{"devices":"nope"}"#, r#"{"devices":[{"type":"gpu"}]}"#] {
+            assert_eq!(discrete_device(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_diarizer_is_not_pinned() {
+        // Naming "sortformer" would force V2 even on a build whose default is
+        // Nemotron-3 — the model that got a one-person mic track right.
+        let args = command_args(Path::new("/tmp/a.wav"), "nemotron-3.5", Some(DEFAULT_DIAR_MODEL), None);
+        assert!(args.contains(&"--diarize".to_string()));
+        assert!(!args.contains(&"--diar-model".to_string()));
+    }
+
+    #[test]
+    fn a_chosen_device_reaches_the_command_line() {
+        let args = command_args(Path::new("/tmp/a.wav"), "m", None, Some("vulkan:1"));
+        let i = args.iter().position(|a| a == "--device").expect("--device passed");
+        assert_eq!(args[i + 1], "vulkan:1");
+        let none = command_args(Path::new("/tmp/a.wav"), "m", None, Some("  "));
+        assert!(!none.contains(&"--device".to_string()));
     }
 }

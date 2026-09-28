@@ -719,6 +719,7 @@ pub(crate) enum Recogniser<'a> {
         exe: std::path::PathBuf,
         asr_model: &'a str,
         diar_model: Option<&'a str>,
+        device: Option<String>,
     },
     /// An OpenAI-compatible endpoint — vLLM, SGLang. One synchronous request.
     OpenAi {
@@ -790,7 +791,7 @@ impl<'a> Recogniser<'a> {
         max_speakers: Option<u32>,
     ) -> Result<crate::transcription::transcriber::TranscriptionResult, String> {
         match self {
-            Recogniser::LocalNemo { exe, asr_model, diar_model } => {
+            Recogniser::LocalNemo { exe, asr_model, diar_model, device } => {
                 // The CLI rejects FLAC, so stored audio is decoded to a WAV
                 // beside it. During a recording this costs nothing — the
                 // recorder writes WAV and only compacts to FLAC afterwards.
@@ -810,7 +811,7 @@ impl<'a> Recogniser<'a> {
                 let _ = std::fs::remove_file(&src);
                 decoded?;
                 let out = crate::transcription::nemo::transcribe(
-                    exe, &tmp, asr_model, *diar_model,
+                    exe, &tmp, asr_model, *diar_model, device.as_deref(),
                 )
                 .await
                 .map_err(|e| e.to_string());
@@ -1106,6 +1107,7 @@ pub async fn retranscribe_note(
                 &get(crate::transcription::nemo::NEMO_PATH_KEY).unwrap_or_default(),
                 &get(crate::transcription::nemo::NEMO_ASR_MODEL_KEY).unwrap_or_default(),
                 &get(crate::transcription::nemo::NEMO_DIAR_MODEL_KEY).unwrap_or_default(),
+                &get(crate::transcription::nemo::NEMO_DEVICE_KEY).unwrap_or_default(),
             )),
         )
     };
@@ -1121,11 +1123,20 @@ pub async fn retranscribe_note(
                 api_key: api_key.as_deref(),
             })
         }
-        crate::transcription::backend::Backend::LocalNemo { exe, asr_model, diar_model } => {
+        crate::transcription::backend::Backend::LocalNemo { exe, asr_model, diar_model, device } => {
+            let exe = crate::transcription::nemo::resolve_exe(Some(exe));
+            // Asked once per run, not per file: the answer does not change
+            // mid-retranscribe and the check spawns the runtime.
+            let device = match device {
+                Some(d) => Some(d.clone()),
+                None => crate::transcription::nemo::detect_device(&exe).await,
+            };
+            println!("[retranscribe] local recogniser device: {}", device.as_deref().unwrap_or("runtime default"));
             Some(Recogniser::LocalNemo {
-                exe: crate::transcription::nemo::resolve_exe(Some(exe)),
+                exe,
                 asr_model,
                 diar_model: diar_model.as_deref(),
+                device,
             })
         }
         crate::transcription::backend::Backend::OpenAi { base_url, api_key, model } => {
