@@ -81,25 +81,23 @@ sha2 = "0.10"
 
 # EXOCHAIN, for emitting meeting receipts.
 #
-# Pinned to `main`, NOT to the ceremony commit the App Registry mints against.
-# The two are different revisions on purpose: the ceremony commit has no
-# `avc_action_signature_payload` — the function that says what a subject signs —
-# and the deployed node runs the newer crate. A credential minted at the
-# ceremony commit deserializes into these types and its payload builds, which
-# is verified rather than assumed.
+# Pinned to the v0.3.1 release tag commit (3d0941be), which is what the
+# production node reports from /health. v0.3.1 enforces action names against
+# the credential's objectives and jurisdictions, and returns 200 with a signed
+# Deny receipt for a refusal; src/exochain/emit.rs handles both. A credential
+# minted by the App Registry deserializes into these types and its payload
+# builds, which is verified by test rather than assumed.
 #
-# The crates were renamed (exo-avc -> exochain-avc) between the two, hence the
-# `package` keys.
-exochain-avc = { package = "exochain-avc", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
-exochain-core = { package = "exochain-core", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
-exochain-authority = { package = "exochain-authority", git = "https://github.com/exochain/exochain.git", rev = "86e9a029b7a6" }
+# The packages are published as exochain-* (their source dirs are exo-*),
+# hence the `package` keys.
+exochain-avc = { package = "exochain-avc", git = "https://github.com/exochain/exochain.git", rev = "3d0941beee2a60e3f226da2b35f9b958ba37112f" }
+exochain-core = { package = "exochain-core", git = "https://github.com/exochain/exochain.git", rev = "3d0941beee2a60e3f226da2b35f9b958ba37112f" }
+exochain-authority = { package = "exochain-authority", git = "https://github.com/exochain/exochain.git", rev = "3d0941beee2a60e3f226da2b35f9b958ba37112f" }
 
-# ml-dsa 0.1.0-rc.7 was written against the pre-release RustCrypto stack, and
-# cargo will not select a pre-release on its own. Without these the released
-# pkcs8 0.11.0 is chosen and the build fails on trait impls that exist only in
-# the -rc line. This is what the AVC workspace's committed lock encodes.
-pkcs8 = "=0.11.0-rc.11"
-spki = "=0.8.0-rc.4"
+# The pkcs8/spki pre-release pins this used to carry are gone: from v0.3.1,
+# ml-dsa 0.1.0-rc.7 no longer depends on pkcs8 at all (checked against
+# exochain's own Cargo.lock and `cargo tree -i`), so nothing pulled them in but
+# the pins themselves.
 
 # macOS-specific dependencies for system audio capture via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]

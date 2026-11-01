@@ -44,6 +44,12 @@ Without them cargo takes released `pkcs8 0.11.0` / `spki 0.8.0`, and `ml-dsa
 0.1.0-rc.7` fails against trait impls that exist only in the `-rc` line. Verified
 from a clean two-dependency crate.
 
+> **2026-11-01, exochain v0.3.1:** the pins are gone. At v0.3.1 `ml-dsa
+> 0.1.0-rc.7` no longer depends on `pkcs8`, so nothing but the pins pulled the
+> `-rc` line in. v0.3.1 also changes the emit contract — `action_name` must be
+> `<allowed-objective>[:…]@<jurisdiction>` from the credential, and a refusal
+> comes back as `200` with a signed `Deny` receipt. See `src/exochain/emit.rs`.
+
 **The DID derivation does not need swapping.** Note67's implementation, written
 against the spec because the crate would not build, produces a byte-identical
 DID to `exo_identity::did::did_from_public_key` — verified against the pinned
